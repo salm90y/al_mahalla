@@ -157,23 +157,52 @@ object ZegoCallManager {
     }
 
     /**
-     * Start publishing audio when user activates Walkie-Talkie Intercom
+     * Start publishing audio when user activates Walkie-Talkie Intercom (On-demand with explicit permission)
      */
-    fun startPublishingAudio(roomId: String, userId: String) {
+    fun startPublishingAudio(context: Context? = null, roomId: String, userId: String) {
+        val safeRoomId = roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").ifEmpty { "room_${Math.abs(roomId.hashCode())}" }.take(64)
+        val safeUserId = userId.replace(Regex("[^a-zA-Z0-9_]"), "_").ifEmpty { "u_${Math.abs(userId.hashCode())}" }.take(64)
+        val streamId = "s_${safeRoomId}_${safeUserId}"
+
+        val engine = zegoEngine
+        if (engine == null && context != null) {
+            initEngine(context) { success ->
+                if (success && zegoEngine != null) {
+                    try {
+                        val eg = zegoEngine ?: return@initEngine
+                        val user = ZegoUser(safeUserId, safeUserId)
+                        val roomConfig = ZegoRoomConfig().apply { isUserStatusNotify = true }
+                        eg.loginRoom(safeRoomId, user, roomConfig)
+                        eg.muteMicrophone(false)
+                        isMicMuted.set(false)
+                        if (!isPublishing.get()) {
+                            eg.startPublishingStream(streamId)
+                            isPublishing.set(true)
+                        }
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "startPublishingAudio deferred error: ${e.message}")
+                    }
+                }
+            }
+            return
+        }
+
         try {
-            val engine = zegoEngine ?: return
-            val safeRoomId = roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").ifEmpty { "room_${Math.abs(roomId.hashCode())}" }.take(64)
-            val safeUserId = userId.replace(Regex("[^a-zA-Z0-9_]"), "_").ifEmpty { "u_${Math.abs(userId.hashCode())}" }.take(64)
-            val streamId = "s_${safeRoomId}_${safeUserId}"
-            engine.muteMicrophone(false)
-            isMicMuted.set(false)
-            if (!isPublishing.get()) {
-                engine.startPublishingStream(streamId)
-                isPublishing.set(true)
+            if (engine != null) {
+                engine.muteMicrophone(false)
+                isMicMuted.set(false)
+                if (!isPublishing.get()) {
+                    engine.startPublishingStream(streamId)
+                    isPublishing.set(true)
+                }
             }
         } catch (e: Throwable) {
             Log.w(TAG, "startPublishingAudio error: ${e.message}")
         }
+    }
+
+    fun startPublishingAudio(roomId: String, userId: String) {
+        startPublishingAudio(null, roomId, userId)
     }
 
     /**

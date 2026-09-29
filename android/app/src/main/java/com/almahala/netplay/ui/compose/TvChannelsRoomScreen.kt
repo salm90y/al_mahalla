@@ -219,7 +219,7 @@ fun TvChannelsRoomScreen(
     ) { isGranted ->
         if (isGranted) {
             isIntercomTalking = true
-            ZegoCallManager.startPublishingAudio(zegoAudioRoomId, currentUserId)
+            ZegoCallManager.startPublishingAudio(context, zegoAudioRoomId, currentUserId)
             ZegoCallManager.setSpeakerEnabled(context, true)
             Toast.makeText(context, "الميكروفون قيد البث الآن 🎙️", Toast.LENGTH_SHORT).show()
         } else {
@@ -235,7 +235,7 @@ fun TvChannelsRoomScreen(
             val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             if (hasPerm) {
                 isIntercomTalking = true
-                ZegoCallManager.startPublishingAudio(zegoAudioRoomId, currentUserId)
+                ZegoCallManager.startPublishingAudio(context, zegoAudioRoomId, currentUserId)
                 ZegoCallManager.setSpeakerEnabled(context, true)
             } else {
                 recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -243,21 +243,13 @@ fun TvChannelsRoomScreen(
         }
     }
 
-    LaunchedEffect(zegoAudioRoomId) {
-        try {
-            ZegoCallManager.joinWatchParty(
-                context = context,
-                roomId = zegoAudioRoomId,
-                userId = currentUserId,
-                userName = currentUserName
-            )
-        } catch (_: Throwable) {}
-    }
-
     DisposableEffect(roomId, zegoAudioRoomId) {
         onDispose {
             try {
-                ZegoCallManager.endCall(context, zegoAudioRoomId)
+                if (isIntercomTalking) {
+                    ZegoCallManager.stopPublishingAudio()
+                    ZegoCallManager.endCall(context, zegoAudioRoomId)
+                }
                 webViewRef?.destroy()
                 webViewRef = null
             } catch (_: Throwable) {}
@@ -445,7 +437,8 @@ fun TvChannelsRoomScreen(
                 ) {
                     AndroidView(
                         factory = { ctx ->
-                            WebView(ctx).apply {
+                            try {
+                                WebView(ctx).apply {
                                 try {
                                     val cookieMgr = CookieManager.getInstance()
                                     cookieMgr.setAcceptCookie(true)
@@ -547,10 +540,17 @@ fun TvChannelsRoomScreen(
                                 loadDataWithBaseURL("https://tv.almahala.com", playerHtml, "text/html", "UTF-8", null)
                                 webViewRef = this
                             }
-                        },
-                        update = { webView ->
+                        } catch (_: Throwable) {
+                            android.view.View(ctx).apply {
+                                setBackgroundColor(android.graphics.Color.BLACK)
+                            }
+                        }
+                    },
+                    update = { webView ->
+                        if (webView is WebView) {
                             webViewRef = webView
-                        },
+                        }
+                    },
                         modifier = Modifier.fillMaxSize()
                     )
 

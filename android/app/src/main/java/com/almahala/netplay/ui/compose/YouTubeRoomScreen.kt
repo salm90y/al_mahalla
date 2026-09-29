@@ -209,10 +209,15 @@ fun YouTubeRoomScreen(
     // Disable click sound effects globally in room
     val localView = androidx.compose.ui.platform.LocalView.current
     DisposableEffect(Unit) {
-        val prevSound = localView.isSoundEffectsEnabled
-        localView.isSoundEffectsEnabled = false
+        var prevSound = true
+        try {
+            prevSound = localView.isSoundEffectsEnabled
+            localView.isSoundEffectsEnabled = false
+        } catch (_: Throwable) {}
         onDispose {
-            localView.isSoundEffectsEnabled = prevSound
+            try {
+                localView.isSoundEffectsEnabled = prevSound
+            } catch (_: Throwable) {}
         }
     }
 
@@ -466,7 +471,7 @@ fun YouTubeRoomScreen(
     ) { isGranted ->
         if (isGranted) {
             isIntercomTalking = true
-            ZegoCallManager.startPublishingAudio(zegoAudioRoomId, currentUserId)
+            ZegoCallManager.startPublishingAudio(context, zegoAudioRoomId, currentUserId)
             ZegoCallManager.setMicrophoneMute(false)
             ZegoCallManager.setSpeakerEnabled(context, true)
             syncSocket.broadcastVoiceState(true)
@@ -517,7 +522,7 @@ fun YouTubeRoomScreen(
             val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             if (hasPerm) {
                 isIntercomTalking = true
-                ZegoCallManager.startPublishingAudio(zegoAudioRoomId, currentUserId)
+                ZegoCallManager.startPublishingAudio(context, zegoAudioRoomId, currentUserId)
                 ZegoCallManager.setSpeakerEnabled(context, true)
                 syncSocket.broadcastVoiceState(true)
             } else {
@@ -546,17 +551,6 @@ fun YouTubeRoomScreen(
         } catch (_: Throwable) {}
     }
 
-    LaunchedEffect(zegoAudioRoomId) {
-        try {
-            ZegoCallManager.joinWatchParty(
-                context = context,
-                roomId = zegoAudioRoomId,
-                userId = currentUserId,
-                userName = currentUserName
-            )
-        } catch (_: Throwable) {}
-    }
-
     // Periodic Heartbeat Sync: Host synchronizes playhead every 8 seconds to prevent any drift
     LaunchedEffect(isPlaying, isHost, isAppOwner) {
         if ((isHost || isAppOwner) && isPlaying) {
@@ -573,7 +567,10 @@ fun YouTubeRoomScreen(
         onDispose {
             try {
                 syncSocket.disconnect()
-                ZegoCallManager.endCall(context, zegoAudioRoomId)
+                if (isIntercomTalking) {
+                    ZegoCallManager.stopPublishingAudio()
+                    ZegoCallManager.endCall(context, zegoAudioRoomId)
+                }
                 RealVoipEngine.stopVoipSession(context)
                 webViewRef?.destroy()
                 webViewRef = null
@@ -749,7 +746,8 @@ fun YouTubeRoomScreen(
                 ) {
                     AndroidView(
                         factory = { ctx ->
-                            WebView(ctx).apply {
+                            try {
+                                WebView(ctx).apply {
                                 try {
                                     val cookieMgr = CookieManager.getInstance()
                                     cookieMgr.setAcceptCookie(true)
@@ -1052,10 +1050,17 @@ fun YouTubeRoomScreen(
                                 """.trimIndent()
                                 loadDataWithBaseURL("https://www.youtube.com", playerHtml, "text/html", "UTF-8", null)
                             }
-                        },
-                        update = { webView ->
+                        } catch (_: Throwable) {
+                            android.view.View(ctx).apply {
+                                setBackgroundColor(android.graphics.Color.BLACK)
+                            }
+                        }
+                    },
+                    update = { webView ->
+                        if (webView is WebView) {
                             webViewRef = webView
-                        },
+                        }
+                    },
                         modifier = Modifier.fillMaxSize()
                     )
                 }
