@@ -507,13 +507,13 @@ fun YouTubeRoomScreen(
     fun toggleIntercomWithPermission() {
         if (isIntercomTalking) {
             isIntercomTalking = false
-            ZegoCallManager.setMicrophoneMute(true)
+            ZegoCallManager.stopPublishingAudio()
             syncSocket.broadcastVoiceState(false)
         } else {
             val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             if (hasPerm) {
                 isIntercomTalking = true
-                ZegoCallManager.setMicrophoneMute(false)
+                ZegoCallManager.startPublishingAudio(zegoAudioRoomId, currentUserId)
                 ZegoCallManager.setSpeakerEnabled(context, true)
                 syncSocket.broadcastVoiceState(true)
             } else {
@@ -524,49 +524,33 @@ fun YouTubeRoomScreen(
 
     // Connect WebSocket and fetch authoritative initial state
     LaunchedEffect(roomId) {
-        syncSocket.connect()
-        YouTubeRoomManager.getRoomLatest(context, roomId) { latestRoom ->
-            if (latestRoom != null && latestRoom.videoId.isNotBlank()) {
-                currentVideo = YouTubeVideoItem(
-                    id = latestRoom.videoId,
-                    title = latestRoom.currentVideoTitle.ifBlank { "فيديو يوتيوب متزامن" },
-                    channelTitle = "مشاهدة متزامنة",
-                    duration = "مباشر",
-                    viewCount = "متزامن",
-                    publishedTime = "الآن",
-                    thumbnailUrl = latestRoom.thumbnailUrl.ifBlank { "https://img.youtube.com/vi/${latestRoom.videoId}/hqdefault.jpg" }
-                )
+        try {
+            syncSocket.connect()
+            YouTubeRoomManager.getRoomLatest(context, roomId) { latestRoom ->
+                if (latestRoom != null && latestRoom.videoId.isNotBlank()) {
+                    currentVideo = YouTubeVideoItem(
+                        id = latestRoom.videoId,
+                        title = latestRoom.currentVideoTitle.ifBlank { "فيديو يوتيوب متزامن" },
+                        channelTitle = "مشاهدة متزامنة",
+                        duration = "مباشر",
+                        viewCount = "متزامن",
+                        publishedTime = "الآن",
+                        thumbnailUrl = latestRoom.thumbnailUrl.ifBlank { "https://img.youtube.com/vi/${latestRoom.videoId}/hqdefault.jpg" }
+                    )
+                }
             }
-        }
+        } catch (_: Throwable) {}
     }
 
-    // REAL ZEGO WALKIE-TALKIE AUDIO ROOM INITIALIZATION WITH LOUDSPEAKER ROUTING
+    // REAL ZEGO WALKIE-TALKIE AUDIO ROOM INITIALIZATION IN SAFE AUDIENCE MODE
     val zegoAudioRoomId = remember(roomId) { "yt_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}" }
     LaunchedEffect(zegoAudioRoomId) {
         try {
-            // Enforce Loudspeaker on Android AudioManager immediately
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            try {
-                audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager?.isSpeakerphoneOn = true
-            } catch (_: Exception) {}
-
-            ZegoCallManager.startCall(
+            ZegoCallManager.joinWatchParty(
                 context = context,
                 roomId = zegoAudioRoomId,
                 userId = currentUserId,
-                userName = currentUserName,
-                isVideo = false,
-                isOutgoing = true,
-                onConnected = {
-                    try {
-                        ZegoCallManager.setMicrophoneMute(true)
-                        ZegoCallManager.setSpeakerEnabled(context, true)
-                    } catch (_: Exception) {}
-                },
-                onError = {
-                    // Fail silently for watch party audio so video continues smoothly
-                }
+                userName = currentUserName
             )
         } catch (_: Throwable) {}
     }

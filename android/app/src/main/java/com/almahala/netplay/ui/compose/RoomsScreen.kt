@@ -179,6 +179,11 @@ fun RoomsScreen(
                 navController.navigate("youtube_room")
                 return
             }
+            RoomType.TV_CHANNELS -> {
+                selectedRoomForExperience = null
+                navController.navigate("tv_lobby")
+                return
+            }
             RoomType.MOVIES_SERIES -> {
                 selectedRoomForExperience = null
                 navController.navigate("movies_lobby")

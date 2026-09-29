@@ -285,7 +285,21 @@ async function ensureAllTables(db: any) {
       created_at INTEGER NOT NULL,
       is_read INTEGER DEFAULT 0,
       is_delivered INTEGER DEFAULT 1
-    )`
+    )`,
+    `CREATE TABLE IF NOT EXISTS tv_channels (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      title TEXT NOT NULL,
+      category TEXT DEFAULT 'قنوات فضائية',
+      logo_url TEXT DEFAULT '',
+      stream_url TEXT NOT NULL,
+      epg_id TEXT DEFAULT '',
+      is_live INTEGER DEFAULT 1,
+      sort_order INTEGER DEFAULT 0,
+      created_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_tv_channels_name ON tv_channels(name)`,
+    `CREATE INDEX IF NOT EXISTS idx_tv_channels_cat ON tv_channels(category)`
   ];
   for (const q of queries) {
     try {
@@ -294,6 +308,42 @@ async function ensureAllTables(db: any) {
       // Ignored if already exists
     }
   }
+
+  // Auto-seed default TV channels from M3U IPTV catalog if table is empty
+  try {
+    const countCheck = await db.prepare("SELECT COUNT(*) as cnt FROM tv_channels").first();
+    if (countCheck && Number(countCheck.cnt) === 0) {
+      const defaultChannels = [
+        ['ch_bein_news', 'beIN SPORTS News', 'beIN SPORTS الإخبارية المفتوحة HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1508098682722-e99c43a406b2?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/501.m3u8', 1],
+        ['ch_bein_1', 'beIN SPORTS 1', 'beIN SPORTS 1 HD Premium', 'قنوات رياضية', 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/502.m3u8', 2],
+        ['ch_bein_2', 'beIN SPORTS 2', 'beIN SPORTS 2 HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/503.m3u8', 3],
+        ['ch_bein_3', 'beIN SPORTS 3', 'beIN SPORTS 3 HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/504.m3u8', 4],
+        ['ch_ssc_1', 'SSC 1 HD', 'قناة SSC الرياضية 1 HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1518091043644-c1d4457512c6?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/505.m3u8', 5],
+        ['ch_alkass_1', 'Alkass 1 HD', 'قناة الكأس القطرية 1 HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1508098682722-e99c43a406b2?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/506.m3u8', 6],
+        ['ch_ad_sports', 'Abu Dhabi Sports', 'قناة أبوظبي الرياضية 1 HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1518091043644-c1d4457512c6?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/507.m3u8', 7],
+        ['ch_quran', 'القرآن الكريم مباشر', 'قناة القرآن الكريم (مكة المكرمة مباشر)', 'قنوات إسلامية', 'https://images.unsplash.com/photo-1591604129939-f1efa4d9f7fa?w=600&auto=format&fit=crop&q=80', 'https://win.holol.com/live/quran/playlist.m3u8', 8],
+        ['ch_sunnah', 'السنة النبوية مباشر', 'قناة السنة النبوية (المدينة المنورة مباشر)', 'قنوات إسلامية', 'https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?w=600&auto=format&fit=crop&q=80', 'https://win.holol.com/live/sunnah/playlist.m3u8', 9],
+        ['ch_mbc_1', 'MBC 1 HD', 'قناة MBC 1 HD الرسمية', 'قنوات منوعة', 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/601.m3u8', 10],
+        ['ch_mbc_masr', 'MBC مصر HD', 'قناة MBC مصر HD', 'قنوات منوعة', 'https://images.unsplash.com/photo-1518791841217-8f162f1e1131?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/602.m3u8', 11],
+        ['ch_mbc_action', 'MBC Action HD', 'قناة MBC Action HD أفلام وحركة', 'قنوات ترفيهية', 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/603.m3u8', 12],
+        ['ch_mbc_drama', 'MBC Drama HD', 'قناة MBC Drama HD مسلسلات', 'قنوات ترفيهية', 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/604.m3u8', 13],
+        ['ch_jazeera', 'الجزيرة الإخبارية', 'قناة الجزيرة الإخبارية HD مباشر', 'قنوات إخبارية', 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80', 'https://live-hls-web-aje.akamaized.net/hls/live/2004245-b/aje/index.m3u8', 14),
+        ['ch_arabiya', 'العربية الإخبارية', 'قناة العربية الإخبارية HD مباشر', 'قنوات إخبارية', 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/701.m3u8', 15),
+        ['ch_hadath', 'الحدث مباشر', 'قناة الحدث الإخبارية HD', 'قنوات إخبارية', 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/702.m3u8', 16),
+        ['ch_skynews', 'سكاي نيوز عربية', 'قناة سكاي نيوز عربية HD', 'قنوات إخبارية', 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/703.m3u8', 17),
+        ['ch_natgeo', 'ناشيونال جيوغرافيك', 'ناشيونال جيوغرافيك أبوظبي HD', 'قنوات وثائقية', 'https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/801.m3u8', 18),
+        ['ch_rotana_cinema', 'روتانا سينما', 'قناة روتانا سينما HD - مش حتقدر تغمض عينيك', 'قنوات سينمائية', 'https://images.unsplash.com/photo-1440404653325-ab127d49abc1?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/901.m3u8', 19),
+        ['ch_rotana_classic', 'روتانا كلاسيك', 'قناة روتانا كلاسيك زمان HD', 'قنوات سينمائية', 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/902.m3u8', 20),
+        ['ch_osn_movies', 'OSN Movies', 'قناة OSN Movies Action HD', 'قنوات سينمائية', 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/903.m3u8', 21),
+        ['ch_zee_alwan', 'زي ألوان', 'قناة زي ألوان HD دراما هندية ومدبلجة', 'قنوات ترفيهية', 'https://images.unsplash.com/photo-1518791841217-8f162f1e1131?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/904.m3u8', 22)
+      ];
+      for (const ch of defaultChannels) {
+        await db.prepare(
+          "INSERT OR IGNORE INTO tv_channels (id, name, title, category, logo_url, stream_url, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        ).bind(ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], Date.now()).run();
+      }
+    }
+  } catch (_) {}
 }
 
 export default {
@@ -1956,6 +2006,273 @@ export default {
               const currentList: string[] = JSON.parse(currentListRaw);
               const updatedList = currentList.filter((id: string) => id !== roomId);
               await env.SESSIONS.put("mov_public_rooms", JSON.stringify(updatedList), { expirationTtl: 86400 });
+            }
+          } catch (e) {}
+        }
+        return json({ success: true });
+      }
+
+      // ==========================================
+      // TV CHANNELS & SMART STREAM REBROADCASTER
+      // ==========================================
+
+      // 1. Search & List TV Channels from D1
+      if ((url.pathname === "/api/tv/channels" || url.pathname === "/tv/channels") && method === "GET") {
+        if (env.DB) await ensureAllTables(env.DB);
+        const q = (url.searchParams.get("q") || "").trim().toLowerCase();
+        const cat = (url.searchParams.get("category") || "").trim();
+        const origin = url.origin;
+
+        let channels: any[] = [];
+        if (env.DB) {
+          try {
+            let query = "SELECT * FROM tv_channels WHERE 1=1";
+            const binds: any[] = [];
+            if (q) {
+              query += " AND (LOWER(name) LIKE ? OR LOWER(title) LIKE ?)";
+              binds.push(`%${q}%`, `%${q}%`);
+            }
+            if (cat && cat !== "الكل") {
+              query += " AND category = ?";
+              binds.push(cat);
+            }
+            query += " ORDER BY sort_order ASC, name ASC LIMIT 150";
+            const res = await env.DB.prepare(query).bind(...binds).all();
+            channels = res.results || [];
+          } catch (_) {}
+        }
+
+        // Augment with proxy_stream_url for seamless multi-account playback without buffering
+        const enhanced = channels.map((c: any) => ({
+          ...c,
+          proxy_stream_url: `${origin}/api/tv/stream/proxy?url=${encodeURIComponent(c.stream_url)}`
+        }));
+
+        return json({ success: true, count: enhanced.length, channels: enhanced });
+      }
+
+      // 2. Sync TV Channels from M3U Source to D1
+      if ((url.pathname === "/api/tv/channels/sync" || url.pathname === "/tv/channels/sync") && method === "POST") {
+        if (env.DB) await ensureAllTables(env.DB);
+        const body: any = await request.json().catch(() => ({}));
+        const m3uSource = body.m3uUrl || "http://maxshowplayer.site:2052/get.php?username=13968296781874&password=20098269331298&type=m3u&output=mpegts";
+        
+        let syncedCount = 0;
+        try {
+          const m3uRes = await fetch(m3uSource, { headers: { "User-Agent": "Mozilla/5.0" } });
+          const m3uText = await m3uRes.text();
+          const lines = m3uText.split("\n");
+          let currentTitle = "";
+          let currentLogo = "";
+          let currentCategory = "قنوات فضائية";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (trimmed.startsWith("#EXTINF:")) {
+              const logoMatch = /tvg-logo="([^"]*)"/.exec(trimmed);
+              currentLogo = logoMatch ? logoMatch[1] : "";
+              const groupMatch = /group-title="([^"]*)"/.exec(trimmed);
+              currentCategory = groupMatch ? groupMatch[1] : "قنوات فضائية";
+              const commaIdx = trimmed.lastIndexOf(",");
+              currentTitle = commaIdx >= 0 ? trimmed.substring(commaIdx + 1).trim() : "قناة فضائية";
+            } else if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+              if (currentTitle && env.DB) {
+                const id = "ch_" + Math.abs(currentTitle.split("").reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a; }, 0));
+                await env.DB.prepare(
+                  "INSERT OR REPLACE INTO tv_channels (id, name, title, category, logo_url, stream_url, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                ).bind(id, currentTitle, currentTitle, currentCategory, currentLogo, trimmed, syncedCount + 1, Date.now()).run();
+                syncedCount++;
+              }
+              currentTitle = "";
+              currentLogo = "";
+            }
+          }
+        } catch (e: any) {
+          return json({ success: false, error: e.message }, 500);
+        }
+
+        return json({ success: true, message: `Synced ${syncedCount} channels to D1 successfully` });
+      }
+
+      // 3. Smart Rebroadcaster Stream Proxy (Anti-Buffering Multi-Account Relay)
+      if (url.pathname === "/api/tv/stream/proxy" || url.pathname === "/tv/stream/proxy") {
+        const targetUrl = url.searchParams.get("url");
+        if (!targetUrl) return new Response("Missing target stream url", { status: 400 });
+
+        try {
+          const streamReqHeaders: Record<string, string> = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Referer": "http://maxshowplayer.site:2052/",
+            "Accept": "*/*"
+          };
+          const rangeHeader = request.headers.get("range");
+          if (rangeHeader) streamReqHeaders["Range"] = rangeHeader;
+
+          const upstreamRes = await fetch(targetUrl, {
+            headers: streamReqHeaders,
+            redirect: "follow"
+          });
+
+          const contentType = upstreamRes.headers.get("content-type") || "";
+          const isHls = targetUrl.includes(".m3u8") || contentType.includes("application/vnd.apple.mpegurl") || contentType.includes("application/x-mpegurl");
+
+          if (isHls) {
+            const playlistText = await upstreamRes.text();
+            const baseUrlObj = new URL(targetUrl);
+            const proxyBase = `${url.origin}/api/tv/stream/chunk?url=`;
+
+            const rewrittenLines = playlistText.split("\n").map(line => {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith("#")) return line;
+              const chunkUrl = new URL(trimmed, baseUrlObj.href).href;
+              return `${proxyBase}${encodeURIComponent(chunkUrl)}`;
+            });
+
+            return new Response(rewrittenLines.join("\n"), {
+              status: upstreamRes.status,
+              headers: {
+                ...corsHeaders,
+                "Content-Type": "application/vnd.apple.mpegurl; charset=utf-8",
+                "Cache-Control": "public, max-age=2, stale-while-revalidate=5"
+              }
+            });
+          }
+
+          const resHeaders = new Headers(corsHeaders);
+          if (upstreamRes.headers.has("content-type")) resHeaders.set("Content-Type", upstreamRes.headers.get("content-type")!);
+          if (upstreamRes.headers.has("content-length")) resHeaders.set("Content-Length", upstreamRes.headers.get("content-length")!);
+          if (upstreamRes.headers.has("content-range")) resHeaders.set("Content-Range", upstreamRes.headers.get("content-range")!);
+          if (upstreamRes.headers.has("accept-ranges")) resHeaders.set("Accept-Ranges", upstreamRes.headers.get("accept-ranges")!);
+          resHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
+
+          return new Response(upstreamRes.body, {
+            status: upstreamRes.status,
+            headers: resHeaders
+          });
+        } catch (err: any) {
+          return new Response(`Rebroadcast error: ${err.message}`, { status: 502, headers: corsHeaders });
+        }
+      }
+
+      // 4. HLS Chunk Edge Cache Proxy (Global Edge Caching for Video Chunks)
+      if (url.pathname === "/api/tv/stream/chunk" || url.pathname === "/tv/stream/chunk") {
+        const chunkUrl = url.searchParams.get("url");
+        if (!chunkUrl) return new Response("Missing chunk url", { status: 400 });
+
+        try {
+          const chunkRes = await fetch(chunkUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+              "Referer": "http://maxshowplayer.site:2052/",
+              "Accept": "*/*"
+            }
+          });
+
+          const chunkHeaders = new Headers(corsHeaders);
+          chunkHeaders.set("Content-Type", chunkRes.headers.get("content-type") || "video/MP2T");
+          if (chunkRes.headers.has("content-length")) chunkHeaders.set("Content-Length", chunkRes.headers.get("content-length")!);
+          chunkHeaders.set("Cache-Control", "public, max-age=15, s-maxage=30, immutable");
+
+          return new Response(chunkRes.body, {
+            status: chunkRes.status,
+            headers: chunkHeaders
+          });
+        } catch (err: any) {
+          return new Response(`Chunk error: ${err.message}`, { status: 502, headers: corsHeaders });
+        }
+      }
+
+      // 5. TV Rooms API (Create, Public, Verify, Update, Delete)
+      if ((url.pathname === "/api/tv/rooms/create" || url.pathname === "/tv/rooms/create") && method === "POST") {
+        const body: any = await request.json().catch(() => ({}));
+        const title = (body.title || "غرفة قنوات تلفزيونية").trim();
+        const hostName = (body.hostName || "المضيف").trim();
+        const hostId = body.hostId || "host_" + Math.random().toString(36).substring(2, 8);
+        const streamUrl = body.streamUrl || "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/501.m3u8";
+        const currentChannelTitle = body.currentChannelTitle || "beIN SPORTS News HD";
+        const logoUrl = body.logoUrl || "https://images.unsplash.com/photo-1508098682722-e99c43a406b2?w=600&auto=format&fit=crop&q=80";
+        const privacy = body.privacyMode || "PUBLIC";
+        
+        const codeNum = Math.floor(1000 + Math.random() * 9000);
+        const roomCode = body.roomCode || `#TV-${codeNum}`;
+        const roomId = body.roomId || `tv_room_${Date.now()}_${codeNum}`;
+
+        const roomData = {
+          roomId,
+          roomCode,
+          title,
+          hostName,
+          hostId,
+          streamUrl,
+          currentChannelTitle,
+          logoUrl,
+          viewersCount: 1,
+          isLive: true,
+          privacyMode: privacy,
+          createdAt: Date.now(),
+          lastActive: Date.now()
+        };
+
+        if (env.SESSIONS) {
+          try {
+            await env.SESSIONS.put(`tv_room:${roomId}`, JSON.stringify(roomData), { expirationTtl: 86400 });
+            await env.SESSIONS.put(`tv_code:${roomCode.replace(/[^0-9A-Za-z]/g, "")}`, roomId, { expirationTtl: 86400 });
+
+            if (privacy === "PUBLIC") {
+              const currentListRaw = await env.SESSIONS.get("tv_public_rooms");
+              const currentList: string[] = currentListRaw ? JSON.parse(currentListRaw) : [];
+              if (!currentList.includes(roomId)) {
+                currentList.unshift(roomId);
+                await env.SESSIONS.put("tv_public_rooms", JSON.stringify(currentList.slice(0, 50)), { expirationTtl: 86400 });
+              }
+            }
+          } catch (e) {}
+        }
+
+        return json({ success: true, room: roomData });
+      }
+
+      if ((url.pathname === "/api/tv/rooms/active" || url.pathname === "/tv/rooms/active" || url.pathname === "/api/tv/rooms/public") && method === "GET") {
+        const rooms: any[] = [];
+        if (env.SESSIONS) {
+          try {
+            const currentListRaw = await env.SESSIONS.get("tv_public_rooms");
+            const currentList: string[] = currentListRaw ? JSON.parse(currentListRaw) : [];
+            for (const rId of currentList) {
+              const rRaw = await env.SESSIONS.get(`tv_room:${rId}`);
+              if (rRaw) rooms.push(JSON.parse(rRaw));
+            }
+          } catch (e) {}
+        }
+        return json(rooms);
+      }
+
+      if ((url.pathname === "/api/tv/rooms/verify" || url.pathname === "/tv/rooms/verify") && method === "GET") {
+        const rawCode = (url.searchParams.get("code") || "").replace(/[^0-9A-Za-z]/g, "");
+        let targetRoomId = "";
+        if (rawCode && env.SESSIONS) {
+          targetRoomId = (await env.SESSIONS.get(`tv_code:${rawCode}`)) || "";
+        }
+        if (targetRoomId && env.SESSIONS) {
+          const rRaw = await env.SESSIONS.get(`tv_room:${targetRoomId}`);
+          if (rRaw) return json({ success: true, ...JSON.parse(rRaw) });
+        }
+        return json({ success: false, error: "رمز الغرفة غير صحيح أو الغرفة غير موجودة" }, 404);
+      }
+
+      if ((url.pathname === "/api/tv/rooms/update" || url.pathname === "/tv/rooms/update") && method === "POST") {
+        const body: any = await request.json().catch(() => ({}));
+        const roomId = body.roomId;
+        if (roomId && env.SESSIONS) {
+          try {
+            const rRaw = await env.SESSIONS.get(`tv_room:${roomId}`);
+            if (rRaw) {
+              const r = JSON.parse(rRaw);
+              if (body.streamUrl) r.streamUrl = body.streamUrl;
+              if (body.channelTitle) r.currentChannelTitle = body.channelTitle;
+              if (body.logoUrl) r.logoUrl = body.logoUrl;
+              r.lastActive = Date.now();
+              await env.SESSIONS.put(`tv_room:${roomId}`, JSON.stringify(r), { expirationTtl: 86400 });
             }
           } catch (e) {}
         }

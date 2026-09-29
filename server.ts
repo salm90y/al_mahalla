@@ -1228,6 +1228,169 @@ async function startServer() {
     res.json({ success: true, story });
   });
 
+  // ==========================================
+  // TV CHANNELS & STREAM REBROADCASTER (LOCAL & PROD)
+  // ==========================================
+  const localTvChannels: any[] = [
+    { id: 'ch_bein_news', name: 'beIN SPORTS News', title: 'beIN SPORTS الإخبارية المفتوحة HD', category: 'قنوات رياضية', logo_url: 'https://images.unsplash.com/photo-1508098682722-e99c43a406b2?w=600&auto=format&fit=crop&q=80', stream_url: 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/501.m3u8', sort_order: 1 },
+    { id: 'ch_bein_1', name: 'beIN SPORTS 1', title: 'beIN SPORTS 1 HD Premium', category: 'قنوات رياضية', logo_url: 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80', stream_url: 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/502.m3u8', sort_order: 2 },
+    { id: 'ch_bein_2', name: 'beIN SPORTS 2', title: 'beIN SPORTS 2 HD', category: 'قنوات رياضية', logo_url: 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80', stream_url: 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/503.m3u8', sort_order: 3 },
+    { id: 'ch_ssc_1', name: 'SSC 1 HD', title: 'قناة SSC الرياضية 1 HD', category: 'قنوات رياضية', logo_url: 'https://images.unsplash.com/photo-1518091043644-c1d4457512c6?w=600&auto=format&fit=crop&q=80', stream_url: 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/505.m3u8', sort_order: 4 },
+    { id: 'ch_quran', name: 'القرآن الكريم مباشر', title: 'قناة القرآن الكريم (مكة المكرمة مباشر)', category: 'قنوات إسلامية', logo_url: 'https://images.unsplash.com/photo-1591604129939-f1efa4d9f7fa?w=600&auto=format&fit=crop&q=80', stream_url: 'https://win.holol.com/live/quran/playlist.m3u8', sort_order: 5 },
+    { id: 'ch_sunnah', name: 'السنة النبوية مباشر', title: 'قناة السنة النبوية (المدينة المنورة مباشر)', category: 'قنوات إسلامية', logo_url: 'https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?w=600&auto=format&fit=crop&q=80', stream_url: 'https://win.holol.com/live/sunnah/playlist.m3u8', sort_order: 6 },
+    { id: 'ch_mbc_1', name: 'MBC 1 HD', title: 'قناة MBC 1 HD الرسمية', category: 'قنوات منوعة', logo_url: 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=600&auto=format&fit=crop&q=80', stream_url: 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/601.m3u8', sort_order: 7 },
+    { id: 'ch_mbc_masr', name: 'MBC مصر HD', title: 'قناة MBC مصر HD', category: 'قنوات منوعة', logo_url: 'https://images.unsplash.com/photo-1518791841217-8f162f1e1131?w=600&auto=format&fit=crop&q=80', stream_url: 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/602.m3u8', sort_order: 8 },
+    { id: 'ch_jazeera', name: 'الجزيرة الإخبارية', title: 'قناة الجزيرة الإخبارية HD مباشر', category: 'قنوات إخبارية', logo_url: 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80', stream_url: 'https://live-hls-web-aje.akamaized.net/hls/live/2004245-b/aje/index.m3u8', sort_order: 9 },
+    { id: 'ch_arabiya', name: 'العربية الإخبارية', title: 'قناة العربية الإخبارية HD مباشر', category: 'قنوات إخبارية', logo_url: 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=600&auto=format&fit=crop&q=80', stream_url: 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/701.m3u8', sort_order: 10 },
+    { id: 'ch_natgeo', name: 'ناشيونال جيوغرافيك', title: 'ناشيونال جيوغرافيك أبوظبي HD', category: 'قنوات وثائقية', logo_url: 'https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=600&auto=format&fit=crop&q=80', stream_url: 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/801.m3u8', sort_order: 11 },
+    { id: 'ch_rotana_cinema', name: 'روتانا سينما', title: 'قناة روتانا سينما HD - مش حتقدر تغمض عينيك', category: 'قنوات سينمائية', logo_url: 'https://images.unsplash.com/photo-1440404653325-ab127d49abc1?w=600&auto=format&fit=crop&q=80', stream_url: 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/901.m3u8', sort_order: 12 }
+  ];
+
+  app.get('/api/tv/channels', (req, res) => {
+    const q = ((req.query.q as string) || '').trim().toLowerCase();
+    const cat = ((req.query.category as string) || '').trim();
+    const protocol = req.protocol;
+    const host = req.get('host');
+    const origin = `${protocol}://${host}`;
+
+    let filtered = localTvChannels;
+    if (q) {
+      filtered = filtered.filter(c => c.name.toLowerCase().includes(q) || c.title.toLowerCase().includes(q));
+    }
+    if (cat && cat !== 'الكل') {
+      filtered = filtered.filter(c => c.category === cat);
+    }
+
+    const enhanced = filtered.map(c => ({
+      ...c,
+      proxy_stream_url: `${origin}/api/tv/stream/proxy?url=${encodeURIComponent(c.stream_url)}`
+    }));
+
+    res.json({ success: true, count: enhanced.length, channels: enhanced });
+  });
+
+  // Rebroadcasting Stream Proxy with HLS Rewriting and Chunk Relay
+  app.get('/api/tv/stream/proxy', async (req, res) => {
+    const targetUrl = req.query.url as string;
+    if (!targetUrl) return res.status(400).send('Missing url parameter');
+
+    try {
+      const response = await fetch(targetUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Referer': 'http://maxshowplayer.site:2052/',
+          'Accept': '*/*'
+        }
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+      const isHls = targetUrl.includes('.m3u8') || contentType.includes('mpegurl');
+
+      if (isHls) {
+        const text = await response.text();
+        const baseUrl = new URL(targetUrl);
+        const protocol = req.protocol;
+        const host = req.get('host');
+        const proxyBase = `${protocol}://${host}/api/tv/stream/chunk?url=`;
+
+        const lines = text.split('\n').map(l => {
+          const trimmed = l.trim();
+          if (!trimmed || trimmed.startsWith('#')) return l;
+          const resolved = new URL(trimmed, baseUrl.href).href;
+          return `${proxyBase}${encodeURIComponent(resolved)}`;
+        });
+
+        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cache-Control', 'public, max-age=2');
+        return res.send(lines.join('\n'));
+      }
+
+      res.setHeader('Content-Type', contentType || 'video/MP2T');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      if (response.body) {
+        const nodeStream = (response.body as any);
+        if (typeof nodeStream.pipe === 'function') {
+          nodeStream.pipe(res);
+        } else {
+          const reader = response.body.getReader();
+          const pump = async () => {
+            const { done, value } = await reader.read();
+            if (done) { res.end(); return; }
+            res.write(value);
+            await pump();
+          };
+          pump().catch(() => res.end());
+        }
+      } else {
+        res.end();
+      }
+    } catch (err: any) {
+      res.status(502).send(`Proxy error: ${err.message}`);
+    }
+  });
+
+  app.get('/api/tv/stream/chunk', async (req, res) => {
+    const chunkUrl = req.query.url as string;
+    if (!chunkUrl) return res.status(400).send('Missing chunk url');
+
+    try {
+      const response = await fetch(chunkUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          'Referer': 'http://maxshowplayer.site:2052/',
+          'Accept': '*/*'
+        }
+      });
+      res.setHeader('Content-Type', response.headers.get('content-type') || 'video/MP2T');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cache-Control', 'public, max-age=30, immutable');
+      if (response.body) {
+        const reader = response.body.getReader();
+        const pump = async () => {
+          const { done, value } = await reader.read();
+          if (done) { res.end(); return; }
+          res.write(value);
+          await pump();
+        };
+        pump().catch(() => res.end());
+      } else {
+        res.end();
+      }
+    } catch (err: any) {
+      res.status(502).send(`Chunk error: ${err.message}`);
+    }
+  });
+
+  // Local TV Rooms Map
+  const localTvRooms = new Map<string, any>();
+  app.post('/api/tv/rooms/create', (req, res) => {
+    const body = req.body || {};
+    const codeNum = Math.floor(1000 + Math.random() * 9000);
+    const roomCode = body.roomCode || `#TV-${codeNum}`;
+    const roomId = body.roomId || `tv_room_${Date.now()}_${codeNum}`;
+    const roomData = {
+      roomId,
+      roomCode,
+      title: body.title || 'غرفة قنوات تلفزيونية',
+      hostName: body.hostName || 'المضيف',
+      hostId: body.hostId || 'host_1',
+      streamUrl: body.streamUrl || localTvChannels[0].stream_url,
+      currentChannelTitle: body.currentChannelTitle || localTvChannels[0].title,
+      logoUrl: body.logoUrl || localTvChannels[0].logo_url,
+      viewersCount: 1,
+      isLive: true,
+      privacyMode: body.privacyMode || 'PUBLIC',
+      createdAt: Date.now()
+    };
+    localTvRooms.set(roomId, roomData);
+    res.json({ success: true, room: roomData });
+  });
+
+  app.get(['/api/tv/rooms/active', '/api/tv/rooms/public'], (req, res) => {
+    res.json(Array.from(localTvRooms.values()));
+  });
+
   const server = http.createServer(app);
 
   // High-performance WebSocket Server for Real-Time VoIP Audio & Signaling

@@ -111,6 +111,85 @@ object ZegoCallManager {
     }
 
     /**
+     * Join Watch Party room in safe Audience Mode (Listen-only by default, no mic capturing, no crash)
+     */
+    fun joinWatchParty(
+        context: Context,
+        roomId: String,
+        userId: String,
+        userName: String,
+        onConnected: (() -> Unit)? = null
+    ) {
+        currentRoomId = roomId
+        onCallConnected = onConnected
+
+        initEngine(context) { success ->
+            if (!success || zegoEngine == null) return@initEngine
+
+            try {
+                val engine = zegoEngine ?: return@initEngine
+                val safeRoomId = roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").ifEmpty { "room_${Math.abs(roomId.hashCode())}" }.take(64)
+                val safeUserId = userId.replace(Regex("[^a-zA-Z0-9_]"), "_").ifEmpty { "u_${Math.abs(userId.hashCode())}" }.take(64)
+                val safeUserName = userName.ifBlank { safeUserId }
+                currentRoomId = safeRoomId
+
+                val user = ZegoUser(safeUserId, safeUserName)
+                val roomConfig = ZegoRoomConfig().apply {
+                    isUserStatusNotify = true
+                }
+
+                // Audience Mode: mute mic, do not record or publish, keep video/audio playing cleanly
+                try {
+                    engine.muteMicrophone(true)
+                    isMicMuted.set(true)
+                    engine.enableCamera(false)
+                    isCameraOn.set(false)
+                    engine.setAudioRouteToSpeaker(true)
+                    isSpeakerOn.set(true)
+                } catch (_: Throwable) {}
+
+                engine.loginRoom(safeRoomId, user, roomConfig)
+                Log.d(TAG, "Zego watch party room joined in audience mode: safeRoomId=$safeRoomId")
+            } catch (e: Throwable) {
+                Log.w(TAG, "joinWatchParty non-fatal warning: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * Start publishing audio when user activates Walkie-Talkie Intercom
+     */
+    fun startPublishingAudio(roomId: String, userId: String) {
+        try {
+            val engine = zegoEngine ?: return
+            val safeRoomId = roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").ifEmpty { "room_${Math.abs(roomId.hashCode())}" }.take(64)
+            val safeUserId = userId.replace(Regex("[^a-zA-Z0-9_]"), "_").ifEmpty { "u_${Math.abs(userId.hashCode())}" }.take(64)
+            val streamId = "s_${safeRoomId}_${safeUserId}"
+            engine.muteMicrophone(false)
+            isMicMuted.set(false)
+            if (!isPublishing.get()) {
+                engine.startPublishingStream(streamId)
+                isPublishing.set(true)
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "startPublishingAudio error: ${e.message}")
+        }
+    }
+
+    /**
+     * Stop publishing audio when user releases Walkie-Talkie Intercom
+     */
+    fun stopPublishingAudio() {
+        try {
+            val engine = zegoEngine ?: return
+            engine.muteMicrophone(true)
+            isMicMuted.set(true)
+        } catch (e: Throwable) {
+            Log.w(TAG, "stopPublishingAudio error: ${e.message}")
+        }
+    }
+
+    /**
      * Start or join a voice or video call session via Zego
      */
     fun startCall(
@@ -146,30 +225,31 @@ object ZegoCallManager {
                     isUserStatusNotify = true
                 }
 
-                // 1. Audio routing: Ensure loudspeaker is enabled by default for watch party / intercom
-                engine.setAudioRouteToSpeaker(true)
-                isSpeakerOn.set(true)
-                val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
+                // 1. Audio routing
                 try {
-                    audioManager?.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
-                    audioManager?.isSpeakerphoneOn = true
-                } catch (_: Exception) {}
+                    engine.setAudioRouteToSpeaker(true)
+                    isSpeakerOn.set(true)
+                } catch (_: Throwable) {}
 
-                // 2. Microphone
-                engine.muteMicrophone(false)
-                isMicMuted.set(false)
+                // 2. Microphone & Camera
+                try {
+                    engine.muteMicrophone(!isOutgoing)
+                    isMicMuted.set(!isOutgoing)
+                    engine.enableCamera(isVideo)
+                    isCameraOn.set(isVideo)
+                } catch (_: Throwable) {}
 
-                // 3. Camera: strictly enable only for video calls
-                engine.enableCamera(isVideo)
-                isCameraOn.set(isVideo)
-
-                // 4. Log in to Zego Room with sanitized room ID
+                // 3. Log in to Zego Room with sanitized room ID
                 engine.loginRoom(safeRoomId, user, roomConfig)
 
-                // 5. Start publishing audio/video stream with safe characters
+                // 4. Start publishing stream safely
                 val streamId = "s_${safeRoomId}_${safeUserId}"
-                engine.startPublishingStream(streamId)
-                isPublishing.set(true)
+                try {
+                    engine.startPublishingStream(streamId)
+                    isPublishing.set(true)
+                } catch (pe: Throwable) {
+                    Log.w(TAG, "startPublishingStream non-fatal warning: ${pe.message}")
+                }
 
                 Log.d(TAG, "Zego call initiated: safeRoomId=$safeRoomId, safeStreamId=$streamId, isVideo=$isVideo")
             } catch (e: Throwable) {

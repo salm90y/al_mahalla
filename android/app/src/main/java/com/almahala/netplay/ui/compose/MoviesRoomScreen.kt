@@ -438,13 +438,13 @@ fun MoviesRoomScreen(
     fun toggleIntercomWithPermission() {
         if (isIntercomTalking) {
             isIntercomTalking = false
-            ZegoCallManager.setMicrophoneMute(true)
+            ZegoCallManager.stopPublishingAudio()
             syncSocket.broadcastVoiceState(false)
         } else {
             val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             if (hasPerm) {
                 isIntercomTalking = true
-                ZegoCallManager.setMicrophoneMute(false)
+                ZegoCallManager.startPublishingAudio(zegoAudioRoomId, currentUserId)
                 ZegoCallManager.setSpeakerEnabled(context, true)
                 syncSocket.broadcastVoiceState(true)
             } else {
@@ -455,43 +455,35 @@ fun MoviesRoomScreen(
 
     // Connect WebSocket and fetch authoritative initial state
     LaunchedEffect(roomId) {
-        syncSocket.connect()
-        MoviesRoomManager.getRoomLatest(context, roomId) { latestRoom: PublicMoviesRoom? ->
-            if (latestRoom != null && latestRoom.streamUrl.isNotBlank()) {
-                currentMovie = MovieItem(
-                    id = "synced_${System.currentTimeMillis()}",
-                    title = latestRoom.currentMovieTitle.ifBlank { "فلم سينمائي متزامن" },
-                    name = latestRoom.currentMovieTitle.ifBlank { "فلم سينمائي متزامن" },
-                    poster = latestRoom.posterUrl.ifBlank { "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=600&auto=format&fit=crop&q=80" },
-                    streamUrl = latestRoom.streamUrl,
-                    category = "سينما متزامنة",
-                    duration = "مباشر"
-                )
+        try {
+            syncSocket.connect()
+            MoviesRoomManager.getRoomLatest(context, roomId) { latestRoom: PublicMoviesRoom? ->
+                if (latestRoom != null && latestRoom.streamUrl.isNotBlank()) {
+                    currentMovie = MovieItem(
+                        id = "synced_${System.currentTimeMillis()}",
+                        title = latestRoom.currentMovieTitle.ifBlank { "فلم سينمائي متزامن" },
+                        name = latestRoom.currentMovieTitle.ifBlank { "فلم سينمائي متزامن" },
+                        poster = latestRoom.posterUrl.ifBlank { "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=600&auto=format&fit=crop&q=80" },
+                        streamUrl = latestRoom.streamUrl,
+                        category = "سينما متزامنة",
+                        duration = "مباشر"
+                    )
+                }
             }
-        }
+        } catch (_: Throwable) {}
     }
 
-    // REAL ZEGO WALKIE-TALKIE AUDIO ROOM INITIALIZATION WITH LOUDSPEAKER ROUTING
+    // REAL ZEGO WALKIE-TALKIE AUDIO ROOM INITIALIZATION IN SAFE AUDIENCE MODE
     val zegoAudioRoomId = remember(roomId) { "mov_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}" }
     LaunchedEffect(zegoAudioRoomId) {
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         try {
-            audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
-            audioManager?.isSpeakerphoneOn = true
-        } catch (_: Exception) {}
-
-        ZegoCallManager.startCall(
-            context = context,
-            roomId = zegoAudioRoomId,
-            userId = currentUserId,
-            userName = currentUserName,
-            isVideo = false,
-            isOutgoing = true,
-            onConnected = {
-                ZegoCallManager.setMicrophoneMute(true)
-                ZegoCallManager.setSpeakerEnabled(context, true)
-            }
-        )
+            ZegoCallManager.joinWatchParty(
+                context = context,
+                roomId = zegoAudioRoomId,
+                userId = currentUserId,
+                userName = currentUserName
+            )
+        } catch (_: Throwable) {}
     }
 
     // Periodic Heartbeat Sync: Host synchronizes playhead every 8 seconds
@@ -508,9 +500,13 @@ fun MoviesRoomScreen(
 
     DisposableEffect(roomId, zegoAudioRoomId) {
         onDispose {
-            syncSocket.disconnect()
-            ZegoCallManager.endCall(context, zegoAudioRoomId)
-            RealVoipEngine.stopVoipSession(context)
+            try {
+                syncSocket.disconnect()
+                ZegoCallManager.endCall(context, zegoAudioRoomId)
+                RealVoipEngine.stopVoipSession(context)
+                webViewRef?.destroy()
+                webViewRef = null
+            } catch (_: Throwable) {}
         }
     }
 
@@ -812,16 +808,6 @@ fun MoviesRoomScreen(
                         },
                         update = { webView ->
                             webViewRef = webView
-                            val targetStream = currentMovie.streamUrl.trim()
-                            if (targetStream.isNotEmpty()) {
-                                webView.evaluateJavascript("""
-                                    (function() {
-                                        if (typeof loadStream === 'function') {
-                                            loadStream('$targetStream');
-                                        }
-                                    })();
-                                """.trimIndent(), null)
-                            }
                         },
                         modifier = Modifier.fillMaxSize()
                     )
