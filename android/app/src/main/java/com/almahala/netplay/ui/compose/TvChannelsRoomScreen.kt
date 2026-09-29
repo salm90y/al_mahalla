@@ -154,8 +154,17 @@ fun TvChannelsRoomScreen(
         }
     }
 
-    // Active currently playing TV channel
-    val defaultChannel = TvChannelsRoomManager.DEFAULT_TV_CHANNELS.first()
+    // Active currently playing TV channel (Crash-proof fallback)
+    val defaultChannel = remember {
+        TvChannelsRoomManager.DEFAULT_TV_CHANNELS.firstOrNull() ?: TvChannelItem(
+            id = "tv_quran",
+            title = "قناة القرآن الكريم",
+            name = "القرآن الكريم مباشر",
+            logo = "https://images.unsplash.com/photo-1591604129939-f1efa4d9f7fa?w=600&auto=format&fit=crop&q=80",
+            streamUrl = "https://live.kwikmotion.com/smcquranlive/quranradiolive/playlist.m3u8",
+            category = "قنوات إسلامية"
+        )
+    }
     var currentChannel by remember(initialStreamUrl) {
         val found = channelsCatalog.find { it.streamUrl == initialStreamUrl }
         mutableStateOf(
@@ -449,6 +458,25 @@ fun TvChannelsRoomScreen(
         }
     }
 
+    // Connect WebSocket and fetch authoritative initial state
+    LaunchedEffect(roomId) {
+        try {
+            syncSocket.connect()
+            TvChannelsRoomManager.getRoomLatest(context, roomId) { latestRoom: PublicTvRoom? ->
+                if (latestRoom != null && latestRoom.streamUrl.isNotBlank()) {
+                    currentChannel = TvChannelItem(
+                        id = "synced_${System.currentTimeMillis()}",
+                        title = latestRoom.currentChannelTitle.ifBlank { latestRoom.title },
+                        name = latestRoom.currentChannelTitle.ifBlank { latestRoom.title },
+                        logo = latestRoom.logoUrl.ifBlank { defaultChannel.logo },
+                        streamUrl = latestRoom.streamUrl,
+                        category = "بث فضائي متزامن"
+                    )
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
     // Play/Pause & Channel Switch Handler
     fun playSelectedChannel(channel: TvChannelItem) {
         val myUser = roomUsers.find { it.id == currentUserId }
@@ -588,8 +616,10 @@ fun TvChannelsRoomScreen(
                                                 video {
                                                     width: 100% !important;
                                                     height: 100% !important;
-                                                    object-fit: contain;
+                                                    object-fit: cover !important;
                                                     background: #000000;
+                                                    transform: scale(1.02);
+                                                    transform-origin: center center;
                                                 }
                                                 #touch-shield {
                                                     position: absolute;
@@ -606,6 +636,16 @@ fun TvChannelsRoomScreen(
                                                 <video id="video-player" playsinline autoplay webkit-playsinline></video>
                                                 <div id="touch-shield"></div>
                                             </div>
+                                            <script>
+                                                // Continuous Background Playback: Prevent stream pausing on app minimize or switching apps
+                                                try {
+                                                    Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                                                    Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+                                                    document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                                                    window.addEventListener('blur', function(e) { e.stopImmediatePropagation(); }, true);
+                                                    window.addEventListener('pagehide', function(e) { e.stopImmediatePropagation(); }, true);
+                                                } catch(e) {}
+                                            </script>
                                             <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
                                             <script>
                                                 var video = document.getElementById('video-player');

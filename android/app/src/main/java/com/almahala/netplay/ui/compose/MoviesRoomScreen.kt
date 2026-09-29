@@ -704,8 +704,10 @@ fun MoviesRoomScreen(
                                             video {
                                                 width: 100% !important;
                                                 height: 100% !important;
-                                                object-fit: contain;
+                                                object-fit: cover !important;
                                                 background: #000000;
+                                                transform: scale(1.02);
+                                                transform-origin: center center;
                                             }
                                             #touch-shield {
                                                 position: absolute;
@@ -721,6 +723,16 @@ fun MoviesRoomScreen(
                                             <video id="video-player" playsinline autoplay webkit-playsinline></video>
                                             <div id="touch-shield"></div>
                                         </div>
+                                        <script>
+                                            // Continuous Background Playback: Prevent stream pausing on app minimize or switching apps
+                                            try {
+                                                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                                                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+                                                document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                                                window.addEventListener('blur', function(e) { e.stopImmediatePropagation(); }, true);
+                                                window.addEventListener('pagehide', function(e) { e.stopImmediatePropagation(); }, true);
+                                            } catch(e) {}
+                                        </script>
                                         <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
                                         <script>
                                             var video = document.getElementById('video-player');

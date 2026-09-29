@@ -836,13 +836,22 @@ fun YouTubeRoomScreen(
                                                 overflow: hidden;
                                                 background: #000000;
                                             }
-                                            iframe, #player {
+                                            /* Clean edge-to-edge screen fill: No cinematic black bars, fills full container cleanly */
+                                            iframe, #player, video {
                                                 width: 100% !important;
                                                 height: 100% !important;
                                                 border: none;
                                                 position: absolute;
                                                 top: 0;
                                                 left: 0;
+                                                object-fit: cover !important;
+                                                transform: scale(1.35);
+                                                transform-origin: center center;
+                                                transition: transform 0.3s ease;
+                                            }
+                                            .normal-fit iframe, .normal-fit #player, .normal-fit video {
+                                                transform: scale(1.0) !important;
+                                                object-fit: contain !important;
                                             }
                                             /* Touch Shield: Intercepts taps so external app prompts and play/pause buttons are never shown on video screen */
                                             #touch-shield {
@@ -879,6 +888,16 @@ fun YouTubeRoomScreen(
                                             <div id="player"></div>
                                             <div id="touch-shield"></div>
                                         </div>
+                                        <script>
+                                            // Continuous Background Playback: Prevent YouTube pausing on app minimize or switching apps
+                                            try {
+                                                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
+                                                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
+                                                document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
+                                                window.addEventListener('blur', function(e) { e.stopImmediatePropagation(); }, true);
+                                                window.addEventListener('pagehide', function(e) { e.stopImmediatePropagation(); }, true);
+                                            } catch(e) {}
+                                        </script>
                                         <script src="https://www.youtube.com/iframe_api"></script>
                                         <script>
                                             var player = null;
