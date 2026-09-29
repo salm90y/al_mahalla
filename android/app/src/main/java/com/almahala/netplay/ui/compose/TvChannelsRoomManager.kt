@@ -60,23 +60,63 @@ object TvChannelsRoomManager {
     const val M3U_SOURCE_URL = "http://maxshowplayer.site:2052/get.php?username=13968296781874&password=20098269331298&type=m3u&output=mpegts"
     const val M3U_BASE_URL = "http://maxshowplayer.site:2052"
 
-    // Pre-seeded comprehensive TV Channels catalog directly from the user's authentic M3U playlist
+    // Pre-seeded comprehensive TV Channels catalog directly from the user's authentic M3U playlist & verified live feeds
     val DEFAULT_TV_CHANNELS = listOf(
         TvChannelItem(
             id = "tv_quran",
-            title = "قناة القرآن الكريم (مكة المكرمة مباشر)",
+            title = "قناة القرآن الكريم (الشارقة / مكة المكرمة مباشر)",
             name = "القرآن الكريم مباشر",
             logo = "https://images.unsplash.com/photo-1591604129939-f1efa4d9f7fa?w=600&auto=format&fit=crop&q=80",
-            streamUrl = "https://win.holol.com/live/quran/playlist.m3u8",
+            streamUrl = "https://live.kwikmotion.com/smcquranlive/quranradiolive/playlist.m3u8",
             category = "قنوات إسلامية"
         ),
         TvChannelItem(
-            id = "tv_sunnah",
-            title = "قناة السنة النبوية (المدينة المنورة مباشر)",
-            name = "السنة النبوية مباشر",
-            logo = "https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?w=600&auto=format&fit=crop&q=80",
-            streamUrl = "https://win.holol.com/live/sunnah/playlist.m3u8",
-            category = "قنوات إسلامية"
+            id = "tv_jazeera",
+            title = "قناة الجزيرة الإخبارية HD مباشر",
+            name = "Al Jazeera Arabic",
+            logo = "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80",
+            streamUrl = "https://live-hls-web-aja.getaj.net/AJA/index.m3u8",
+            category = "قنوات إخبارية"
+        ),
+        TvChannelItem(
+            id = "tv_skynews",
+            title = "سكاي نيوز عربية HD مباشر",
+            name = "Sky News Arabia",
+            logo = "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80",
+            streamUrl = "https://live-stream.skynewsarabia.com/c-horizontal-channel/horizontal-stream/index.m3u8",
+            category = "قنوات إخبارية"
+        ),
+        TvChannelItem(
+            id = "tv_mbc1",
+            title = "MBC 1 HD - البث الفضائي الرسمي",
+            name = "MBC 1 HD",
+            logo = "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=600&auto=format&fit=crop&q=80",
+            streamUrl = "https://shd-gcp-live.edgenextcdn.net/live/bitmovin-mbc-1-na/eec141533c90dd34722c503a296dd0d8/index.m3u8",
+            category = "قنوات منوعة"
+        ),
+        TvChannelItem(
+            id = "tv_trt_arabi",
+            title = "قناة TRT عربي الإخبارية HD",
+            name = "TRT Arabi HD",
+            logo = "https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=600&auto=format&fit=crop&q=80",
+            streamUrl = "https://tv-trtarabi.medya.trt.com.tr/master.m3u8",
+            category = "قنوات إخبارية"
+        ),
+        TvChannelItem(
+            id = "tv_mbc_bollywood",
+            title = "MBC Bollywood HD",
+            name = "MBC Bollywood",
+            logo = "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=600&auto=format&fit=crop&q=80",
+            streamUrl = "https://shd-gcp-live.edgenextcdn.net/live/bitmovin-mbc-bollywood/546eb40d7dcf9a209255dd2496903764/index.m3u8",
+            category = "قنوات سينمائية"
+        ),
+        TvChannelItem(
+            id = "tv_jazeera_eng",
+            title = "Al Jazeera English HD Live",
+            name = "Al Jazeera English",
+            logo = "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80",
+            streamUrl = "https://live-hls-web-aje.getaj.net/AJE/index.m3u8",
+            category = "قنوات إخبارية"
         ),
         TvChannelItem(
             id = "tv_bein_news",
@@ -135,14 +175,6 @@ object TvChannelsRoomManager {
             category = "قنوات رياضية"
         ),
         TvChannelItem(
-            id = "tv_mbc1",
-            title = "MBC 1 HD - البث الفضائي الرسمي",
-            name = "MBC 1 HD",
-            logo = "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=600&auto=format&fit=crop&q=80",
-            streamUrl = "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/601.m3u8",
-            category = "قنوات منوعة"
-        ),
-        TvChannelItem(
             id = "tv_mbc_masr",
             title = "MBC مصر HD",
             name = "MBC مصر",
@@ -173,14 +205,6 @@ object TvChannelsRoomManager {
             logo = "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600&auto=format&fit=crop&q=80",
             streamUrl = "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/605.m3u8",
             category = "قنوات منوعة"
-        ),
-        TvChannelItem(
-            id = "tv_jazeera",
-            title = "قناة الجزيرة الإخبارية HD مباشر",
-            name = "Al Jazeera Arabic",
-            logo = "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80",
-            streamUrl = "https://live-hls-web-aje.akamaized.net/hls/live/2004245-b/aje/index.m3u8",
-            category = "قنوات إخبارية"
         ),
         TvChannelItem(
             id = "tv_arabiya",

@@ -3,13 +3,10 @@ package com.almahala.netplay.ui.compose
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.media.AudioManager
 import android.net.Uri
 import android.view.TextureView
-import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -27,7 +24,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -40,14 +36,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -61,10 +55,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.almahala.netplay.network.CloudflareClient
-import com.almahala.netplay.network.RealVoipEngine
 import com.almahala.netplay.network.ZegoCallManager
 import com.almahala.netplay.ui.RoomCameraHelper
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 // ----------------------------------------------------
@@ -111,7 +103,7 @@ data class TvRoomUserItem(
 @Composable
 fun TvChannelsRoomScreen(
     roomId: String = "tv_main_sports",
-    initialStreamUrl: String = "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/501.m3u8",
+    initialStreamUrl: String = "https://live.kwikmotion.com/smcquranlive/quranradiolive/playlist.m3u8",
     roomTitle: String = "بث القنوات الفضائية والرياضية",
     roomCode: String = "#TV-SPORTS",
     isStealthMode: Boolean = false,
@@ -204,9 +196,6 @@ fun TvChannelsRoomScreen(
     var isIntercomLoudspeaker by remember { mutableStateOf(true) }
     var isNoiseSuppressionEnabled by remember { mutableStateOf(true) }
     var isEchoCancellationEnabled by remember { mutableStateOf(true) }
-    var isAutoGainControlEnabled by remember { mutableStateOf(true) }
-    var micSensitivity by remember { mutableFloatStateOf(0.85f) }
-    var isPushToTalkMode by remember { mutableStateOf(false) }
 
     // Cameras Configuration & State
     var isCameraActive by remember { mutableStateOf(false) }
@@ -328,8 +317,7 @@ fun TvChannelsRoomScreen(
                         }
                         "MUTE_VOICE" -> {
                             isIntercomTalking = false
-                            ZegoCallManager.setMicrophoneMute(true)
-                            RealVoipEngine.setMute(true)
+                            ZegoCallManager.stopPublishingAudio()
                             Toast.makeText(context, "تم كتم صوت المايكروفون الخاص بك من قبل المشرف 🔇", Toast.LENGTH_SHORT).show()
                         }
                         "ALLOW_VIDEO" -> {
@@ -386,15 +374,45 @@ fun TvChannelsRoomScreen(
     ) { isGranted ->
         if (isGranted) {
             isIntercomTalking = true
-            ZegoCallManager.setMicrophoneMute(false)
+            ZegoCallManager.startPublishingAudio(context, zegoAudioRoomId, currentUserId)
             ZegoCallManager.setSpeakerEnabled(context, true)
-            RealVoipEngine.ensureAudioCaptureStarted(context)
-            RealVoipEngine.setMute(false)
-            RealVoipEngine.setSpeaker(context, true)
             syncSocket.broadcastVoiceState(true)
             Toast.makeText(context, "تم تشغيل المايكروفون 🎙️", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(context, "يرجى منح إذن المايكروفون للتحدث 🔒", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun toggleCameraWithPermission() {
+        if (isCameraActive) {
+            isCameraActive = false
+            syncSocket.broadcastCameraState(false, isFrontCamera)
+        } else {
+            val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+            if (hasPerm) {
+                isCameraActive = true
+                syncSocket.broadcastCameraState(true, isFrontCamera)
+            } else {
+                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            }
+        }
+    }
+
+    fun toggleIntercomWithPermission() {
+        if (isIntercomTalking) {
+            isIntercomTalking = false
+            ZegoCallManager.stopPublishingAudio()
+            syncSocket.broadcastVoiceState(false)
+        } else {
+            val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            if (hasPerm) {
+                isIntercomTalking = true
+                ZegoCallManager.startPublishingAudio(context, zegoAudioRoomId, currentUserId)
+                ZegoCallManager.setSpeakerEnabled(context, true)
+                syncSocket.broadcastVoiceState(true)
+            } else {
+                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            }
         }
     }
 
@@ -420,22 +438,13 @@ fun TvChannelsRoomScreen(
     // Initialize Zego audio room
     DisposableEffect(Unit) {
         try {
-            ZegoCallManager.initialize(context)
+            ZegoCallManager.initEngine(context)
             ZegoCallManager.setSpeakerEnabled(context, true)
-            ZegoCallManager.setMicrophoneMute(true)
-            ZegoCallManager.setAudioNoiseSuppression(isNoiseSuppressionEnabled)
-            ZegoCallManager.setAudioEchoCancellation(isEchoCancellationEnabled)
-            ZegoCallManager.setAudioAutoGainControl(isAutoGainControlEnabled)
-            RealVoipEngine.init(context)
-            RealVoipEngine.setSpeaker(context, true)
-            RealVoipEngine.setMute(true)
         } catch (_: Throwable) {}
         onDispose {
             try {
-                ZegoCallManager.setMicrophoneMute(true)
-                RealVoipEngine.setMute(true)
+                ZegoCallManager.stopPublishingAudio()
                 syncSocket.disconnect()
-                RoomCameraHelper.stopCamera()
             } catch (_: Throwable) {}
         }
     }
@@ -548,19 +557,6 @@ fun TvChannelsRoomScreen(
                                     webViewClient = object : WebViewClient() {
                                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
                                     }
-                                    val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
-                                    addJavascriptInterface(
-                                        object {
-                                            @JavascriptInterface
-                                            fun reportState(state: Int) {
-                                                mainHandler.post {
-                                                    if (state == 1) isPlaying = true
-                                                    else if (state == 2) isPlaying = false
-                                                }
-                                            }
-                                        },
-                                        "AndroidBridge"
-                                    )
                                     webViewRef = this
 
                                     val initialUrl = currentChannel.streamUrl
@@ -657,22 +653,6 @@ fun TvChannelsRoomScreen(
                                                         }
                                                     } catch(e) {}
                                                 }
-
-                                                video.addEventListener('play', function() {
-                                                    try {
-                                                        if (window.AndroidBridge && window.AndroidBridge.reportState) {
-                                                            window.AndroidBridge.reportState(1);
-                                                        }
-                                                    } catch(e) {}
-                                                });
-
-                                                video.addEventListener('pause', function() {
-                                                    try {
-                                                        if (window.AndroidBridge && window.AndroidBridge.reportState) {
-                                                            window.AndroidBridge.reportState(2);
-                                                        }
-                                                    } catch(e) {}
-                                                });
 
                                                 if (currentUrl) {
                                                     loadStream(currentUrl);
@@ -875,10 +855,9 @@ fun TvChannelsRoomScreen(
                     ) {
                         // 1. Catalog / Channels
                         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            DockSubTabButton(
-                                label = "القنوات",
+                            TvDockIconButton(
                                 icon = Icons.Default.LiveTv,
-                                isSelected = activeSubTab == TvRoomSubTab.PLAYER,
+                                isActive = activeSubTab == TvRoomSubTab.PLAYER,
                                 isDark = isDark,
                                 onClick = {
                                     activeSubTab = TvRoomSubTab.PLAYER
@@ -889,10 +868,9 @@ fun TvChannelsRoomScreen(
 
                         // 2. Chat
                         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            DockSubTabButton(
-                                label = "الدردشة",
+                            TvDockIconButton(
                                 icon = Icons.Default.ChatBubbleOutline,
-                                isSelected = activeSubTab == TvRoomSubTab.CHAT,
+                                isActive = activeSubTab == TvRoomSubTab.CHAT,
                                 isDark = isDark,
                                 badgeCount = if (activeSubTab != TvRoomSubTab.CHAT) chatMessages.size else 0,
                                 onClick = {
@@ -904,12 +882,10 @@ fun TvChannelsRoomScreen(
 
                         // 3. Cameras
                         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            DockSubTabButton(
-                                label = "الكاميرات",
+                            TvDockIconButton(
                                 icon = Icons.Default.Videocam,
-                                isSelected = activeSubTab == TvRoomSubTab.CAMERAS,
+                                isActive = activeSubTab == TvRoomSubTab.CAMERAS,
                                 isDark = isDark,
-                                isLivePulse = isCameraActive,
                                 onClick = {
                                     activeSubTab = TvRoomSubTab.CAMERAS
                                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -919,12 +895,10 @@ fun TvChannelsRoomScreen(
 
                         // 4. Intercom / Walkie-Talkie
                         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            DockSubTabButton(
-                                label = "اللاسلكي",
+                            TvDockIconButton(
                                 icon = Icons.Default.Mic,
-                                isSelected = activeSubTab == TvRoomSubTab.INTERCOM,
+                                isActive = activeSubTab == TvRoomSubTab.INTERCOM,
                                 isDark = isDark,
-                                isLivePulse = isIntercomTalking,
                                 onClick = {
                                     activeSubTab = TvRoomSubTab.INTERCOM
                                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -934,10 +908,9 @@ fun TvChannelsRoomScreen(
 
                         // 5. Users
                         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            DockSubTabButton(
-                                label = "المتواجدون",
+                            TvDockIconButton(
                                 icon = Icons.Default.PeopleOutline,
-                                isSelected = activeSubTab == TvRoomSubTab.USERS,
+                                isActive = activeSubTab == TvRoomSubTab.USERS,
                                 isDark = isDark,
                                 badgeCount = roomUsers.size,
                                 onClick = {
@@ -949,10 +922,9 @@ fun TvChannelsRoomScreen(
 
                         // 6. Settings
                         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            DockSubTabButton(
-                                label = "الإعدادات",
+                            TvDockIconButton(
                                 icon = Icons.Default.Settings,
-                                isSelected = activeSubTab == TvRoomSubTab.SETTINGS,
+                                isActive = activeSubTab == TvRoomSubTab.SETTINGS,
                                 isDark = isDark,
                                 onClick = {
                                     activeSubTab = TvRoomSubTab.SETTINGS
@@ -1369,21 +1341,7 @@ fun TvChannelsRoomScreen(
                                     ) {
                                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                             Button(
-                                                onClick = {
-                                                    if (isCameraActive) {
-                                                        isCameraActive = false
-                                                        RoomCameraHelper.stopCamera()
-                                                        syncSocket.broadcastCameraState(false, isFrontCamera)
-                                                    } else {
-                                                        val hasCam = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-                                                        if (hasCam) {
-                                                            isCameraActive = true
-                                                            syncSocket.broadcastCameraState(true, isFrontCamera)
-                                                        } else {
-                                                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                                                        }
-                                                    }
-                                                },
+                                                onClick = { toggleCameraWithPermission() },
                                                 shape = RoundedCornerShape(8.dp),
                                                 colors = ButtonDefaults.buttonColors(
                                                     containerColor = if (isCameraActive) Color(0xFFDC2626) else Color(0xFF0284C7)
@@ -1410,7 +1368,6 @@ fun TvChannelsRoomScreen(
                                                 IconButton(
                                                     onClick = {
                                                         isFrontCamera = !isFrontCamera
-                                                        RoomCameraHelper.switchCamera(context, isFrontCamera)
                                                         syncSocket.broadcastCameraState(true, isFrontCamera)
                                                     },
                                                     modifier = Modifier.size(32.dp)
@@ -1451,8 +1408,13 @@ fun TvChannelsRoomScreen(
                                                 AndroidView(
                                                     factory = { ctx ->
                                                         TextureView(ctx).apply {
-                                                            RoomCameraHelper.startCamera(ctx, this, isFrontCamera)
+                                                            val helper = RoomCameraHelper(ctx)
+                                                            helper.startCamera(this, front = isFrontCamera)
+                                                            this.tag = helper
                                                         }
+                                                    },
+                                                    onRelease = { view ->
+                                                        (view.tag as? RoomCameraHelper)?.closeCamera()
                                                     },
                                                     modifier = Modifier.fillMaxSize()
                                                 )
@@ -1556,19 +1518,7 @@ fun TvChannelsRoomScreen(
                                                 Toast.makeText(context, "المايكروفون مكتوم من قبل المشرف 🔇", Toast.LENGTH_SHORT).show()
                                                 return@clickable
                                             }
-                                            val hasAudio = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-                                            if (!hasAudio) {
-                                                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                                return@clickable
-                                            }
-                                            isIntercomTalking = !isIntercomTalking
-                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                            ZegoCallManager.setMicrophoneMute(!isIntercomTalking)
-                                            ZegoCallManager.setSpeakerEnabled(context, true)
-                                            RealVoipEngine.ensureAudioCaptureStarted(context)
-                                            RealVoipEngine.setMute(!isIntercomTalking)
-                                            RealVoipEngine.setSpeaker(context, true)
-                                            syncSocket.broadcastVoiceState(isIntercomTalking)
+                                            toggleIntercomWithPermission()
                                         },
                                     contentAlignment = Alignment.Center
                                 ) {
@@ -1697,7 +1647,7 @@ fun TvChannelsRoomScreen(
                                                             modifier = Modifier.fillMaxWidth(),
                                                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                                                         ) {
-                                                            InlinePermissionChip(
+                                                            TvInlinePermissionChip(
                                                                 label = if (user.role.contains("مشرف")) "إلغاء الإشراف" else "ترقية لمشرف 🛡️",
                                                                 icon = Icons.Default.Shield,
                                                                 color = Color(0xFF0284C7),
@@ -1711,7 +1661,7 @@ fun TvChannelsRoomScreen(
                                                                     Toast.makeText(context, "تم تعديل رتبة ${user.name}", Toast.LENGTH_SHORT).show()
                                                                 }
                                                             )
-                                                            InlinePermissionChip(
+                                                            TvInlinePermissionChip(
                                                                 label = if (user.canChangeVideo) "منع التبديل 🔒" else "سماح بالتبديل 📺",
                                                                 icon = Icons.Default.LiveTv,
                                                                 color = if (user.canChangeVideo) Color(0xFFDC2626) else Color(0xFF10B981),
@@ -1729,7 +1679,7 @@ fun TvChannelsRoomScreen(
                                                             modifier = Modifier.fillMaxWidth(),
                                                             horizontalArrangement = Arrangement.spacedBy(6.dp)
                                                         ) {
-                                                            InlinePermissionChip(
+                                                            TvInlinePermissionChip(
                                                                 label = if (user.isMutedVoice) "تشغيل المايك 🎙️" else "كتم المايك 🔇",
                                                                 icon = if (user.isMutedVoice) Icons.Default.Mic else Icons.Default.MicOff,
                                                                 color = Color(0xFFD97706),
@@ -1741,7 +1691,7 @@ fun TvChannelsRoomScreen(
                                                                     syncSocket.broadcastMemberAction(user.id, if (updated.isMutedVoice) "MUTE_VOICE" else "UNMUTE_VOICE")
                                                                 }
                                                             )
-                                                            InlinePermissionChip(
+                                                            TvInlinePermissionChip(
                                                                 label = "طرد العضو 🚪",
                                                                 icon = Icons.Default.ExitToApp,
                                                                 color = Color(0xFFEF4444),
@@ -1755,7 +1705,7 @@ fun TvChannelsRoomScreen(
                                                             )
                                                         }
                                                     } else if (isMe) {
-                                                        InlinePermissionChip(
+                                                        TvInlinePermissionChip(
                                                             label = "مغادرة الغرفة 🚪",
                                                             icon = Icons.Default.Logout,
                                                             color = Color(0xFFEF4444),
@@ -1855,38 +1805,37 @@ fun TvChannelsRoomScreen(
                                             )
                                         }
 
-                                        SettingsSwitchRow(
+                                        TvSettingsSwitchRow(
                                             title = "إلغاء الضوضاء الذكي (AI Noise Suppression)",
                                             subtitle = "تصفية صوت التشويش المحيط بالميكروفون",
                                             checked = isNoiseSuppressionEnabled,
                                             isDark = isDark,
-                                            onCheckedChange = {
-                                                isNoiseSuppressionEnabled = it
+                                            onCheckedChange = { checked ->
+                                                isNoiseSuppressionEnabled = checked
                                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                             }
                                         )
 
-                                        SettingsSwitchRow(
+                                        TvSettingsSwitchRow(
                                             title = "مانع الصدى الصوتي (Echo Cancellation)",
                                             subtitle = "منع ارتداد صوت القناة داخل الميكروفون",
                                             checked = isEchoCancellationEnabled,
                                             isDark = isDark,
-                                            onCheckedChange = {
-                                                isEchoCancellationEnabled = it
+                                            onCheckedChange = { checked ->
+                                                isEchoCancellationEnabled = checked
                                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                             }
                                         )
 
-                                        SettingsSwitchRow(
+                                        TvSettingsSwitchRow(
                                             title = "إخراج الصوت عبر مكبر الصوت الخارجي",
                                             subtitle = "صوت الهوكي توكي يخرج من مكبر الصوت الرئيسي",
                                             checked = isIntercomLoudspeaker,
                                             isDark = isDark,
-                                            onCheckedChange = {
-                                                isIntercomLoudspeaker = it
+                                            onCheckedChange = { checked ->
+                                                isIntercomLoudspeaker = checked
                                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                                ZegoCallManager.setSpeakerEnabled(context, it)
-                                                RealVoipEngine.setSpeaker(context, it)
+                                                ZegoCallManager.setSpeakerEnabled(context, checked)
                                             }
                                         )
                                     }
@@ -2031,5 +1980,116 @@ fun TvChannelsRoomScreen(
                 }
             }
         }
+    }
+}
+
+// ----------------------------------------------------
+// DEDICATED HELPER COMPOSABLES FOR TV ROOM
+// ----------------------------------------------------
+@Composable
+private fun TvDockIconButton(
+    icon: ImageVector,
+    isActive: Boolean,
+    badgeCount: Int? = null,
+    isDark: Boolean = false,
+    onClick: () -> Unit
+) {
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier.size(36.dp)
+    ) {
+        IconButton(
+            onClick = onClick,
+            modifier = Modifier.size(32.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (isActive) Color(0xFF0284C7) else (if (isDark) Color(0xFF94A3B8) else Color(0xFF64748B)),
+                modifier = Modifier.size(if (isActive) 21.dp else 19.dp)
+            )
+        }
+        if (badgeCount != null && badgeCount > 0) {
+            Text(
+                text = "$badgeCount",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = Color(0xFFDC2626),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .offset(x = 2.dp, y = (-2).dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun TvInlinePermissionChip(
+    label: String,
+    icon: ImageVector,
+    color: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(8.dp),
+        color = color.copy(alpha = 0.08f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.3f)),
+        modifier = modifier
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(imageVector = icon, contentDescription = null, tint = color, modifier = Modifier.size(13.dp))
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = label,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = color
+            )
+        }
+    }
+}
+
+@Composable
+private fun TvSettingsSwitchRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    isDark: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(
+                text = title,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (isDark) DarkTextPrimary else Color(0xFF0F172A)
+            )
+            Text(
+                text = subtitle,
+                fontSize = 9.sp,
+                color = if (isDark) DarkTextSecondary else Color(0xFF64748B)
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = Color(0xFF0284C7),
+                uncheckedThumbColor = Color(0xFFCBD5E1),
+                uncheckedTrackColor = if (isDark) DarkBorder else Color(0xFFE2EAFD)
+            )
+        )
     }
 }
