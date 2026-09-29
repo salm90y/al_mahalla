@@ -164,79 +164,43 @@ fun RoomsScreen(
         )
     )
 
-    // Interactive Room Experience Dialog / Screen
+    // Informative Dialog for non-dedicated rooms
     if (selectedRoomForExperience != null) {
-        when (selectedRoomForExperience) {
-            RoomType.QURAN -> {
-                QuranHomeScreen(
-                    navController = navController,
-                    onBack = { selectedRoomForExperience = null }
+        val currentRoom = allContentRooms.find { it.type == selectedRoomForExperience }
+        AlertDialog(
+            onDismissRequest = { selectedRoomForExperience = null },
+            confirmButton = {
+                Button(
+                    onClick = { selectedRoomForExperience = null },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("دخول الغرفة", fontFamily = TajawalFontFamily, color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { selectedRoomForExperience = null }) {
+                    Text("رجوع", fontFamily = TajawalFontFamily, color = Color(0xFF64748B))
+                }
+            },
+            title = {
+                Text(
+                    text = currentRoom?.title ?: "غرفة تفاعلية",
+                    fontFamily = TajawalFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF0F172A)
                 )
-                return
-            }
-            RoomType.YOUTUBE -> {
-                selectedRoomForExperience = null
-                navController.navigate("youtube_lobby")
-                return
-            }
-            RoomType.TV_CHANNELS -> {
-                selectedRoomForExperience = null
-                navController.navigate("tv_lobby")
-                return
-            }
-            RoomType.MOVIES_SERIES -> {
-                selectedRoomForExperience = null
-                navController.navigate("movies_lobby")
-                return
-            }
-            RoomType.GAMES -> {
-                GamesRoomScreen(
-                    onBack = { selectedRoomForExperience = null },
-                    onStartPs1 = {
-                        val intent = Intent(context, MainActivity::class.java)
-                        context.startActivity(intent)
-                    }
+            },
+            text = {
+                Text(
+                    text = "مرحباً بك في غرفة ${currentRoom?.title}. الغرفة جاهزة ومجهزة بالبث والتواصل الصوتي والمرئي التفاعلي.",
+                    fontFamily = TajawalFontFamily,
+                    color = Color(0xFF64748B)
                 )
-                return
-            }
-            else -> {
-                val currentRoom = allContentRooms.find { it.type == selectedRoomForExperience }
-                AlertDialog(
-                    onDismissRequest = { selectedRoomForExperience = null },
-                    confirmButton = {
-                        Button(
-                            onClick = { selectedRoomForExperience = null },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
-                            shape = RoundedCornerShape(10.dp)
-                        ) {
-                            Text("دخول الغرفة", fontFamily = TajawalFontFamily, color = Color.White)
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = { selectedRoomForExperience = null }) {
-                            Text("رجوع", fontFamily = TajawalFontFamily, color = Color(0xFF64748B))
-                        }
-                    },
-                    title = {
-                        Text(
-                            text = currentRoom?.title ?: "غرفة تفاعلية",
-                            fontFamily = TajawalFontFamily,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF0F172A)
-                        )
-                    },
-                    text = {
-                        Text(
-                            text = "مرحباً بك في غرفة ${currentRoom?.title}. الغرفة جاهزة ومجهزة بالبث والتواصل الصوتي والمرئي التفاعلي.",
-                            fontFamily = TajawalFontFamily,
-                            color = Color(0xFF64748B)
-                        )
-                    },
-                    containerColor = Color.White,
-                    shape = RoundedCornerShape(20.dp)
-                )
-            }
-        }
+            },
+            containerColor = Color.White,
+            shape = RoundedCornerShape(20.dp)
+        )
     }
 
     Column(

@@ -54,13 +54,17 @@ object MoviesRoomManager {
     }
 
     fun isAppOwner(context: Context): Boolean {
-        val u = UserManager.getCurrentUser(context)
-        if (u?.isAdmin == true) return true
-        val name = CloudflareClient.getCurrentUsername(context)
-        val email = u?.email ?: ""
-        return name.equals("ahmed", ignoreCase = true) ||
-               name.contains("1986") ||
-               email.equals("ahmed1986y5@gmail.com", ignoreCase = true)
+        return try {
+            val u = UserManager.getCurrentUser(context)
+            if (u?.isAdmin == true) return true
+            val name = CloudflareClient.getCurrentUsername(context)
+            val email = u?.email ?: ""
+            name.equals("ahmed", ignoreCase = true) ||
+            name.contains("1986") ||
+            email.equals("ahmed1986y5@gmail.com", ignoreCase = true)
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     fun updateRoomMovie(context: Context, roomId: String, streamUrl: String, movieTitle: String, posterUrl: String) {

@@ -616,10 +616,9 @@ fun TvChannelsRoomScreen(
                                                 video {
                                                     width: 100% !important;
                                                     height: 100% !important;
-                                                    object-fit: cover !important;
+                                                    object-fit: contain !important;
                                                     background: #000000;
-                                                    transform: scale(1.02);
-                                                    transform-origin: center center;
+                                                    transform: none !important;
                                                 }
                                                 #touch-shield {
                                                     position: absolute;

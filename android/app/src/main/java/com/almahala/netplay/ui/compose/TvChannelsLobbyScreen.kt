@@ -89,13 +89,21 @@ fun TvChannelsLobbyScreen(
 
     fun refreshRooms() {
         isLoadingRooms = true
-        TvChannelsRoomManager.fetchRealPublicRooms(context) { rooms ->
-            val myRooms = TvChannelsRoomManager.loadRoomsLocally(context).filter {
-                it.hostId == currentUserId || (currentUserName.isNotBlank() && it.hostName.equals(currentUserName, ignoreCase = true))
+        try {
+            TvChannelsRoomManager.fetchRealPublicRooms(context) { rooms ->
+                try {
+                    val myRooms = TvChannelsRoomManager.loadRoomsLocally(context).filter {
+                        it.hostId == currentUserId || (currentUserName.isNotBlank() && it.hostName.equals(currentUserName, ignoreCase = true))
+                    }
+                    val combined = (rooms + myRooms).mapIndexed { index, r ->
+                        if (r.roomId.isBlank()) r.copy(roomId = "tv_room_${index}_${r.roomCode}") else r
+                    }.distinctBy { it.roomId }
+                    publicRooms.clear()
+                    publicRooms.addAll(combined)
+                } catch (_: Throwable) {}
+                isLoadingRooms = false
             }
-            val combined = (rooms + myRooms).distinctBy { it.roomId }
-            publicRooms.clear()
-            publicRooms.addAll(combined)
+        } catch (_: Throwable) {
             isLoadingRooms = false
         }
     }
@@ -527,7 +535,7 @@ fun TvChannelsLobbyScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                         contentPadding = PaddingValues(bottom = 16.dp)
                     ) {
-                        items(filteredRooms, key = { it.roomId }) { room ->
+                        items(filteredRooms, key = { room -> "${room.roomId}_${room.roomCode}" }) { room ->
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()

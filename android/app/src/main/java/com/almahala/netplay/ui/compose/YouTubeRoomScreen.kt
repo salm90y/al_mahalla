@@ -836,7 +836,7 @@ fun YouTubeRoomScreen(
                                                 overflow: hidden;
                                                 background: #000000;
                                             }
-                                            /* Clean edge-to-edge screen fill: No cinematic black bars, fills full container cleanly */
+                                            /* Natural clean maximum fit without distortion, no zoom crop */
                                             iframe, #player, video {
                                                 width: 100% !important;
                                                 height: 100% !important;
@@ -844,13 +844,12 @@ fun YouTubeRoomScreen(
                                                 position: absolute;
                                                 top: 0;
                                                 left: 0;
-                                                object-fit: cover !important;
-                                                transform: scale(1.35);
-                                                transform-origin: center center;
-                                                transition: transform 0.3s ease;
+                                                object-fit: contain !important;
+                                                transform: none !important;
+                                                background: #000000;
                                             }
                                             .normal-fit iframe, .normal-fit #player, .normal-fit video {
-                                                transform: scale(1.0) !important;
+                                                transform: none !important;
                                                 object-fit: contain !important;
                                             }
                                             /* Touch Shield: Intercepts taps so external app prompts and play/pause buttons are never shown on video screen */

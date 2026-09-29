@@ -287,7 +287,11 @@ object TvChannelsRoomManager {
     }
 
     fun isAppOwner(context: Context): Boolean {
-        return MoviesRoomManager.isAppOwner(context)
+        return try {
+            MoviesRoomManager.isAppOwner(context)
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     fun updateRoomChannel(context: Context, roomId: String, streamUrl: String, channelTitle: String, logoUrl: String) {
