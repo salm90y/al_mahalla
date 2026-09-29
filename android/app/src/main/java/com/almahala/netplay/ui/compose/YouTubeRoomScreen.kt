@@ -543,25 +543,32 @@ fun YouTubeRoomScreen(
     // REAL ZEGO WALKIE-TALKIE AUDIO ROOM INITIALIZATION WITH LOUDSPEAKER ROUTING
     val zegoAudioRoomId = remember(roomId) { "yt_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}" }
     LaunchedEffect(zegoAudioRoomId) {
-        // Enforce Loudspeaker on Android AudioManager immediately
-        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         try {
-            audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
-            audioManager?.isSpeakerphoneOn = true
-        } catch (_: Exception) {}
+            // Enforce Loudspeaker on Android AudioManager immediately
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            try {
+                audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+                audioManager?.isSpeakerphoneOn = true
+            } catch (_: Exception) {}
 
-        ZegoCallManager.startCall(
-            context = context,
-            roomId = zegoAudioRoomId,
-            userId = currentUserId,
-            userName = currentUserName,
-            isVideo = false,
-            isOutgoing = true,
-            onConnected = {
-                ZegoCallManager.setMicrophoneMute(true)
-                ZegoCallManager.setSpeakerEnabled(context, true)
-            }
-        )
+            ZegoCallManager.startCall(
+                context = context,
+                roomId = zegoAudioRoomId,
+                userId = currentUserId,
+                userName = currentUserName,
+                isVideo = false,
+                isOutgoing = true,
+                onConnected = {
+                    try {
+                        ZegoCallManager.setMicrophoneMute(true)
+                        ZegoCallManager.setSpeakerEnabled(context, true)
+                    } catch (_: Exception) {}
+                },
+                onError = {
+                    // Fail silently for watch party audio so video continues smoothly
+                }
+            )
+        } catch (_: Throwable) {}
     }
 
     // Periodic Heartbeat Sync: Host synchronizes playhead every 8 seconds to prevent any drift
@@ -578,9 +585,13 @@ fun YouTubeRoomScreen(
 
     DisposableEffect(roomId, zegoAudioRoomId) {
         onDispose {
-            syncSocket.disconnect()
-            ZegoCallManager.endCall(context, zegoAudioRoomId)
-            RealVoipEngine.stopVoipSession(context)
+            try {
+                syncSocket.disconnect()
+                ZegoCallManager.endCall(context, zegoAudioRoomId)
+                RealVoipEngine.stopVoipSession(context)
+                webViewRef?.destroy()
+                webViewRef = null
+            } catch (_: Throwable) {}
         }
     }
 
@@ -752,16 +763,12 @@ fun YouTubeRoomScreen(
                 ) {
                     AndroidView(
                         factory = { ctx ->
-                            val cookieMgr = CookieManager.getInstance()
-                            cookieMgr.setAcceptCookie(true)
-                            object : WebView(ctx) {
-                                override fun onWindowVisibilityChanged(visibility: Int) {
-                                    // Keep running audio and video playback when app is minimized or backgrounded
-                                    super.onWindowVisibilityChanged(View.VISIBLE)
-                                }
-                            }.apply {
-                                setLayerType(View.LAYER_TYPE_HARDWARE, null)
-                                cookieMgr.setAcceptThirdPartyCookies(this, true)
+                            WebView(ctx).apply {
+                                try {
+                                    val cookieMgr = CookieManager.getInstance()
+                                    cookieMgr.setAcceptCookie(true)
+                                    cookieMgr.setAcceptThirdPartyCookies(this, true)
+                                } catch (_: Throwable) {}
                                 layoutParams = ViewGroup.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
                                     ViewGroup.LayoutParams.MATCH_PARENT
@@ -783,18 +790,23 @@ fun YouTubeRoomScreen(
                                 webViewClient = object : WebViewClient() {
                                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
                                 }
+                                val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
                                 addJavascriptInterface(
                                     object {
                                         @JavascriptInterface
                                         fun reportTime(curr: Float, dur: Float) {
-                                            currentPositionSec = curr
-                                            if (dur > 0f) totalDurationSec = dur
+                                            mainHandler.post {
+                                                currentPositionSec = curr
+                                                if (dur > 0f) totalDurationSec = dur
+                                            }
                                         }
 
                                         @JavascriptInterface
                                         fun reportState(state: Int) {
-                                            if (state == 1) isPlaying = true
-                                            else if (state == 2) isPlaying = false
+                                            mainHandler.post {
+                                                if (state == 1) isPlaying = true
+                                                else if (state == 2) isPlaying = false
+                                            }
                                         }
                                     },
                                     "AndroidBridge"
@@ -1057,16 +1069,6 @@ fun YouTubeRoomScreen(
                         },
                         update = { webView ->
                             webViewRef = webView
-                            val targetId = currentVideo.id.trim()
-                            if (targetId.isNotEmpty()) {
-                                webView.evaluateJavascript("""
-                                    (function() {
-                                        if (typeof loadVideoById === 'function') {
-                                            loadVideoById('$targetId');
-                                        }
-                                    })();
-                                """.trimIndent(), null)
-                            }
                         },
                         modifier = Modifier.fillMaxSize()
                     )

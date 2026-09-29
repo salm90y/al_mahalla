@@ -29,9 +29,23 @@
     native <methods>;
 }
 
-# Zego Express Video & Audio Calling Engine
--keep class im.zego.zegoexpress.** { *; }
--dontwarn im.zego.zegoexpress.**
+# Keep attributes and annotations for JNI and WebView reflection
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,JavascriptInterface
+
+# Zego Express Video & Audio Calling Engine (Full SDK protection for JNI)
+-keep class im.zego.** { *; }
+-keepclassmembers class im.zego.** { *; }
+-dontwarn im.zego.**
+
+# Android WebView & JavaScript Interface
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
+-keep class android.webkit.** { *; }
+-dontwarn android.webkit.**
+-keepclassmembers class * extends android.webkit.WebView { public *; }
+-keepclassmembers class * extends android.webkit.WebViewClient { public *; }
+-keepclassmembers class * extends android.webkit.WebChromeClient { public *; }
 
 # OkHttp & Coroutines
 -dontwarn okhttp3.**

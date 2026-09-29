@@ -632,15 +632,12 @@ fun MoviesRoomScreen(
                 ) {
                     AndroidView(
                         factory = { ctx ->
-                            val cookieMgr = CookieManager.getInstance()
-                            cookieMgr.setAcceptCookie(true)
-                            object : WebView(ctx) {
-                                override fun onWindowVisibilityChanged(visibility: Int) {
-                                    super.onWindowVisibilityChanged(View.VISIBLE)
-                                }
-                            }.apply {
-                                setLayerType(View.LAYER_TYPE_HARDWARE, null)
-                                cookieMgr.setAcceptThirdPartyCookies(this, true)
+                            WebView(ctx).apply {
+                                try {
+                                    val cookieMgr = CookieManager.getInstance()
+                                    cookieMgr.setAcceptCookie(true)
+                                    cookieMgr.setAcceptThirdPartyCookies(this, true)
+                                } catch (_: Throwable) {}
                                 layoutParams = ViewGroup.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
                                     ViewGroup.LayoutParams.MATCH_PARENT
@@ -662,18 +659,23 @@ fun MoviesRoomScreen(
                                 webViewClient = object : WebViewClient() {
                                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
                                 }
+                                val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
                                 addJavascriptInterface(
                                     object {
                                         @JavascriptInterface
                                         fun reportTime(curr: Float, dur: Float) {
-                                            currentPositionSec = curr
-                                            if (dur > 0f) totalDurationSec = dur
+                                            mainHandler.post {
+                                                currentPositionSec = curr
+                                                if (dur > 0f) totalDurationSec = dur
+                                            }
                                         }
 
                                         @JavascriptInterface
                                         fun reportState(state: Int) {
-                                            if (state == 1) isPlaying = true
-                                            else if (state == 2) isPlaying = false
+                                            mainHandler.post {
+                                                if (state == 1) isPlaying = true
+                                                else if (state == 2) isPlaying = false
+                                            }
                                         }
                                     },
                                     "AndroidBridge"

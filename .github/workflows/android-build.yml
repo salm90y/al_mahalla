@@ -79,6 +79,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AlMahalla-v1.1.0-APK
-          path: android/app/build/outputs/apk/release/*.apk
+          path: android/app/build/outputs/apk/*/*.apk
           if-no-files-found: error
           retention-days: 14
