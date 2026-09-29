@@ -445,6 +445,9 @@ fun YouTubeRoomScreen(
         )
     }
 
+    // REAL ZEGO WALKIE-TALKIE AUDIO ROOM INITIALIZATION IN SAFE AUDIENCE MODE
+    val zegoAudioRoomId = remember(roomId) { "yt_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}" }
+
     // Permission launchers
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -463,6 +466,7 @@ fun YouTubeRoomScreen(
     ) { isGranted ->
         if (isGranted) {
             isIntercomTalking = true
+            ZegoCallManager.startPublishingAudio(zegoAudioRoomId, currentUserId)
             ZegoCallManager.setMicrophoneMute(false)
             ZegoCallManager.setSpeakerEnabled(context, true)
             syncSocket.broadcastVoiceState(true)
@@ -542,8 +546,6 @@ fun YouTubeRoomScreen(
         } catch (_: Throwable) {}
     }
 
-    // REAL ZEGO WALKIE-TALKIE AUDIO ROOM INITIALIZATION IN SAFE AUDIENCE MODE
-    val zegoAudioRoomId = remember(roomId) { "yt_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}" }
     LaunchedEffect(zegoAudioRoomId) {
         try {
             ZegoCallManager.joinWatchParty(

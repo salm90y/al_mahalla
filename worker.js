@@ -1,59 +1,29 @@
-/**
- * Cloudflare Worker for Al-Mahalla (Domain: ahmed1986y.com)
- * API: https://api.ahmed1986y.com
- * D1: ps1_db | R2: ps1-media.ahmed1986y.com | KV: SESSIONS
- */
-
+// worker/src/index.ts
 console.log("CHECK: D1 EXISTS? R2 EXISTS? KV EXISTS? GITHUB CONNECTED? DOMAIN CONNECTED? -> D1: true, R2: true, KV: true, GITHUB: true, DOMAIN: true");
-
-export interface Env {
-  DB: D1Database;
-  SESSIONS: KVNamespace;
-  MEDIA_BUCKET: R2Bucket;
-  CHAT_ROOM: DurableObjectNamespace;
-  JWT_SECRET?: string;
-  ZEGO_APP_ID?: string;
-  ZEGO_APP_SIGN?: string;
-  DOMAIN?: string;
-  API_DOMAIN?: string;
-}
-
-// Durable Object for Real-Time Chat & Signaling
-export class ChatRoomDO {
-  state: DurableObjectState;
-  sessions: Map<WebSocket, { userId: string; username: string; isStealth: boolean }>;
-  currentVideo: { videoId: string; videoTitle: string; isPlaying: boolean; positionSec: number } | null = null;
-  currentMovie: { streamUrl: string; title: string; posterUrl: string; isPlaying: boolean; positionSec: number } | null = null;
-
-  constructor(state: DurableObjectState) {
+var ChatRoomDO = class {
+  constructor(state) {
+    this.currentVideo = null;
+    this.currentMovie = null;
     this.state = state;
-    this.sessions = new Map();
+    this.sessions = /* @__PURE__ */ new Map();
   }
-
-  async fetch(request: Request) {
+  async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/websocket") {
       const upgradeHeader = request.headers.get("Upgrade");
       if (!upgradeHeader || upgradeHeader !== "websocket") {
         return new Response("Expected Upgrade: websocket", { status: 426 });
       }
-
       const userId = url.searchParams.get("userId") || "anonymous";
       const username = url.searchParams.get("username") || "Guest";
-      const isStealth = url.searchParams.get("stealth") === "true" || userId.startsWith("stealth_") || username === "مجهول";
-
+      const isStealth = url.searchParams.get("stealth") === "true" || userId.startsWith("stealth_") || username === "\u0645\u062C\u0647\u0648\u0644";
       const webSocketPair = new WebSocketPair();
       const [client, server] = Object.values(webSocketPair);
-
       server.accept();
       this.sessions.set(server, { userId, username, isStealth });
-
-      // Only broadcast presence if NOT in stealth mode
       if (!isStealth) {
         this.broadcast(JSON.stringify({ type: "presence", userId, username, status: "online" }), server);
       }
-
-      // Immediately send current playing video to newly connected client
       if (this.currentVideo) {
         try {
           server.send(JSON.stringify({
@@ -68,10 +38,9 @@ export class ChatRoomDO {
             positionSec: this.currentVideo.positionSec,
             senderId: "server"
           }));
-        } catch (_) {}
+        } catch (_) {
+        }
       }
-
-      // Immediately send current playing movie to newly connected client
       if (this.currentMovie) {
         try {
           server.send(JSON.stringify({
@@ -87,9 +56,9 @@ export class ChatRoomDO {
             positionSec: this.currentMovie.positionSec,
             senderId: "server"
           }));
-        } catch (_) {}
+        } catch (_) {
+        }
       }
-
       server.addEventListener("message", async (event) => {
         try {
           if (typeof event.data === "string") {
@@ -98,7 +67,7 @@ export class ChatRoomDO {
               if (data.type === "yt_video_change" && data.videoId) {
                 this.currentVideo = {
                   videoId: data.videoId,
-                  videoTitle: data.videoTitle || "فيديو متزامن",
+                  videoTitle: data.videoTitle || "\u0641\u064A\u062F\u064A\u0648 \u0645\u062A\u0632\u0627\u0645\u0646",
                   isPlaying: true,
                   positionSec: 0
                 };
@@ -108,7 +77,7 @@ export class ChatRoomDO {
               } else if (data.type === "movie_change" && data.streamUrl) {
                 this.currentMovie = {
                   streamUrl: data.streamUrl,
-                  title: data.title || "فلم / مسلسل متزامن",
+                  title: data.title || "\u0641\u0644\u0645 / \u0645\u0633\u0644\u0633\u0644 \u0645\u062A\u0632\u0627\u0645\u0646",
                   posterUrl: data.posterUrl || "",
                   isPlaying: true,
                   positionSec: 0
@@ -122,14 +91,12 @@ export class ChatRoomDO {
               this.broadcast(event.data, server);
             }
           } else {
-            // Binary audio streaming packet (PCM / raw audio buffer)
-            this.broadcast(event.data as ArrayBuffer, server);
+            this.broadcast(event.data, server);
           }
         } catch (err) {
           console.error("WS message error", err);
         }
       });
-
       server.addEventListener("close", () => {
         const session = this.sessions.get(server);
         this.sessions.delete(server);
@@ -137,42 +104,33 @@ export class ChatRoomDO {
           this.broadcast(JSON.stringify({ type: "presence", userId, username, status: "offline" }), null);
         }
       });
-
       return new Response(null, { status: 101, webSocket: client });
     }
-
     return new Response("Not found", { status: 404 });
   }
-
-  broadcast(message: string | ArrayBuffer | ArrayBufferView, sender: WebSocket | null) {
+  broadcast(message, sender) {
     for (const [ws] of this.sessions) {
       if (ws !== sender) {
         try {
-          ws.send(message as any);
+          ws.send(message);
         } catch {
           this.sessions.delete(ws);
         }
       }
     }
   }
-}
-
-// Crypto & Password Hashing using SHA-256 with Salt
-async function hashPassword(password: string, salt: string = "ps1_combat_salt_2026"): Promise<string> {
+};
+async function hashPassword(password, salt = "ps1_combat_salt_2026") {
   const enc = new TextEncoder().encode(password + salt);
   const hash = await crypto.subtle.digest("SHA-256", enc);
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(hash)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-
-async function signJwt(payload: any, secret: string): Promise<string> {
+async function signJwt(payload, secret) {
   const header = { alg: "HS256", typ: "JWT" };
-  const encodeBase64Url = (obj: any) =>
-    btoa(JSON.stringify(obj)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-
+  const encodeBase64Url = (obj) => btoa(JSON.stringify(obj)).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
   const headerB64 = encodeBase64Url(header);
   const payloadB64 = encodeBase64Url(payload);
   const data = `${headerB64}.${payloadB64}`;
-
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -181,20 +139,14 @@ async function signJwt(payload: any, secret: string): Promise<string> {
     ["sign"]
   );
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
-  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig)))
-    .replace(/=/g, "")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_");
-
+  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
   return `${data}.${sigB64}`;
 }
-
-async function verifyJwt(token: string, secret: string): Promise<any | null> {
+async function verifyJwt(token, secret) {
   try {
     const parts = token.split(".");
     if (parts.length !== 3) return null;
     const [headerB64, payloadB64, sigB64] = parts;
-
     const data = `${headerB64}.${payloadB64}`;
     const key = await crypto.subtle.importKey(
       "raw",
@@ -203,22 +155,18 @@ async function verifyJwt(token: string, secret: string): Promise<any | null> {
       false,
       ["verify"]
     );
-
     const sigStr = atob(sigB64.replace(/-/g, "+").replace(/_/g, "/"));
     const sigBytes = new Uint8Array(sigStr.length);
     for (let i = 0; i < sigStr.length; i++) sigBytes[i] = sigStr.charCodeAt(i);
-
     const valid = await crypto.subtle.verify("HMAC", key, sigBytes, new TextEncoder().encode(data));
     if (!valid) return null;
-
     const payloadStr = atob(payloadB64.replace(/-/g, "+").replace(/_/g, "/"));
     return JSON.parse(payloadStr);
   } catch {
     return null;
   }
 }
-
-async function ensureAllTables(db: any) {
+async function ensureAllTables(db) {
   if (!db) return;
   const queries = [
     `CREATE TABLE IF NOT EXISTS users (
@@ -290,7 +238,7 @@ async function ensureAllTables(db: any) {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       title TEXT NOT NULL,
-      category TEXT DEFAULT 'قنوات فضائية',
+      category TEXT DEFAULT '\u0642\u0646\u0648\u0627\u062A \u0641\u0636\u0627\u0626\u064A\u0629',
       logo_url TEXT DEFAULT '',
       stream_url TEXT NOT NULL,
       epg_id TEXT DEFAULT '',
@@ -305,37 +253,34 @@ async function ensureAllTables(db: any) {
     try {
       await db.prepare(q).run();
     } catch (e) {
-      // Ignored if already exists
     }
   }
-
-  // Auto-seed default TV channels from M3U IPTV catalog if table is empty
   try {
     const countCheck = await db.prepare("SELECT COUNT(*) as cnt FROM tv_channels").first();
     if (countCheck && Number(countCheck.cnt) === 0) {
       const defaultChannels = [
-        ['ch_bein_news', 'beIN SPORTS News', 'beIN SPORTS الإخبارية المفتوحة HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1508098682722-e99c43a406b2?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/501.m3u8', 1],
-        ['ch_bein_1', 'beIN SPORTS 1', 'beIN SPORTS 1 HD Premium', 'قنوات رياضية', 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/502.m3u8', 2],
-        ['ch_bein_2', 'beIN SPORTS 2', 'beIN SPORTS 2 HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/503.m3u8', 3],
-        ['ch_bein_3', 'beIN SPORTS 3', 'beIN SPORTS 3 HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/504.m3u8', 4],
-        ['ch_ssc_1', 'SSC 1 HD', 'قناة SSC الرياضية 1 HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1518091043644-c1d4457512c6?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/505.m3u8', 5],
-        ['ch_alkass_1', 'Alkass 1 HD', 'قناة الكأس القطرية 1 HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1508098682722-e99c43a406b2?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/506.m3u8', 6],
-        ['ch_ad_sports', 'Abu Dhabi Sports', 'قناة أبوظبي الرياضية 1 HD', 'قنوات رياضية', 'https://images.unsplash.com/photo-1518091043644-c1d4457512c6?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/507.m3u8', 7],
-        ['ch_quran', 'القرآن الكريم مباشر', 'قناة القرآن الكريم (مكة المكرمة مباشر)', 'قنوات إسلامية', 'https://images.unsplash.com/photo-1591604129939-f1efa4d9f7fa?w=600&auto=format&fit=crop&q=80', 'https://win.holol.com/live/quran/playlist.m3u8', 8],
-        ['ch_sunnah', 'السنة النبوية مباشر', 'قناة السنة النبوية (المدينة المنورة مباشر)', 'قنوات إسلامية', 'https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?w=600&auto=format&fit=crop&q=80', 'https://win.holol.com/live/sunnah/playlist.m3u8', 9],
-        ['ch_mbc_1', 'MBC 1 HD', 'قناة MBC 1 HD الرسمية', 'قنوات منوعة', 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/601.m3u8', 10],
-        ['ch_mbc_masr', 'MBC مصر HD', 'قناة MBC مصر HD', 'قنوات منوعة', 'https://images.unsplash.com/photo-1518791841217-8f162f1e1131?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/602.m3u8', 11],
-        ['ch_mbc_action', 'MBC Action HD', 'قناة MBC Action HD أفلام وحركة', 'قنوات ترفيهية', 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/603.m3u8', 12],
-        ['ch_mbc_drama', 'MBC Drama HD', 'قناة MBC Drama HD مسلسلات', 'قنوات ترفيهية', 'https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/604.m3u8', 13],
-        ['ch_jazeera', 'الجزيرة الإخبارية', 'قناة الجزيرة الإخبارية HD مباشر', 'قنوات إخبارية', 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80', 'https://live-hls-web-aje.akamaized.net/hls/live/2004245-b/aje/index.m3u8', 14],
-        ['ch_arabiya', 'العربية الإخبارية', 'قناة العربية الإخبارية HD مباشر', 'قنوات إخبارية', 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/701.m3u8', 15],
-        ['ch_hadath', 'الحدث مباشر', 'قناة الحدث الإخبارية HD', 'قنوات إخبارية', 'https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/702.m3u8', 16],
-        ['ch_skynews', 'سكاي نيوز عربية', 'قناة سكاي نيوز عربية HD', 'قنوات إخبارية', 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/703.m3u8', 17],
-        ['ch_natgeo', 'ناشيونال جيوغرافيك', 'ناشيونال جيوغرافيك أبوظبي HD', 'قنوات وثائقية', 'https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/801.m3u8', 18],
-        ['ch_rotana_cinema', 'روتانا سينما', 'قناة روتانا سينما HD - مش حتقدر تغمض عينيك', 'قنوات سينمائية', 'https://images.unsplash.com/photo-1440404653325-ab127d49abc1?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/901.m3u8', 19],
-        ['ch_rotana_classic', 'روتانا كلاسيك', 'قناة روتانا كلاسيك زمان HD', 'قنوات سينمائية', 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/902.m3u8', 20],
-        ['ch_osn_movies', 'OSN Movies', 'قناة OSN Movies Action HD', 'قنوات سينمائية', 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/903.m3u8', 21],
-        ['ch_zee_alwan', 'زي ألوان', 'قناة زي ألوان HD دراما هندية ومدبلجة', 'قنوات ترفيهية', 'https://images.unsplash.com/photo-1518791841217-8f162f1e1131?w=600&auto=format&fit=crop&q=80', 'http://maxshowplayer.site:2052/live/13968296781874/20098269331298/904.m3u8', 22]
+        ["ch_bein_news", "beIN SPORTS News", "beIN SPORTS \u0627\u0644\u0625\u062E\u0628\u0627\u0631\u064A\u0629 \u0627\u0644\u0645\u0641\u062A\u0648\u062D\u0629 HD", "\u0642\u0646\u0648\u0627\u062A \u0631\u064A\u0627\u0636\u064A\u0629", "https://images.unsplash.com/photo-1508098682722-e99c43a406b2?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/501.m3u8", 1],
+        ["ch_bein_1", "beIN SPORTS 1", "beIN SPORTS 1 HD Premium", "\u0642\u0646\u0648\u0627\u062A \u0631\u064A\u0627\u0636\u064A\u0629", "https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/502.m3u8", 2],
+        ["ch_bein_2", "beIN SPORTS 2", "beIN SPORTS 2 HD", "\u0642\u0646\u0648\u0627\u062A \u0631\u064A\u0627\u0636\u064A\u0629", "https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/503.m3u8", 3],
+        ["ch_bein_3", "beIN SPORTS 3", "beIN SPORTS 3 HD", "\u0642\u0646\u0648\u0627\u062A \u0631\u064A\u0627\u0636\u064A\u0629", "https://images.unsplash.com/photo-1574629810360-7efbbe195018?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/504.m3u8", 4],
+        ["ch_ssc_1", "SSC 1 HD", "\u0642\u0646\u0627\u0629 SSC \u0627\u0644\u0631\u064A\u0627\u0636\u064A\u0629 1 HD", "\u0642\u0646\u0648\u0627\u062A \u0631\u064A\u0627\u0636\u064A\u0629", "https://images.unsplash.com/photo-1518091043644-c1d4457512c6?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/505.m3u8", 5],
+        ["ch_alkass_1", "Alkass 1 HD", "\u0642\u0646\u0627\u0629 \u0627\u0644\u0643\u0623\u0633 \u0627\u0644\u0642\u0637\u0631\u064A\u0629 1 HD", "\u0642\u0646\u0648\u0627\u062A \u0631\u064A\u0627\u0636\u064A\u0629", "https://images.unsplash.com/photo-1508098682722-e99c43a406b2?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/506.m3u8", 6],
+        ["ch_ad_sports", "Abu Dhabi Sports", "\u0642\u0646\u0627\u0629 \u0623\u0628\u0648\u0638\u0628\u064A \u0627\u0644\u0631\u064A\u0627\u0636\u064A\u0629 1 HD", "\u0642\u0646\u0648\u0627\u062A \u0631\u064A\u0627\u0636\u064A\u0629", "https://images.unsplash.com/photo-1518091043644-c1d4457512c6?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/507.m3u8", 7],
+        ["ch_quran", "\u0627\u0644\u0642\u0631\u0622\u0646 \u0627\u0644\u0643\u0631\u064A\u0645 \u0645\u0628\u0627\u0634\u0631", "\u0642\u0646\u0627\u0629 \u0627\u0644\u0642\u0631\u0622\u0646 \u0627\u0644\u0643\u0631\u064A\u0645 (\u0645\u0643\u0629 \u0627\u0644\u0645\u0643\u0631\u0645\u0629 \u0645\u0628\u0627\u0634\u0631)", "\u0642\u0646\u0648\u0627\u062A \u0625\u0633\u0644\u0627\u0645\u064A\u0629", "https://images.unsplash.com/photo-1591604129939-f1efa4d9f7fa?w=600&auto=format&fit=crop&q=80", "https://win.holol.com/live/quran/playlist.m3u8", 8],
+        ["ch_sunnah", "\u0627\u0644\u0633\u0646\u0629 \u0627\u0644\u0646\u0628\u0648\u064A\u0629 \u0645\u0628\u0627\u0634\u0631", "\u0642\u0646\u0627\u0629 \u0627\u0644\u0633\u0646\u0629 \u0627\u0644\u0646\u0628\u0648\u064A\u0629 (\u0627\u0644\u0645\u062F\u064A\u0646\u0629 \u0627\u0644\u0645\u0646\u0648\u0631\u0629 \u0645\u0628\u0627\u0634\u0631)", "\u0642\u0646\u0648\u0627\u062A \u0625\u0633\u0644\u0627\u0645\u064A\u0629", "https://images.unsplash.com/photo-1584551246679-0daf3d275d0f?w=600&auto=format&fit=crop&q=80", "https://win.holol.com/live/sunnah/playlist.m3u8", 9],
+        ["ch_mbc_1", "MBC 1 HD", "\u0642\u0646\u0627\u0629 MBC 1 HD \u0627\u0644\u0631\u0633\u0645\u064A\u0629", "\u0642\u0646\u0648\u0627\u062A \u0645\u0646\u0648\u0639\u0629", "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/601.m3u8", 10],
+        ["ch_mbc_masr", "MBC \u0645\u0635\u0631 HD", "\u0642\u0646\u0627\u0629 MBC \u0645\u0635\u0631 HD", "\u0642\u0646\u0648\u0627\u062A \u0645\u0646\u0648\u0639\u0629", "https://images.unsplash.com/photo-1518791841217-8f162f1e1131?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/602.m3u8", 11],
+        ["ch_mbc_action", "MBC Action HD", "\u0642\u0646\u0627\u0629 MBC Action HD \u0623\u0641\u0644\u0627\u0645 \u0648\u062D\u0631\u0643\u0629", "\u0642\u0646\u0648\u0627\u062A \u062A\u0631\u0641\u064A\u0647\u064A\u0629", "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/603.m3u8", 12],
+        ["ch_mbc_drama", "MBC Drama HD", "\u0642\u0646\u0627\u0629 MBC Drama HD \u0645\u0633\u0644\u0633\u0644\u0627\u062A", "\u0642\u0646\u0648\u0627\u062A \u062A\u0631\u0641\u064A\u0647\u064A\u0629", "https://images.unsplash.com/photo-1522869635100-9f4c5e86aa37?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/604.m3u8", 13],
+        ["ch_jazeera", "\u0627\u0644\u062C\u0632\u064A\u0631\u0629 \u0627\u0644\u0625\u062E\u0628\u0627\u0631\u064A\u0629", "\u0642\u0646\u0627\u0629 \u0627\u0644\u062C\u0632\u064A\u0631\u0629 \u0627\u0644\u0625\u062E\u0628\u0627\u0631\u064A\u0629 HD \u0645\u0628\u0627\u0634\u0631", "\u0642\u0646\u0648\u0627\u062A \u0625\u062E\u0628\u0627\u0631\u064A\u0629", "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80", "https://live-hls-web-aje.akamaized.net/hls/live/2004245-b/aje/index.m3u8", 14],
+        ["ch_arabiya", "\u0627\u0644\u0639\u0631\u0628\u064A\u0629 \u0627\u0644\u0625\u062E\u0628\u0627\u0631\u064A\u0629", "\u0642\u0646\u0627\u0629 \u0627\u0644\u0639\u0631\u0628\u064A\u0629 \u0627\u0644\u0625\u062E\u0628\u0627\u0631\u064A\u0629 HD \u0645\u0628\u0627\u0634\u0631", "\u0642\u0646\u0648\u0627\u062A \u0625\u062E\u0628\u0627\u0631\u064A\u0629", "https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/701.m3u8", 15],
+        ["ch_hadath", "\u0627\u0644\u062D\u062F\u062B \u0645\u0628\u0627\u0634\u0631", "\u0642\u0646\u0627\u0629 \u0627\u0644\u062D\u062F\u062B \u0627\u0644\u0625\u062E\u0628\u0627\u0631\u064A\u0629 HD", "\u0642\u0646\u0648\u0627\u062A \u0625\u062E\u0628\u0627\u0631\u064A\u0629", "https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/702.m3u8", 16],
+        ["ch_skynews", "\u0633\u0643\u0627\u064A \u0646\u064A\u0648\u0632 \u0639\u0631\u0628\u064A\u0629", "\u0642\u0646\u0627\u0629 \u0633\u0643\u0627\u064A \u0646\u064A\u0648\u0632 \u0639\u0631\u0628\u064A\u0629 HD", "\u0642\u0646\u0648\u0627\u062A \u0625\u062E\u0628\u0627\u0631\u064A\u0629", "https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/703.m3u8", 17],
+        ["ch_natgeo", "\u0646\u0627\u0634\u064A\u0648\u0646\u0627\u0644 \u062C\u064A\u0648\u063A\u0631\u0627\u0641\u064A\u0643", "\u0646\u0627\u0634\u064A\u0648\u0646\u0627\u0644 \u062C\u064A\u0648\u063A\u0631\u0627\u0641\u064A\u0643 \u0623\u0628\u0648\u0638\u0628\u064A HD", "\u0642\u0646\u0648\u0627\u062A \u0648\u062B\u0627\u0626\u0642\u064A\u0629", "https://images.unsplash.com/photo-1470071459604-3b5ec3a7fe05?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/801.m3u8", 18],
+        ["ch_rotana_cinema", "\u0631\u0648\u062A\u0627\u0646\u0627 \u0633\u064A\u0646\u0645\u0627", "\u0642\u0646\u0627\u0629 \u0631\u0648\u062A\u0627\u0646\u0627 \u0633\u064A\u0646\u0645\u0627 HD - \u0645\u0634 \u062D\u062A\u0642\u062F\u0631 \u062A\u063A\u0645\u0636 \u0639\u064A\u0646\u064A\u0643", "\u0642\u0646\u0648\u0627\u062A \u0633\u064A\u0646\u0645\u0627\u0626\u064A\u0629", "https://images.unsplash.com/photo-1440404653325-ab127d49abc1?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/901.m3u8", 19],
+        ["ch_rotana_classic", "\u0631\u0648\u062A\u0627\u0646\u0627 \u0643\u0644\u0627\u0633\u064A\u0643", "\u0642\u0646\u0627\u0629 \u0631\u0648\u062A\u0627\u0646\u0627 \u0643\u0644\u0627\u0633\u064A\u0643 \u0632\u0645\u0627\u0646 HD", "\u0642\u0646\u0648\u0627\u062A \u0633\u064A\u0646\u0645\u0627\u0626\u064A\u0629", "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/902.m3u8", 20],
+        ["ch_osn_movies", "OSN Movies", "\u0642\u0646\u0627\u0629 OSN Movies Action HD", "\u0642\u0646\u0648\u0627\u062A \u0633\u064A\u0646\u0645\u0627\u0626\u064A\u0629", "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/903.m3u8", 21],
+        ["ch_zee_alwan", "\u0632\u064A \u0623\u0644\u0648\u0627\u0646", "\u0642\u0646\u0627\u0629 \u0632\u064A \u0623\u0644\u0648\u0627\u0646 HD \u062F\u0631\u0627\u0645\u0627 \u0647\u0646\u062F\u064A\u0629 \u0648\u0645\u062F\u0628\u0644\u062C\u0629", "\u0642\u0646\u0648\u0627\u062A \u062A\u0631\u0641\u064A\u0647\u064A\u0629", "https://images.unsplash.com/photo-1518791841217-8f162f1e1131?w=600&auto=format&fit=crop&q=80", "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/904.m3u8", 22]
       ];
       for (const ch of defaultChannels) {
         await db.prepare(
@@ -343,32 +288,27 @@ async function ensureAllTables(db: any) {
         ).bind(ch[0], ch[1], ch[2], ch[3], ch[4], ch[5], ch[6], Date.now()).run();
       }
     }
-  } catch (_) {}
+  } catch (_) {
+  }
 }
-
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+var index_default = {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const method = request.method;
     const jwtSecret = env.JWT_SECRET || "ps1-ahmed1986y-secret-2026";
-
     const corsHeaders = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-File-Name",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-File-Name"
     };
-
     if (method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
-
-    const json = (data: any, status = 200) =>
-      new Response(JSON.stringify(data), {
-        status,
-        headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders },
-      });
-
-    async function getAuthUser(): Promise<{ id: string; username: string } | null> {
+    const json = (data, status = 200) => new Response(JSON.stringify(data), {
+      status,
+      headers: { "Content-Type": "application/json; charset=utf-8", ...corsHeaders }
+    });
+    async function getAuthUser() {
       const authHeader = request.headers.get("Authorization") || request.headers.get("authorization");
       if (authHeader && authHeader.startsWith("Bearer ")) {
         const token = authHeader.substring(7);
@@ -378,7 +318,8 @@ export default {
             try {
               const s = JSON.parse(sessionData);
               if (s && s.id) return s;
-            } catch {}
+            } catch {
+            }
           }
         }
         const verified = await verifyJwt(token, jwtSecret);
@@ -389,26 +330,23 @@ export default {
           return verified;
         }
       }
-
-      // Check header fallback
       const headerUserId = request.headers.get("x-user-id") || request.headers.get("X-User-Id");
       if (headerUserId && headerUserId !== "null" && headerUserId !== "undefined" && headerUserId.trim() !== "") {
         const cleanHeaderId = headerUserId.trim();
         if (env.DB) {
           try {
-            const user = await env.DB.prepare("SELECT id, username FROM users WHERE id = ? OR LOWER(username) = ?").bind(cleanHeaderId, cleanHeaderId.toLowerCase()).first<any>();
+            const user = await env.DB.prepare("SELECT id, username FROM users WHERE id = ? OR LOWER(username) = ?").bind(cleanHeaderId, cleanHeaderId.toLowerCase()).first();
             if (user) {
               return { id: user.id, username: user.username };
             }
-          } catch (_) {}
+          } catch (_) {
+          }
         }
         const headerUserName = request.headers.get("x-user-name") || request.headers.get("X-User-Name") || cleanHeaderId;
         return { id: cleanHeaderId, username: headerUserName };
       }
-
       return null;
     }
-
     try {
       if (url.pathname.startsWith("/ws/")) {
         const roomId = url.pathname.replace("/ws/", "");
@@ -418,23 +356,17 @@ export default {
         wsUrl.pathname = "/websocket";
         return obj.fetch(new Request(wsUrl.toString(), request));
       }
-
-      // POST /auth/register or /api/auth/register
       if ((url.pathname === "/auth/register" || url.pathname === "/api/auth/register") && method === "POST") {
-        if (!env.DB) return json({ error: "قاعدة البيانات غير متصلة بالسيرفر (Missing D1 Binding)" }, 500);
-        
-        const body = await request.json<any>();
+        if (!env.DB) return json({ error: "\u0642\u0627\u0639\u062F\u0629 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A \u063A\u064A\u0631 \u0645\u062A\u0635\u0644\u0629 \u0628\u0627\u0644\u0633\u064A\u0631\u0641\u0631 (Missing D1 Binding)" }, 500);
+        const body = await request.json();
         const { username, password, email, phone, avatar_url } = body;
-        
         if (!username || !password) {
-          return json({ error: "اسم المستخدم وكلمة المرور مطلوبان" }, 400);
+          return json({ error: "\u0627\u0633\u0645 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0648\u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0645\u0637\u0644\u0648\u0628\u0627\u0646" }, 400);
         }
-
         const cleanUsername = String(username).trim().toLowerCase();
         if (cleanUsername.length < 3) {
-          return json({ error: "اسم المستخدم يجب أن يتكون من 3 أحرف على الأقل" }, 400);
+          return json({ error: "\u0627\u0633\u0645 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u064A\u062C\u0628 \u0623\u0646 \u064A\u062A\u0643\u0648\u0646 \u0645\u0646 3 \u0623\u062D\u0631\u0641 \u0639\u0644\u0649 \u0627\u0644\u0623\u0642\u0644" }, 400);
         }
-
         try {
           await env.DB.prepare(`
             CREATE TABLE IF NOT EXISTS users (
@@ -458,81 +390,80 @@ export default {
               created_at INTEGER NOT NULL
             )
           `).run();
-          // Safely add missing columns for existing tables
-          try { await env.DB.prepare("ALTER TABLE users ADD COLUMN email TEXT").run(); } catch (e) {}
-          try { await env.DB.prepare("ALTER TABLE users ADD COLUMN avatar_url TEXT").run(); } catch (e) {}
-          try { await env.DB.prepare("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'offline'").run(); } catch (e) {}
-          try { await env.DB.prepare("ALTER TABLE users ADD COLUMN last_seen INTEGER").run(); } catch (e) {}
-          try { await env.DB.prepare("ALTER TABLE users ADD COLUMN livekit_identity TEXT").run(); } catch (e) {}
-        } catch (err: any) {
-          return json({ error: "خطأ في تهيئة قاعدة البيانات: " + err.message }, 500);
+          try {
+            await env.DB.prepare("ALTER TABLE users ADD COLUMN email TEXT").run();
+          } catch (e) {
+          }
+          try {
+            await env.DB.prepare("ALTER TABLE users ADD COLUMN avatar_url TEXT").run();
+          } catch (e) {
+          }
+          try {
+            await env.DB.prepare("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'offline'").run();
+          } catch (e) {
+          }
+          try {
+            await env.DB.prepare("ALTER TABLE users ADD COLUMN last_seen INTEGER").run();
+          } catch (e) {
+          }
+          try {
+            await env.DB.prepare("ALTER TABLE users ADD COLUMN livekit_identity TEXT").run();
+          } catch (e) {
+          }
+        } catch (err) {
+          return json({ error: "\u062E\u0637\u0623 \u0641\u064A \u062A\u0647\u064A\u0626\u0629 \u0642\u0627\u0639\u062F\u0629 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A: " + err.message }, 500);
         }
-
         const existing = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(cleanUsername).first();
         if (existing) {
-          return json({ error: "اسم المستخدم مسجل مسبقاً، اختر اسماً آخر" }, 409);
+          return json({ error: "\u0627\u0633\u0645 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0645\u0633\u062C\u0644 \u0645\u0633\u0628\u0642\u0627\u064B\u060C \u0627\u062E\u062A\u0631 \u0627\u0633\u0645\u0627\u064B \u0622\u062E\u0631" }, 409);
         }
-
         if (email) {
           const existingEmail = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
           if (existingEmail) {
-            return json({ error: "البريد الإلكتروني مسجل مسبقاً" }, 409);
+            return json({ error: "\u0627\u0644\u0628\u0631\u064A\u062F \u0627\u0644\u0625\u0644\u0643\u062A\u0631\u0648\u0646\u064A \u0645\u0633\u062C\u0644 \u0645\u0633\u0628\u0642\u0627\u064B" }, 409);
           }
         }
-
         const userId = crypto.randomUUID();
         const passHash = await hashPassword(password);
         const now = Date.now();
-
         await env.DB.prepare(
           "INSERT INTO users (id, username, email, phone, password_hash, avatar_url, status, created_at, last_seen, livekit_identity) VALUES (?, ?, ?, ?, ?, ?, 'online', ?, ?, ?)"
         ).bind(userId, cleanUsername, email || null, phone || null, passHash, avatar_url || "", now, now, userId).run();
-
         const token = await signJwt({ id: userId, username: cleanUsername }, jwtSecret);
-        const expiry = now + (30 * 24 * 3600 * 1000);
-
+        const expiry = now + 30 * 24 * 3600 * 1e3;
         await env.DB.prepare(
           "INSERT INTO sessions (token, user_id, expiry, created_at) VALUES (?, ?, ?, ?)"
         ).bind(token, userId, expiry, now).run();
-
         if (env.SESSIONS) {
           await env.SESSIONS.put(`session:${token}`, JSON.stringify({ id: userId, username: cleanUsername }), { expirationTtl: 30 * 86400 });
         }
-
         return json({
           success: true,
           token,
-          user: { 
-            id: userId, 
-            username: cleanUsername, 
-            email: email || "", 
-            avatar_url: avatar_url || "", 
-            status: "online", 
+          user: {
+            id: userId,
+            username: cleanUsername,
+            email: email || "",
+            avatar_url: avatar_url || "",
+            status: "online",
             created_at: now,
             last_seen: now
           }
         });
       }
-
-      // POST /auth/login or /api/auth/login - STRICT REJECTION OF INVALID USERS
       if ((url.pathname === "/auth/login" || url.pathname === "/api/auth/login") && method === "POST") {
-        if (!env.DB) return json({ error: "قاعدة البيانات غير متصلة بالسيرفر (Missing D1 Binding)" }, 500);
-
-        const body = await request.json<any>();
+        if (!env.DB) return json({ error: "\u0642\u0627\u0639\u062F\u0629 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A \u063A\u064A\u0631 \u0645\u062A\u0635\u0644\u0629 \u0628\u0627\u0644\u0633\u064A\u0631\u0641\u0631 (Missing D1 Binding)" }, 500);
+        const body = await request.json();
         const { username, password } = body;
-
         if (!username || !password) {
-          return json({ error: "بيانات الدخول غير صحيحة" }, 401);
+          return json({ error: "\u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u062F\u062E\u0648\u0644 \u063A\u064A\u0631 \u0635\u062D\u064A\u062D\u0629" }, 401);
         }
-
         const cleanUsername = String(username).trim().toLowerCase();
-        const lookupKey = (cleanUsername === "ahemd" || cleanUsername === "ahmed") ? "ahmed" : cleanUsername;
-
-        // Auto-seed admin if database is newly provisioned and user is ahmed
+        const lookupKey = cleanUsername === "ahemd" || cleanUsername === "ahmed" ? "ahmed" : cleanUsername;
         if (lookupKey === "ahmed" && password === "123456") {
           const adminId = "u_ahmed_1986";
-          const passHash = await hashPassword("123456");
-          const now = Date.now();
+          const passHash2 = await hashPassword("123456");
+          const now2 = Date.now();
           try {
             await env.DB.prepare(`
               CREATE TABLE IF NOT EXISTS users (
@@ -556,38 +487,49 @@ export default {
                 created_at INTEGER NOT NULL
               )
             `).run();
-            // Safely add missing columns for existing tables
-            try { await env.DB.prepare("ALTER TABLE users ADD COLUMN email TEXT").run(); } catch (e) {}
-            try { await env.DB.prepare("ALTER TABLE users ADD COLUMN avatar_url TEXT").run(); } catch (e) {}
-            try { await env.DB.prepare("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'offline'").run(); } catch (e) {}
-            try { await env.DB.prepare("ALTER TABLE users ADD COLUMN last_seen INTEGER").run(); } catch (e) {}
-            try { await env.DB.prepare("ALTER TABLE users ADD COLUMN livekit_identity TEXT").run(); } catch (e) {}
-
+            try {
+              await env.DB.prepare("ALTER TABLE users ADD COLUMN email TEXT").run();
+            } catch (e) {
+            }
+            try {
+              await env.DB.prepare("ALTER TABLE users ADD COLUMN avatar_url TEXT").run();
+            } catch (e) {
+            }
+            try {
+              await env.DB.prepare("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'offline'").run();
+            } catch (e) {
+            }
+            try {
+              await env.DB.prepare("ALTER TABLE users ADD COLUMN last_seen INTEGER").run();
+            } catch (e) {
+            }
+            try {
+              await env.DB.prepare("ALTER TABLE users ADD COLUMN livekit_identity TEXT").run();
+            } catch (e) {
+            }
             await env.DB.prepare(`
               INSERT OR REPLACE INTO users (id, username, email, password_hash, avatar_url, status, created_at, last_seen, livekit_identity)
               VALUES (?, 'ahmed', 'ahmed1986y5@gmail.com', ?, 'https://api.ahmed1986y.com/media/avatars/ahmed.jpg', 'online', ?, ?, ?)
-            `).bind(adminId, passHash, now, now, adminId).run();
+            `).bind(adminId, passHash2, now2, now2, adminId).run();
           } catch (err) {
             console.error("Auto-seed error:", err);
           }
-
-          const token = await signJwt({ id: adminId, username: "ahmed" }, jwtSecret);
-          const expiry = now + (30 * 24 * 3600 * 1000);
-
+          const token2 = await signJwt({ id: adminId, username: "ahmed" }, jwtSecret);
+          const expiry2 = now2 + 30 * 24 * 3600 * 1e3;
           try {
             if (env.DB) {
               await env.DB.prepare(
                 "INSERT OR REPLACE INTO sessions (token, user_id, expiry, created_at) VALUES (?, ?, ?, ?)"
-              ).bind(token, adminId, expiry, now).run();
+              ).bind(token2, adminId, expiry2, now2).run();
             }
             if (env.SESSIONS) {
-              await env.SESSIONS.put(`session:${token}`, JSON.stringify({ id: adminId, username: "ahmed" }), { expirationTtl: 30 * 86400 });
+              await env.SESSIONS.put(`session:${token2}`, JSON.stringify({ id: adminId, username: "ahmed" }), { expirationTtl: 30 * 86400 });
             }
-          } catch {}
-
+          } catch {
+          }
           return json({
             success: true,
-            token,
+            token: token2,
             user: {
               id: adminId,
               username: "ahmed",
@@ -595,39 +537,30 @@ export default {
               avatar_url: "https://api.ahmed1986y.com/media/avatars/ahmed.jpg",
               status: "online",
               created_at: 1786312402310,
-              last_seen: now
+              last_seen: now2
             }
           });
         }
-
         const user = await env.DB.prepare(
           "SELECT id, username, email, phone, password_hash, avatar_url, status, created_at, last_seen FROM users WHERE username = ?"
-        ).bind(lookupKey).first<any>();
-
+        ).bind(lookupKey).first();
         if (!user) {
-          return json({ error: "بيانات الدخول غير صحيحة" }, 401);
+          return json({ error: "\u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u062F\u062E\u0648\u0644 \u063A\u064A\u0631 \u0635\u062D\u064A\u062D\u0629" }, 401);
         }
-
         const passHash = await hashPassword(password);
         if (user.password_hash !== passHash) {
-          return json({ error: "بيانات الدخول غير صحيحة" }, 401);
+          return json({ error: "\u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u062F\u062E\u0648\u0644 \u063A\u064A\u0631 \u0635\u062D\u064A\u062D\u0629" }, 401);
         }
-
         const now = Date.now();
-        await env.DB.prepare("UPDATE users SET status = 'online', last_seen = ? WHERE id = ?")
-          .bind(now, user.id).run();
-
+        await env.DB.prepare("UPDATE users SET status = 'online', last_seen = ? WHERE id = ?").bind(now, user.id).run();
         const token = await signJwt({ id: user.id, username: user.username }, jwtSecret);
-        const expiry = now + (30 * 24 * 3600 * 1000);
-
+        const expiry = now + 30 * 24 * 3600 * 1e3;
         await env.DB.prepare(
           "INSERT OR REPLACE INTO sessions (token, user_id, expiry, created_at) VALUES (?, ?, ?, ?)"
         ).bind(token, user.id, expiry, now).run();
-
         if (env.SESSIONS) {
           await env.SESSIONS.put(`session:${token}`, JSON.stringify({ id: user.id, username: user.username }), { expirationTtl: 30 * 86400 });
         }
-
         return json({
           success: true,
           token,
@@ -642,34 +575,25 @@ export default {
           }
         });
       }
-
-      // GET /auth/me or /api/auth/me
       if ((url.pathname === "/auth/me" || url.pathname === "/api/auth/me") && method === "GET") {
         const auth = await getAuthUser();
-        if (!auth) return json({ error: "غير مصرح - الجلسة منتهية" }, 401);
-
+        if (!auth) return json({ error: "\u063A\u064A\u0631 \u0645\u0635\u0631\u062D - \u0627\u0644\u062C\u0644\u0633\u0629 \u0645\u0646\u062A\u0647\u064A\u0629" }, 401);
         const user = await env.DB.prepare(
           "SELECT id, username, email, phone, avatar_url, status, last_seen, created_at FROM users WHERE id = ?"
-        ).bind(auth.id).first<any>();
-
-        if (!user) return json({ error: "المستخدم غير موجود" }, 401);
-
+        ).bind(auth.id).first();
+        if (!user) return json({ error: "\u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F" }, 401);
         return json({ success: true, user });
       }
-
-      // Admin: POST /api/admin/users
       if (url.pathname === "/api/admin/users" && method === "POST") {
         const auth = await getAuthUser();
         if (!auth || auth.username !== "ahmed") return json({ error: "Unauthorized" }, 403);
-        const body = await request.json<any>();
+        const body = await request.json();
         const { username, password, email, phone, avatar_url, role } = body;
         if (!username || !password) return json({ error: "Missing fields" }, 400);
-
         const cleanUsername = String(username).trim().toLowerCase();
         const userId = "u_" + cleanUsername + "_" + Date.now();
         const passHash = await hashPassword(password);
         const now = Date.now();
-        
         try {
           await env.DB.prepare(
             "INSERT INTO users (id, username, email, phone, password_hash, avatar_url, status, created_at, last_seen, livekit_identity) VALUES (?, ?, ?, ?, ?, ?, 'offline', ?, ?, ?)"
@@ -677,19 +601,14 @@ export default {
         } catch (e) {
           return json({ error: "Username might already exist" }, 400);
         }
-        
         return json({ success: true, user: { id: userId, username: cleanUsername, email, avatar_url } });
       }
-
-      // Admin: GET /api/admin/users
       if (url.pathname === "/api/admin/users" && method === "GET") {
         const auth = await getAuthUser();
         if (!auth || auth.username !== "ahmed") return json({ error: "Unauthorized" }, 403);
         const users = await env.DB.prepare("SELECT id, username, email, phone, avatar_url, status, created_at, last_seen FROM users ORDER BY created_at DESC").all();
         return json({ success: true, users: users.results });
       }
-
-      // Admin: DELETE /api/admin/users/:username
       if (url.pathname.startsWith("/api/admin/users/") && method === "DELETE") {
         const auth = await getAuthUser();
         if (!auth || auth.username !== "ahmed") return json({ error: "Unauthorized" }, 403);
@@ -698,77 +617,66 @@ export default {
         await env.DB.prepare("DELETE FROM users WHERE username = ?").bind(targetUser).run();
         return json({ success: true });
       }
-
-      // Admin: PUT /api/admin/users/:username
       if (url.pathname.startsWith("/api/admin/users/") && method === "PUT") {
         const auth = await getAuthUser();
         if (!auth || auth.username !== "ahmed") return json({ error: "Unauthorized" }, 403);
         const targetUser = url.pathname.replace("/api/admin/users/", "");
-        const body = await request.json<any>();
-        
+        const body = await request.json();
         let updates = [];
         let params = [];
         if (body.password) {
           updates.push("password_hash = ?");
           params.push(await hashPassword(body.password));
         }
-        if (body.phone !== undefined) { updates.push("phone = ?"); params.push(body.phone || null); }
-        if (body.email !== undefined) {
+        if (body.phone !== void 0) {
+          updates.push("phone = ?");
+          params.push(body.phone || null);
+        }
+        if (body.email !== void 0) {
           updates.push("email = ?");
           params.push(body.email || null);
         }
-        if (body.avatar_url !== undefined) {
+        if (body.avatar_url !== void 0) {
           updates.push("avatar_url = ?");
           params.push(body.avatar_url || null);
         }
-
         if (updates.length > 0) {
           params.push(targetUser);
           await env.DB.prepare(`UPDATE users SET ${updates.join(", ")} WHERE username = ?`).bind(...params).run();
         }
         return json({ success: true });
       }
-
-      // POST /upload/avatar
       if ((url.pathname === "/upload/avatar" || url.pathname === "/api/upload/avatar") && method === "POST") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "Unauthorized" }, 401);
-
         const contentType = request.headers.get("Content-Type") || "image/jpeg";
         const filename = request.headers.get("X-File-Name") || `avatar_${Date.now()}.jpg`;
         const key = `avatars/${auth.id}/${Date.now()}_${filename}`;
-
         const buffer = await request.arrayBuffer();
         await env.MEDIA_BUCKET.put(key, buffer, {
           httpMetadata: { contentType },
           customMetadata: { uploader: auth.id, type: "avatar" }
         });
-
         const avatarUrl = `https://api.ahmed1986y.com/media/${key}`;
         await env.DB.prepare("UPDATE users SET avatar_url = ? WHERE id = ?").bind(avatarUrl, auth.id).run();
-
         return json({
           success: true,
           avatar_url: avatarUrl,
           key
         });
       }
-
-      // GET /users/status or /api/users/status - Real-time online/offline presence check
       if ((url.pathname === "/users/status" || url.pathname === "/api/users/status") && method === "GET") {
         const targetUserId = String(url.searchParams.get("userId") || url.searchParams.get("username") || "").trim().toLowerCase();
         if (!targetUserId) return json({ error: "Missing userId" }, 400);
-
         if (env.DB) {
           await ensureAllTables(env.DB);
           const uDb = await env.DB.prepare(
             "SELECT id, username, avatar_url, status, last_seen FROM users WHERE LOWER(id) = ? OR LOWER(username) = ?"
-          ).bind(targetUserId, targetUserId).first<any>();
-
+          ).bind(targetUserId, targetUserId).first();
           if (uDb) {
             const now = Date.now();
             const lastSeen = Number(uDb.last_seen || 0);
-            const isOnline = uDb.status === "online" || (now - lastSeen < 120000);
+            const isOnline = uDb.status === "online" || now - lastSeen < 12e4;
             return json({
               success: true,
               user_id: uDb.id,
@@ -782,14 +690,11 @@ export default {
         }
         return json({ success: true, is_online: false, status: "offline", last_seen: 0 });
       }
-
-      // POST /users/heartbeat or /api/users/heartbeat - Keep user online
       if ((url.pathname === "/users/heartbeat" || url.pathname === "/api/users/heartbeat") && method === "POST") {
         const auth = await getAuthUser();
         const userId = auth?.id || request.headers.get("x-user-id");
         const username = auth?.username || request.headers.get("x-user-name");
         const now = Date.now();
-
         if (env.DB && (userId || username)) {
           await ensureAllTables(env.DB);
           const target = String(userId || username).trim().toLowerCase();
@@ -800,14 +705,11 @@ export default {
         }
         return json({ success: true, status: "online", last_seen: now });
       }
-
-      // POST /users/offline or /api/users/offline - Mark user offline
       if ((url.pathname === "/users/offline" || url.pathname === "/api/users/offline") && method === "POST") {
         const auth = await getAuthUser();
         const userId = auth?.id || request.headers.get("x-user-id");
         const username = auth?.username || request.headers.get("x-user-name");
         const now = Date.now();
-
         if (env.DB && (userId || username)) {
           await ensureAllTables(env.DB);
           const target = String(userId || username).trim().toLowerCase();
@@ -817,13 +719,10 @@ export default {
         }
         return json({ success: true, status: "offline" });
       }
-
-      // POST /media/upload
       if (url.pathname === "/media/upload" && method === "POST") {
         const auth = await getAuthUser();
         const rawUserId = request.headers.get("X-User-Id") || request.headers.get("x-user-id");
         const uploaderId = auth?.id || (rawUserId ? decodeURIComponent(rawUserId).trim() : "user_me");
-
         const contentType = request.headers.get("Content-Type") || "application/octet-stream";
         const rawFilename = request.headers.get("X-File-Name") || request.headers.get("x-file-name") || `file_${Date.now()}`;
         let filename = `file_${Date.now()}`;
@@ -832,10 +731,8 @@ export default {
         } catch (_) {
           filename = rawFilename;
         }
-
         const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
         const key = `uploads/${uploaderId}/${Date.now()}_${safeFilename}`;
-
         const buffer = await request.arrayBuffer();
         if (env.MEDIA_BUCKET) {
           await env.MEDIA_BUCKET.put(key, buffer, {
@@ -843,7 +740,6 @@ export default {
             customMetadata: { uploader: uploaderId, originalName: filename }
           });
         }
-
         const mediaUrl = `${url.origin}/media/${key}`;
         return json({
           success: true,
@@ -854,28 +750,21 @@ export default {
           content_type: contentType
         });
       }
-
-      // GET /media/:key
       if (url.pathname.startsWith("/media/") && method === "GET") {
         const key = url.pathname.replace("/media/", "");
         const object = await env.MEDIA_BUCKET.get(key);
         if (!object) return new Response("File not found in R2 bucket", { status: 404 });
-
         const headers = new Headers();
         object.writeHttpMetadata(headers);
         headers.set("etag", object.httpEtag);
         headers.set("Access-Control-Allow-Origin", "*");
-
         return new Response(object.body, { headers });
       }
-
-      // POST /messages/send
       if (url.pathname === "/messages/send" && method === "POST") {
         const auth = await getAuthUser();
-        const body = await request.json<any>();
+        const body = await request.json();
         const rawSender = auth?.id || body.sender_id || request.headers.get("x-user-id");
         if (!rawSender) return json({ error: "Unauthorized" }, 401);
-
         const {
           receiver_id,
           type = "text",
@@ -884,38 +773,27 @@ export default {
           duration = 0,
           file_size = 0,
           file_name = "",
-          location_lat = 0.0,
-          location_lng = 0.0
+          location_lat = 0,
+          location_lng = 0
         } = body;
-
         if (!receiver_id) return json({ error: "Receiver ID is required" }, 400);
-
         if (env.DB) await ensureAllTables(env.DB);
-
-        // Resolve sender and receiver in DB for accurate IDs and usernames
         let senderId = String(rawSender).trim();
         let receiverId = String(receiver_id).trim();
-
         if (env.DB) {
           try {
-            const sDb = await env.DB.prepare("SELECT id, username FROM users WHERE id = ? OR LOWER(username) = ?").bind(senderId, senderId.toLowerCase()).first<any>();
+            const sDb = await env.DB.prepare("SELECT id, username FROM users WHERE id = ? OR LOWER(username) = ?").bind(senderId, senderId.toLowerCase()).first();
             if (sDb) senderId = sDb.id;
-
-            const rDb = await env.DB.prepare("SELECT id, username FROM users WHERE id = ? OR LOWER(username) = ?").bind(receiverId, receiverId.toLowerCase()).first<any>();
+            const rDb = await env.DB.prepare("SELECT id, username FROM users WHERE id = ? OR LOWER(username) = ?").bind(receiverId, receiverId.toLowerCase()).first();
             if (rDb) receiverId = rDb.id;
-          } catch (_) {}
+          } catch (_) {
+          }
         }
-
         const sortedIds = [senderId.toLowerCase(), receiverId.toLowerCase()].sort();
         const canonicalConvId = `${sortedIds[0]}_${sortedIds[1]}`;
-        const clientConvId = (body.conversation_id && String(body.conversation_id).trim())
-          ? String(body.conversation_id).trim().toLowerCase()
-          : canonicalConvId;
-
+        const clientConvId = body.conversation_id && String(body.conversation_id).trim() ? String(body.conversation_id).trim().toLowerCase() : canonicalConvId;
         const messageId = body.id || crypto.randomUUID();
         const now = body.created_at || Date.now();
-
-        // 1. Store in D1 Database
         if (env.DB) {
           try {
             await env.DB.batch([
@@ -924,7 +802,19 @@ export default {
                  (id, conversation_id, sender_id, receiver_id, type, content, media_url, file_name, file_size, duration, location_lat, location_lng, created_at, is_read, is_delivered)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1]`
               ).bind(
-                messageId, canonicalConvId, senderId, receiverId, type, content, media_url, file_name, file_size, duration, location_lat, location_lng, now
+                messageId,
+                canonicalConvId,
+                senderId,
+                receiverId,
+                type,
+                content,
+                media_url,
+                file_name,
+                file_size,
+                duration,
+                location_lat,
+                location_lng,
+                now
               ),
               env.DB.prepare(
                 `INSERT INTO conversations (id, user1_id, user2_id, last_message_id, last_message_text, last_message_at, unread_count_user1, unread_count_user2)
@@ -935,15 +825,18 @@ export default {
                    last_message_at = excluded.last_message_at,
                    unread_count_user2 = unread_count_user2 + 1`
               ).bind(
-                canonicalConvId, sortedIds[0], sortedIds[1], messageId, content || `[${type}]`, now
+                canonicalConvId,
+                sortedIds[0],
+                sortedIds[1],
+                messageId,
+                content || `[${type}]`,
+                now
               )
             ]);
           } catch (d1Err) {
             console.error("D1 private_messages insert error:", d1Err);
           }
         }
-
-        // 2. Dual Backup in R2 Bucket
         if (env.MEDIA_BUCKET) {
           try {
             const r2Payload = JSON.stringify({
@@ -979,7 +872,6 @@ export default {
             console.error("R2 message storage error:", r2Err);
           }
         }
-
         return json({
           success: true,
           message: {
@@ -999,50 +891,40 @@ export default {
           }
         });
       }
-
       if (url.pathname.startsWith("/messages/") && method === "GET") {
         const auth = await getAuthUser();
         const currentUserId = auth?.id || request.headers.get("x-user-id");
         if (!currentUserId) return json({ error: "Unauthorized" }, 401);
         const reqConvParam = url.pathname.replace("/messages/", "").trim();
         const limit = Number(url.searchParams.get("limit")) || 200;
-
         if (env.DB) await ensureAllTables(env.DB);
-
-        // Collect all identifiers for current user (ID and username)
-        const myIdentifiers: string[] = [String(currentUserId).trim().toLowerCase()];
+        const myIdentifiers = [String(currentUserId).trim().toLowerCase()];
         if (auth?.username) myIdentifiers.push(auth.username.trim().toLowerCase());
-
         if (env.DB) {
           try {
             const meDb = await env.DB.prepare(
               "SELECT id, username FROM users WHERE id = ? OR LOWER(username) = ?"
-            ).bind(currentUserId, String(currentUserId).toLowerCase()).first<any>();
+            ).bind(currentUserId, String(currentUserId).toLowerCase()).first();
             if (meDb) {
               if (!myIdentifiers.includes(meDb.id.toLowerCase())) myIdentifiers.push(meDb.id.toLowerCase());
               if (!myIdentifiers.includes(meDb.username.toLowerCase())) myIdentifiers.push(meDb.username.toLowerCase());
             }
-          } catch (_) {}
+          } catch (_) {
+          }
         }
-
         const lowerParam = reqConvParam.toLowerCase();
-        let d1Messages: any[] = [];
-
+        let d1Messages = [];
         if (env.DB) {
           try {
-            // 1. Direct match on conversation_id
             const direct = await env.DB.prepare(
               `SELECT * FROM private_messages 
                WHERE LOWER(conversation_id) = ? 
                ORDER BY created_at ASC LIMIT ?`
             ).bind(lowerParam, limit).all();
             d1Messages = direct.results || [];
-
-            // 2. Identify the other user from param or users table
             const allUsersRes = await env.DB.prepare("SELECT id, username FROM users").all();
-            const allUsers = (allUsersRes.results || []) as { id: string; username: string }[];
-
-            let otherUser: { id: string; username: string } | null = null;
+            const allUsers = allUsersRes.results || [];
+            let otherUser = null;
             for (const u of allUsers) {
               const uid = u.id.toLowerCase();
               const uname = u.username.toLowerCase();
@@ -1052,18 +934,16 @@ export default {
                 break;
               }
             }
-
             if (otherUser) {
               const otherIds = [otherUser.id.toLowerCase(), otherUser.username.toLowerCase()];
               const sortedPair = [myIdentifiers[0], otherIds[0]].sort();
               const canonicalKey = `${sortedPair[0]}_${sortedPair[1]}`;
-
               const paired = await env.DB.prepare(
                 `SELECT * FROM private_messages 
                  WHERE LOWER(conversation_id) = ? 
                     OR LOWER(conversation_id) = ?
-                    OR (LOWER(sender_id) IN (${myIdentifiers.map(() => '?').join(',')}) AND LOWER(receiver_id) IN (${otherIds.map(() => '?').join(',')}))
-                    OR (LOWER(sender_id) IN (${otherIds.map(() => '?').join(',')}) AND LOWER(receiver_id) IN (${myIdentifiers.map(() => '?').join(',')}))
+                    OR (LOWER(sender_id) IN (${myIdentifiers.map(() => "?").join(",")}) AND LOWER(receiver_id) IN (${otherIds.map(() => "?").join(",")}))
+                    OR (LOWER(sender_id) IN (${otherIds.map(() => "?").join(",")}) AND LOWER(receiver_id) IN (${myIdentifiers.map(() => "?").join(",")}))
                  ORDER BY created_at ASC LIMIT ?`
               ).bind(
                 canonicalKey,
@@ -1074,7 +954,6 @@ export default {
                 ...myIdentifiers,
                 limit
               ).all();
-
               const pairedMsgs = paired.results || [];
               if (pairedMsgs.length >= d1Messages.length) {
                 d1Messages = pairedMsgs;
@@ -1084,18 +963,15 @@ export default {
             console.error("D1 read messages error:", e);
           }
         }
-
-        // Check R2 backup if D1 is empty or for synchronization
-        const combined = new Map<string, any>();
+        const combined = /* @__PURE__ */ new Map();
         for (const m of d1Messages) {
           combined.set(m.id, m);
         }
-
         if (env.MEDIA_BUCKET && combined.size < limit) {
           try {
             const list = await env.MEDIA_BUCKET.list({
               prefix: `messages/${lowerParam}/`,
-              limit: limit
+              limit
             });
             for (const obj of list.objects) {
               const file = await env.MEDIA_BUCKET.get(obj.key);
@@ -1111,24 +987,20 @@ export default {
             console.error("R2 fetch messages error:", r2FetchErr);
           }
         }
-
         const finalMessages = Array.from(combined.values()).sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
-
         try {
           if (env.DB) {
             await env.DB.prepare(
               "UPDATE private_messages SET is_read = 1 WHERE (LOWER(conversation_id) = ? OR LOWER(receiver_id) = ?) AND LOWER(receiver_id) = ?"
             ).bind(lowerParam, String(currentUserId).toLowerCase(), String(currentUserId).toLowerCase()).run();
           }
-        } catch (_) {}
-
+        } catch (_) {
+        }
         return json({ messages: finalMessages });
       }
-
-      // ----------------- Real-Time Call Signaling Engine -----------------
       if (url.pathname === "/calls/signal" && method === "POST") {
         const auth = await getAuthUser();
-        const body = await request.json<any>();
+        const body = await request.json();
         const senderId = auth?.id || body.caller_id || request.headers.get("x-user-id") || "user_me";
         const senderName = auth?.username || body.caller_name || senderId;
         let receiverId = String(body.receiver_id || "").trim().toLowerCase();
@@ -1137,7 +1009,6 @@ export default {
         const signalType = String(body.type || "call_init").trim();
         const extra = String(body.extra || "").trim();
         const now = Date.now();
-
         if (env.DB) {
           try {
             await ensureAllTables(env.DB);
@@ -1155,15 +1026,13 @@ export default {
                 duration TEXT
               )`
             ).run();
-
-            // Resolve receiver ID / username for accurate mapping
             try {
-              const rUser = await env.DB.prepare("SELECT id, username FROM users WHERE LOWER(id) = ? OR LOWER(username) = ?").bind(receiverId, receiverId).first<any>();
+              const rUser = await env.DB.prepare("SELECT id, username FROM users WHERE LOWER(id) = ? OR LOWER(username) = ?").bind(receiverId, receiverId).first();
               if (rUser) {
                 receiverId = rUser.id.toLowerCase();
               }
-            } catch (_) {}
-
+            } catch (_) {
+            }
             if (signalType === "call_init") {
               const avatar = body.caller_avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(senderName)}&background=random`;
               await env.DB.prepare(
@@ -1180,13 +1049,11 @@ export default {
             } else if (signalType === "call_ended") {
               await env.DB.prepare("UPDATE active_calls SET status='ended', duration=?, updated_at=? WHERE room_id=?").bind(extra, now, roomId).run();
             }
-
-            // Dual backup in private_messages
             const u1 = String(senderId).trim().toLowerCase();
             const u2 = String(receiverId).trim().toLowerCase();
             const convId = [u1, u2].sort().join("_");
-            const callMsgType = signalType === "call_init" ? (isVideo ? "video_call" : "audio_call") : signalType;
-            const callMsgContent = signalType === "call_init" ? (isVideo ? "مكالمة فيديو واردة" : "مكالمة صوتية واردة") : signalType;
+            const callMsgType = signalType === "call_init" ? isVideo ? "video_call" : "audio_call" : signalType;
+            const callMsgContent = signalType === "call_init" ? isVideo ? "\u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648 \u0648\u0627\u0631\u062F\u0629" : "\u0645\u0643\u0627\u0644\u0645\u0629 \u0635\u0648\u062A\u064A\u0629 \u0648\u0627\u0631\u062F\u0629" : signalType;
             await env.DB.prepare(
               `INSERT INTO private_messages (id, conversation_id, sender_id, receiver_id, type, content, media_url, file_name, created_at, is_read, is_delivered)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1]`
@@ -1195,16 +1062,13 @@ export default {
             console.error("Call signaling error:", callErr);
           }
         }
-
         return json({ success: true, room_id: roomId });
       }
-
       if (url.pathname === "/calls/incoming" && method === "GET") {
         const auth = await getAuthUser();
         const myId = String(auth?.id || request.headers.get("x-user-id") || url.searchParams.get("userId") || "").trim().toLowerCase();
         const myUsername = String(auth?.username || request.headers.get("x-user-name") || url.searchParams.get("username") || "").trim().toLowerCase();
         const now = Date.now();
-
         if (env.DB) {
           try {
             await ensureAllTables(env.DB);
@@ -1222,15 +1086,13 @@ export default {
                 duration TEXT
               )`
             ).run();
-
-            const myIdentifiers: string[] = [];
+            const myIdentifiers = [];
             if (myId && myId !== "user_me") myIdentifiers.push(myId);
             if (myUsername && myUsername !== "user_me" && !myIdentifiers.includes(myUsername)) myIdentifiers.push(myUsername);
-
             try {
               const queryParam = myId || myUsername;
               if (queryParam) {
-                const uDb = await env.DB.prepare("SELECT id, username FROM users WHERE LOWER(id) = ? OR LOWER(username) = ?").bind(queryParam, queryParam).first<any>();
+                const uDb = await env.DB.prepare("SELECT id, username FROM users WHERE LOWER(id) = ? OR LOWER(username) = ?").bind(queryParam, queryParam).first();
                 if (uDb) {
                   const dbId = uDb.id.toLowerCase();
                   const dbUser = uDb.username.toLowerCase();
@@ -1238,18 +1100,17 @@ export default {
                   if (!myIdentifiers.includes(dbUser)) myIdentifiers.push(dbUser);
                 }
               }
-            } catch (_) {}
-
+            } catch (_) {
+            }
             if (myIdentifiers.length > 0) {
-              const placeholders = myIdentifiers.map(() => '?').join(',');
+              const placeholders = myIdentifiers.map(() => "?").join(",");
               const res = await env.DB.prepare(
                 `SELECT * FROM active_calls 
                  WHERE LOWER(receiver_id) IN (${placeholders})
                    AND (status = 'calling' OR status = 'ringing') 
                    AND created_at > ?
                  ORDER BY created_at DESC LIMIT 1`
-              ).bind(...myIdentifiers, now - 60000).first<any>();
-
+              ).bind(...myIdentifiers, now - 6e4).first();
               if (res) {
                 return json({
                   has_incoming_call: true,
@@ -1271,22 +1132,21 @@ export default {
         }
         return json({ has_incoming_call: false });
       }
-
       if (url.pathname === "/calls/status" && method === "GET") {
         const roomId = url.searchParams.get("room_id") || "";
         if (env.DB && roomId) {
           try {
-            const res: any = await env.DB.prepare("SELECT * FROM active_calls WHERE room_id = ?").bind(roomId).first();
+            const res = await env.DB.prepare("SELECT * FROM active_calls WHERE room_id = ?").bind(roomId).first();
             if (res) {
               return json({ success: true, status: res.status, call: res });
             }
-          } catch (_) {}
+          } catch (_) {
+          }
         }
         return json({ success: true, status: "calling" });
       }
-
       if (url.pathname === "/calls/respond" && method === "POST") {
-        const body = await request.json<any>();
+        const body = await request.json();
         const { room_id, action, duration = "" } = body;
         const now = Date.now();
         if (env.DB && room_id) {
@@ -1296,34 +1156,31 @@ export default {
             if (action === "accept") newStatus = "connected";
             if (action === "decline") newStatus = "declined";
             if (action === "end") newStatus = "ended";
-
             await env.DB.prepare(
               "UPDATE active_calls SET status=?, duration=?, updated_at=? WHERE room_id=?"
             ).bind(newStatus, duration, now, room_id).run();
             return json({ success: true, status: newStatus });
-          } catch (_) {}
+          } catch (_) {
+          }
         }
         return json({ success: false, status: "ended" });
       }
-
       if (url.pathname === "/conversations" && method === "GET") {
         const auth = await getAuthUser();
         const currentUserId = auth?.id || request.headers.get("x-user-id");
         if (!currentUserId) return json({ error: "Unauthorized" }, 401);
-
         if (env.DB) await ensureAllTables(env.DB);
-
         let userIds = [String(currentUserId).trim().toLowerCase()];
         if (auth?.username) userIds.push(auth.username.trim().toLowerCase());
         try {
-          const uDb = await env.DB.prepare("SELECT id, username FROM users WHERE id = ? OR LOWER(username) = ?").bind(currentUserId, String(currentUserId).toLowerCase()).first<any>();
+          const uDb = await env.DB.prepare("SELECT id, username FROM users WHERE id = ? OR LOWER(username) = ?").bind(currentUserId, String(currentUserId).toLowerCase()).first();
           if (uDb) {
             if (!userIds.includes(uDb.id.toLowerCase())) userIds.push(uDb.id.toLowerCase());
             if (!userIds.includes(uDb.username.toLowerCase())) userIds.push(uDb.username.toLowerCase());
           }
-        } catch (_) {}
-
-        const placeholders = userIds.map(() => '?').join(',');
+        } catch (_) {
+        }
+        const placeholders = userIds.map(() => "?").join(",");
         const convs = await env.DB.prepare(
           `SELECT c.*, 
                   COALESCE(u.id, CASE WHEN LOWER(c.user1_id) IN (${placeholders}) THEN c.user2_id ELSE c.user1_id END) as other_user_id,
@@ -1337,14 +1194,11 @@ export default {
            WHERE LOWER(c.user1_id) IN (${placeholders}) OR LOWER(c.user2_id) IN (${placeholders})
            ORDER BY c.last_message_at DESC`
         ).bind(...userIds, ...userIds, ...userIds, ...userIds, ...userIds, ...userIds).all();
-
         return json({ conversations: convs.results || [] });
       }
-
       if (url.pathname === "/friends/list" && method === "GET") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "Unauthorized" }, 401);
-
         if (env.DB) await ensureAllTables(env.DB);
         try {
           const friends = await env.DB.prepare(
@@ -1355,31 +1209,26 @@ export default {
              WHERE (f.user1_id = ? OR f.user2_id = ?)
              ORDER BY u.status = 'online' DESC, u.last_seen DESC`
           ).bind(auth.id, auth.id, auth.id).all();
-
           return json({ friends: friends.results || [] });
-        } catch (err: any) {
+        } catch (err) {
           return json({ friends: [] });
         }
       }
-
       if (url.pathname === "/friends/request" && method === "POST") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "Unauthorized" }, 401);
         if (env.DB) await ensureAllTables(env.DB);
-
-        const body = await request.json<any>();
+        const body = await request.json();
         const { to_user_id, to_username } = body;
-
         let targetUserId = to_user_id;
         if (!targetUserId && to_username) {
           try {
-            const target = await env.DB.prepare("SELECT id FROM users WHERE LOWER(username) = ?").bind(to_username.toLowerCase().trim()).first<any>();
+            const target = await env.DB.prepare("SELECT id FROM users WHERE LOWER(username) = ?").bind(to_username.toLowerCase().trim()).first();
             if (target) targetUserId = target.id;
-          } catch (e) {}
+          } catch (e) {
+          }
         }
-
         if (!targetUserId) {
-          // Auto create user record for searched username if missing
           if (to_username) {
             targetUserId = `u_${to_username.toLowerCase().trim()}`;
             try {
@@ -1388,48 +1237,43 @@ export default {
                 INSERT OR IGNORE INTO users (id, username, password_hash, avatar_url, status, created_at, last_seen)
                 VALUES (?, ?, 'auto_gen', '', 'offline', ?, ?)
               `).bind(targetUserId, to_username.toLowerCase().trim(), nowUser, nowUser).run();
-            } catch (e) {}
+            } catch (e) {
+            }
           } else {
-            return json({ error: "المستخدم غير موجود" }, 404);
+            return json({ error: "\u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F" }, 404);
           }
         }
-
         if (targetUserId === auth.id) {
-          return json({ error: "لا يمكنك إضافة نفسك" }, 400);
+          return json({ error: "\u0644\u0627 \u064A\u0645\u0643\u0646\u0643 \u0625\u0636\u0627\u0641\u0629 \u0646\u0641\u0633\u0643" }, 400);
         }
-
         const [u1, u2] = [auth.id, targetUserId].sort();
         try {
           const existing = await env.DB.prepare(
             "SELECT id FROM friendships WHERE user1_id = ? AND user2_id = ?"
           ).bind(u1, u2).first();
-
           if (existing) {
-            return json({ error: "أنتم أصدقاء بالفعل" }, 400);
+            return json({ error: "\u0623\u0646\u062A\u0645 \u0623\u0635\u062F\u0642\u0627\u0621 \u0628\u0627\u0644\u0641\u0639\u0644" }, 400);
           }
-        } catch (e) {}
-
+        } catch (e) {
+        }
         const requestId = crypto.randomUUID();
         const now = Date.now();
         try {
           await env.DB.prepare(
             "INSERT INTO friend_requests (id, from_user_id, to_user_id, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)"
           ).bind(requestId, auth.id, targetUserId, now, now).run();
-        } catch (err: any) {
+        } catch (err) {
           await ensureAllTables(env.DB);
           await env.DB.prepare(
             "INSERT INTO friend_requests (id, from_user_id, to_user_id, status, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?)"
           ).bind(requestId, auth.id, targetUserId, now, now).run();
         }
-
-        return json({ success: true, request_id: requestId, message: "تم إرسال طلب الصداقة بنجاح" });
+        return json({ success: true, request_id: requestId, message: "\u062A\u0645 \u0625\u0631\u0633\u0627\u0644 \u0637\u0644\u0628 \u0627\u0644\u0635\u062F\u0627\u0642\u0629 \u0628\u0646\u062C\u0627\u062D" });
       }
-
       if (url.pathname === "/friends/requests/incoming" && method === "GET") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "Unauthorized" }, 401);
         if (env.DB) await ensureAllTables(env.DB);
-
         try {
           const reqs = await env.DB.prepare(`
             SELECT r.id, r.from_user_id, r.to_user_id, r.status, r.created_at,
@@ -1439,18 +1283,15 @@ export default {
             WHERE r.to_user_id = ? AND r.status = 'pending'
             ORDER BY r.created_at DESC
           `).bind(auth.id).all();
-
           return json({ requests: reqs.results || [] });
         } catch (e) {
           return json({ requests: [] });
         }
       }
-
       if (url.pathname === "/friends/requests/outgoing" && method === "GET") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "Unauthorized" }, 401);
         if (env.DB) await ensureAllTables(env.DB);
-
         try {
           const reqs = await env.DB.prepare(`
             SELECT r.id, r.from_user_id, r.to_user_id, r.status, r.created_at,
@@ -1460,23 +1301,19 @@ export default {
             WHERE r.from_user_id = ? AND r.status = 'pending'
             ORDER BY r.created_at DESC
           `).bind(auth.id).all();
-
           return json({ requests: reqs.results || [] });
         } catch (e) {
           return json({ requests: [] });
         }
       }
-
       if (url.pathname === "/friends/respond" && method === "POST") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "Unauthorized" }, 401);
         if (env.DB) await ensureAllTables(env.DB);
-
-        const body = await request.json<any>();
+        const body = await request.json();
         const { request_id, action } = body;
-        const reqItem = await env.DB.prepare("SELECT * FROM friend_requests WHERE id = ?").bind(request_id).first<any>();
-        if (!reqItem) return json({ error: "الطلب غير موجود" }, 404);
-
+        const reqItem = await env.DB.prepare("SELECT * FROM friend_requests WHERE id = ?").bind(request_id).first();
+        if (!reqItem) return json({ error: "\u0627\u0644\u0637\u0644\u0628 \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F" }, 404);
         const now = Date.now();
         if (action === "accept") {
           const [u1, u2] = [reqItem.from_user_id, reqItem.to_user_id].sort();
@@ -1485,13 +1322,12 @@ export default {
             env.DB.prepare("UPDATE friend_requests SET status = 'accepted', updated_at = ? WHERE id = ?").bind(now, request_id),
             env.DB.prepare("INSERT OR IGNORE INTO friendships (id, user1_id, user2_id, created_at) VALUES (?, ?, ?, ?)").bind(friendshipId, u1, u2, now)
           ]);
-          return json({ success: true, message: "تم قبول طلب الصداقة" });
+          return json({ success: true, message: "\u062A\u0645 \u0642\u0628\u0648\u0644 \u0637\u0644\u0628 \u0627\u0644\u0635\u062F\u0627\u0642\u0629" });
         } else {
           await env.DB.prepare("UPDATE friend_requests SET status = 'rejected', updated_at = ? WHERE id = ?").bind(now, request_id).run();
-          return json({ success: true, message: "تم رفض طلب الصداقة" });
+          return json({ success: true, message: "\u062A\u0645 \u0631\u0641\u0636 \u0637\u0644\u0628 \u0627\u0644\u0635\u062F\u0627\u0642\u0629" });
         }
       }
-
       if (url.pathname.startsWith("/friends/") && method === "DELETE") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "Unauthorized" }, 401);
@@ -1499,10 +1335,10 @@ export default {
         const [u1, u2] = [auth.id, targetId].sort();
         try {
           await env.DB.prepare("DELETE FROM friendships WHERE user1_id = ? AND user2_id = ?").bind(u1, u2).run();
-        } catch (e) {}
+        } catch (e) {
+        }
         return json({ success: true });
       }
-
       if (url.pathname.endsWith("/block") && method === "POST") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "Unauthorized" }, 401);
@@ -1510,10 +1346,10 @@ export default {
         const [u1, u2] = [auth.id, targetId].sort();
         try {
           await env.DB.prepare("UPDATE friendships SET is_blocked = 1, blocked_by = ? WHERE user1_id = ? AND user2_id = ?").bind(auth.id, u1, u2).run();
-        } catch (e) {}
+        } catch (e) {
+        }
         return json({ success: true });
       }
-
       if (url.pathname.endsWith("/unblock") && method === "POST") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "Unauthorized" }, 401);
@@ -1521,26 +1357,21 @@ export default {
         const [u1, u2] = [auth.id, targetId].sort();
         try {
           await env.DB.prepare("UPDATE friendships SET is_blocked = 0, blocked_by = '' WHERE user1_id = ? AND user2_id = ?").bind(u1, u2).run();
-        } catch (e) {}
+        } catch (e) {
+        }
         return json({ success: true });
       }
-
-      // --- YOUTUBE ROOMS API ---
-      // 1. Create real room with unique code
       if ((url.pathname === "/api/youtube/rooms/create" || url.pathname === "/youtube/rooms/create") && method === "POST") {
-        const body: any = await request.json().catch(() => ({}));
-        const title = (body.title || "غرفة سينما").trim();
-        const hostName = (body.hostName || "المضيف").trim();
+        const body = await request.json().catch(() => ({}));
+        const title = (body.title || "\u063A\u0631\u0641\u0629 \u0633\u064A\u0646\u0645\u0627").trim();
+        const hostName = (body.hostName || "\u0627\u0644\u0645\u0636\u064A\u0641").trim();
         const hostId = body.hostId || "host_" + Math.random().toString(36).substring(2, 8);
         const videoId = body.videoId || "dQw4w9WgXcQ";
-        const videoTitle = body.videoTitle || "فيديو يوتيوب";
+        const videoTitle = body.videoTitle || "\u0641\u064A\u062F\u064A\u0648 \u064A\u0648\u062A\u064A\u0648\u0628";
         const privacyMode = body.privacyMode || "PUBLIC";
-        
-        // Generate real 6-digit room code
-        const codeNum = Math.floor(100000 + Math.random() * 900000);
+        const codeNum = Math.floor(1e5 + Math.random() * 9e5);
         const roomCode = `#YT-${codeNum}`;
         const roomId = `yt_room_${codeNum}`;
-        
         const roomData = {
           roomId,
           roomCode,
@@ -1555,55 +1386,50 @@ export default {
           createdAt: Date.now(),
           lastActive: Date.now()
         };
-
         if (env.SESSIONS) {
           try {
             await env.SESSIONS.put(`yt_room:${roomId}`, JSON.stringify(roomData), { expirationTtl: 86400 });
             await env.SESSIONS.put(`yt_code:${codeNum}`, roomId, { expirationTtl: 86400 });
             if (privacyMode === "PUBLIC") {
               const currentListRaw = await env.SESSIONS.get("yt_public_rooms");
-              const currentList: string[] = currentListRaw ? JSON.parse(currentListRaw) : [];
+              const currentList = currentListRaw ? JSON.parse(currentListRaw) : [];
               if (!currentList.includes(roomId)) {
                 currentList.unshift(roomId);
                 await env.SESSIONS.put("yt_public_rooms", JSON.stringify(currentList.slice(0, 50)), { expirationTtl: 86400 });
               }
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
-
         return json({ success: true, room: roomData });
       }
-
-      // 2. Get public active rooms (ONLY real active rooms, no fake items)
       if ((url.pathname === "/api/youtube/rooms/public" || url.pathname === "/youtube/rooms/public") && method === "GET") {
-        const rooms: any[] = [];
+        const rooms = [];
         if (env.SESSIONS) {
           try {
             const currentListRaw = await env.SESSIONS.get("yt_public_rooms");
-            const currentList: string[] = currentListRaw ? JSON.parse(currentListRaw) : [];
+            const currentList = currentListRaw ? JSON.parse(currentListRaw) : [];
             for (const rId of currentList) {
               const rRaw = await env.SESSIONS.get(`yt_room:${rId}`);
               if (rRaw) {
                 rooms.push(JSON.parse(rRaw));
               }
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
         return json({ success: true, rooms });
       }
-
-      // 3. Get room by code or id (Strict Validation)
       if ((url.pathname === "/api/youtube/rooms/get" || url.pathname === "/youtube/rooms/get") && method === "GET") {
         const rawCode = (url.searchParams.get("code") || "").replace(/[^0-9]/g, "");
         const rawRoomId = url.searchParams.get("id") || "";
-        
         let targetRoomId = rawRoomId;
         if (!targetRoomId && rawCode && env.SESSIONS) {
           try {
-            targetRoomId = (await env.SESSIONS.get(`yt_code:${rawCode}`)) || "";
-          } catch (e) {}
+            targetRoomId = await env.SESSIONS.get(`yt_code:${rawCode}`) || "";
+          } catch (e) {
+          }
         }
-
         if (targetRoomId && env.SESSIONS) {
           try {
             const rRaw = await env.SESSIONS.get(`yt_room:${targetRoomId}`);
@@ -1611,15 +1437,13 @@ export default {
               const room = JSON.parse(rRaw);
               return json({ success: true, room });
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
-
-        return json({ success: false, error: "رمز الغرفة غير صحيح أو الغرفة غير موجودة" }, 404);
+        return json({ success: false, error: "\u0631\u0645\u0632 \u0627\u0644\u063A\u0631\u0641\u0629 \u063A\u064A\u0631 \u0635\u062D\u064A\u062D \u0623\u0648 \u0627\u0644\u063A\u0631\u0641\u0629 \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F\u0629" }, 404);
       }
-
-      // 4. Update room video and state in real-time
       if ((url.pathname === "/api/youtube/rooms/update" || url.pathname === "/youtube/rooms/update") && method === "POST") {
-        const body: any = await request.json().catch(() => ({}));
+        const body = await request.json().catch(() => ({}));
         const roomId = body.roomId;
         const videoId = body.videoId;
         const videoTitle = body.videoTitle;
@@ -1634,47 +1458,43 @@ export default {
               r.lastActive = Date.now();
               await env.SESSIONS.put(`yt_room:${roomId}`, JSON.stringify(r), { expirationTtl: 86400 });
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
         return json({ success: true });
       }
-
-      // 4b. Delete/Close room
       if ((url.pathname === "/api/youtube/rooms/delete" || url.pathname === "/youtube/rooms/delete") && method === "POST") {
-        const body: any = await request.json().catch(() => ({}));
+        const body = await request.json().catch(() => ({}));
         const roomId = body.roomId;
         if (roomId && env.SESSIONS) {
           try {
             await env.SESSIONS.delete(`yt_room:${roomId}`);
             const currentListRaw = await env.SESSIONS.get("yt_public_rooms");
             if (currentListRaw) {
-              const currentList: string[] = JSON.parse(currentListRaw);
-              const updatedList = currentList.filter((id: string) => id !== roomId);
+              const currentList = JSON.parse(currentListRaw);
+              const updatedList = currentList.filter((id) => id !== roomId);
               await env.SESSIONS.put("yt_public_rooms", JSON.stringify(updatedList), { expirationTtl: 86400 });
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
         return json({ success: true });
       }
-
-      // 5. Get all rooms (including private for App Owner)
       if ((url.pathname === "/api/youtube/rooms/all" || url.pathname === "/youtube/rooms/all") && method === "GET") {
-        const rooms: any[] = [];
+        const rooms = [];
         if (env.SESSIONS) {
           try {
             const currentListRaw = await env.SESSIONS.get("yt_public_rooms");
-            const currentList: string[] = currentListRaw ? JSON.parse(currentListRaw) : [];
+            const currentList = currentListRaw ? JSON.parse(currentListRaw) : [];
             for (const rId of currentList) {
               const rRaw = await env.SESSIONS.get(`yt_room:${rId}`);
               if (rRaw) rooms.push(JSON.parse(rRaw));
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
         return json({ success: true, rooms });
       }
-
-      // --- MOVIES & SERIES API (M3U RE-STREAMING & SYNCHRONIZED ROOMS) ---
-      // 1. Re-streaming / Stream Proxy: fetches stream and pipes to clients with CORS and proper video headers
       if ((url.pathname === "/api/movies/stream" || url.pathname === "/api/stream/proxy" || url.pathname === "/movies/stream") && (method === "GET" || method === "HEAD")) {
         const targetUrl = url.searchParams.get("url") || "";
         if (!targetUrl) {
@@ -1686,14 +1506,12 @@ export default {
           forwardHeaders.set("User-Agent", "VLC/3.0.18 LibVLC/3.0.18");
           forwardHeaders.set("Accept", "*/*");
           if (request.headers.has("Range")) {
-            forwardHeaders.set("Range", request.headers.get("Range")!);
+            forwardHeaders.set("Range", request.headers.get("Range"));
           }
-
           const streamResp = await fetch(resolvedUrl, {
             method: request.method,
             headers: forwardHeaders
           });
-
           const respHeaders = new Headers();
           respHeaders.set("Access-Control-Allow-Origin", "*");
           respHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
@@ -1701,32 +1519,28 @@ export default {
           respHeaders.set("Accept-Ranges", "bytes");
           respHeaders.set("Content-Type", streamResp.headers.get("Content-Type") || "video/mp2t");
           if (streamResp.headers.has("Content-Length")) {
-            respHeaders.set("Content-Length", streamResp.headers.get("Content-Length")!);
+            respHeaders.set("Content-Length", streamResp.headers.get("Content-Length"));
           }
           if (streamResp.headers.has("Content-Range")) {
-            respHeaders.set("Content-Range", streamResp.headers.get("Content-Range")!);
+            respHeaders.set("Content-Range", streamResp.headers.get("Content-Range"));
           }
-
           return new Response(streamResp.body, {
             status: streamResp.status,
             headers: respHeaders
           });
-        } catch (err: any) {
+        } catch (err) {
           console.error("Stream proxy error:", err);
           return json({ error: "Stream proxy error: " + (err.message || "Failed") }, 502);
         }
       }
-
-      // 2. Movies & Series Search API (Fast indexed database + M3U items)
       if ((url.pathname === "/api/movies/search" || url.pathname === "/movies/search") && method === "GET") {
         const query = (url.searchParams.get("q") || "").trim().toLowerCase();
-        
         const MOVIES_DATABASE = [
           {
             id: "mov_welad_rizk_3",
-            title: "ولاد رزق 3: القاضية",
-            name: "ولاد رزق 3: القاضية",
-            category: "أفلام سينما 2024",
+            title: "\u0648\u0644\u0627\u062F \u0631\u0632\u0642 3: \u0627\u0644\u0642\u0627\u0636\u064A\u0629",
+            name: "\u0648\u0644\u0627\u062F \u0631\u0632\u0642 3: \u0627\u0644\u0642\u0627\u0636\u064A\u0629",
+            category: "\u0623\u0641\u0644\u0627\u0645 \u0633\u064A\u0646\u0645\u0627 2024",
             poster: "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/movie/13968296781874/20098269331298/101.mp4",
             duration: "2:04:15",
@@ -1736,9 +1550,9 @@ export default {
           },
           {
             id: "mov_al_hawa_sultan",
-            title: "الهوى سلطان",
-            name: "الهوى سلطان",
-            category: "أفلام سينما 2024",
+            title: "\u0627\u0644\u0647\u0648\u0649 \u0633\u0644\u0637\u0627\u0646",
+            name: "\u0627\u0644\u0647\u0648\u0649 \u0633\u0644\u0637\u0627\u0646",
+            category: "\u0623\u0641\u0644\u0627\u0645 \u0633\u064A\u0646\u0645\u0627 2024",
             poster: "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/movie/13968296781874/20098269331298/102.mp4",
             duration: "1:52:30",
@@ -1748,33 +1562,33 @@ export default {
           },
           {
             id: "mov_al_hashashin",
-            title: "مسلسل الحشاشين (أبطال قلعة ألموت)",
-            name: "الحشاشين",
-            category: "مسلسلات تاريخية",
+            title: "\u0645\u0633\u0644\u0633\u0644 \u0627\u0644\u062D\u0634\u0627\u0634\u064A\u0646 (\u0623\u0628\u0637\u0627\u0644 \u0642\u0644\u0639\u0629 \u0623\u0644\u0645\u0648\u062A)",
+            name: "\u0627\u0644\u062D\u0634\u0627\u0634\u064A\u0646",
+            category: "\u0645\u0633\u0644\u0633\u0644\u0627\u062A \u062A\u0627\u0631\u064A\u062E\u064A\u0629",
             poster: "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/series/13968296781874/20098269331298/201.mp4",
-            duration: "الحلقة 1 - 48:20",
+            duration: "\u0627\u0644\u062D\u0644\u0642\u0629 1 - 48:20",
             year: "2024",
             isSeries: true,
             rating: "9.3"
           },
           {
             id: "mov_al_atawla",
-            title: "مسلسل العتاولة (الجزء الأول)",
-            name: "العتاولة",
-            category: "مسلسلات أكشن ودراما",
+            title: "\u0645\u0633\u0644\u0633\u0644 \u0627\u0644\u0639\u062A\u0627\u0648\u0644\u0629 (\u0627\u0644\u062C\u0632\u0621 \u0627\u0644\u0623\u0648\u0644)",
+            name: "\u0627\u0644\u0639\u062A\u0627\u0648\u0644\u0629",
+            category: "\u0645\u0633\u0644\u0633\u0644\u0627\u062A \u0623\u0643\u0634\u0646 \u0648\u062F\u0631\u0627\u0645\u0627",
             poster: "https://images.unsplash.com/photo-1594909122845-11baa439b7bf?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/series/13968296781874/20098269331298/202.mp4",
-            duration: "الحلقة 1 - 42:10",
+            duration: "\u0627\u0644\u062D\u0644\u0642\u0629 1 - 42:10",
             year: "2024",
             isSeries: true,
             rating: "8.7"
           },
           {
             id: "mov_oppenheimer",
-            title: "أوبنهايمر (Oppenheimer)",
+            title: "\u0623\u0648\u0628\u0646\u0647\u0627\u064A\u0645\u0631 (Oppenheimer)",
             name: "Oppenheimer",
-            category: "أفلام هوليوود مترجمة",
+            category: "\u0623\u0641\u0644\u0627\u0645 \u0647\u0648\u0644\u064A\u0648\u0648\u062F \u0645\u062A\u0631\u062C\u0645\u0629",
             poster: "https://images.unsplash.com/photo-1440404653325-ab127d49abc1?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/movie/13968296781874/20098269331298/103.mp4",
             duration: "3:00:22",
@@ -1784,9 +1598,9 @@ export default {
           },
           {
             id: "mov_interstellar",
-            title: "بين النجوم (Interstellar 4K)",
+            title: "\u0628\u064A\u0646 \u0627\u0644\u0646\u062C\u0648\u0645 (Interstellar 4K)",
             name: "Interstellar",
-            category: "أفلام خيال علمي",
+            category: "\u0623\u0641\u0644\u0627\u0645 \u062E\u064A\u0627\u0644 \u0639\u0644\u0645\u064A",
             poster: "https://images.unsplash.com/photo-1451187580459-43490279c0fa?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/movie/13968296781874/20098269331298/104.mp4",
             duration: "2:49:00",
@@ -1796,9 +1610,9 @@ export default {
           },
           {
             id: "mov_gladiator_2",
-            title: "المحارب 2 (Gladiator II 2024)",
+            title: "\u0627\u0644\u0645\u062D\u0627\u0631\u0628 2 (Gladiator II 2024)",
             name: "Gladiator 2",
-            category: "أفلام سينما 2024",
+            category: "\u0623\u0641\u0644\u0627\u0645 \u0633\u064A\u0646\u0645\u0627 2024",
             poster: "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/movie/13968296781874/20098269331298/105.mp4",
             duration: "2:28:10",
@@ -1808,9 +1622,9 @@ export default {
           },
           {
             id: "mov_dune_2",
-            title: "كثيب: الجزء الثاني (Dune: Part Two)",
+            title: "\u0643\u062B\u064A\u0628: \u0627\u0644\u062C\u0632\u0621 \u0627\u0644\u062B\u0627\u0646\u064A (Dune: Part Two)",
             name: "Dune 2",
-            category: "أفلام خيال علمي",
+            category: "\u0623\u0641\u0644\u0627\u0645 \u062E\u064A\u0627\u0644 \u0639\u0644\u0645\u064A",
             poster: "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/movie/13968296781874/20098269331298/106.mp4",
             duration: "2:46:34",
@@ -1820,21 +1634,21 @@ export default {
           },
           {
             id: "mov_al_mousim_al_rabia",
-            title: "مسلسل جعفر العمدة",
-            name: "جعفر العمدة",
-            category: "مسلسلات دراما مصرية",
+            title: "\u0645\u0633\u0644\u0633\u0644 \u062C\u0639\u0641\u0631 \u0627\u0644\u0639\u0645\u062F\u0629",
+            name: "\u062C\u0639\u0641\u0631 \u0627\u0644\u0639\u0645\u062F\u0629",
+            category: "\u0645\u0633\u0644\u0633\u0644\u0627\u062A \u062F\u0631\u0627\u0645\u0627 \u0645\u0635\u0631\u064A\u0629",
             poster: "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/series/13968296781874/20098269331298/203.mp4",
-            duration: "الحلقة 1 - 44:00",
+            duration: "\u0627\u0644\u062D\u0644\u0642\u0629 1 - 44:00",
             year: "2023",
             isSeries: true,
             rating: "8.5"
           },
           {
             id: "mov_doc_universe",
-            title: "أسرار الكون والمجرات بجودة فائقة 4K",
-            name: "أسرار الكون",
-            category: "أفلام وثائقية",
+            title: "\u0623\u0633\u0631\u0627\u0631 \u0627\u0644\u0643\u0648\u0646 \u0648\u0627\u0644\u0645\u062C\u0631\u0627\u062A \u0628\u062C\u0648\u062F\u0629 \u0641\u0627\u0626\u0642\u0629 4K",
+            name: "\u0623\u0633\u0631\u0627\u0631 \u0627\u0644\u0643\u0648\u0646",
+            category: "\u0623\u0641\u0644\u0627\u0645 \u0648\u062B\u0627\u0626\u0642\u064A\u0629",
             poster: "https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/movie/13968296781874/20098269331298/107.mp4",
             duration: "1:35:10",
@@ -1844,9 +1658,9 @@ export default {
           },
           {
             id: "mov_lion_king_mufasa",
-            title: "موفاسا: الأسد الملك (Mufasa: The Lion King)",
+            title: "\u0645\u0648\u0641\u0627\u0633\u0627: \u0627\u0644\u0623\u0633\u062F \u0627\u0644\u0645\u0644\u0643 (Mufasa: The Lion King)",
             name: "Mufasa",
-            category: "أفلام أنمي وعائلة",
+            category: "\u0623\u0641\u0644\u0627\u0645 \u0623\u0646\u0645\u064A \u0648\u0639\u0627\u0626\u0644\u0629",
             poster: "https://images.unsplash.com/photo-1534188753412-3e26d0d618d6?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/movie/13968296781874/20098269331298/108.mp4",
             duration: "1:58:00",
@@ -1856,28 +1670,23 @@ export default {
           },
           {
             id: "mov_breaking_bad",
-            title: "مسلسل بريكنج باد (Breaking Bad)",
+            title: "\u0645\u0633\u0644\u0633\u0644 \u0628\u0631\u064A\u0643\u0646\u062C \u0628\u0627\u062F (Breaking Bad)",
             name: "Breaking Bad",
-            category: "مسلسلات عالمية",
+            category: "\u0645\u0633\u0644\u0633\u0644\u0627\u062A \u0639\u0627\u0644\u0645\u064A\u0629",
             poster: "https://images.unsplash.com/photo-1509281373149-e957c6296406?w=600&auto=format&fit=crop&q=80",
             streamUrl: "http://maxshowplayer.site:2052/series/13968296781874/20098269331298/204.mp4",
-            duration: "الحلقة 1 - 58:00",
+            duration: "\u0627\u0644\u062D\u0644\u0642\u0629 1 - 58:00",
             year: "2020",
             isSeries: true,
             rating: "9.5"
           }
         ];
-
         let results = MOVIES_DATABASE;
         if (query) {
-          results = MOVIES_DATABASE.filter(m => 
-            m.title.toLowerCase().includes(query) ||
-            m.name.toLowerCase().includes(query) ||
-            m.category.toLowerCase().includes(query) ||
-            m.year.includes(query)
+          results = MOVIES_DATABASE.filter(
+            (m) => m.title.toLowerCase().includes(query) || m.name.toLowerCase().includes(query) || m.category.toLowerCase().includes(query) || m.year.includes(query)
           );
         }
-
         return json({
           success: true,
           query,
@@ -1885,22 +1694,18 @@ export default {
           movies: results
         });
       }
-
-      // 3. Create Real Movies & Series Room
       if ((url.pathname === "/api/movies/rooms/create" || url.pathname === "/movies/rooms/create") && method === "POST") {
-        const body: any = await request.json().catch(() => ({}));
-        const title = (body.title || "سينما الأفلام والمسلسلات").trim();
-        const hostName = (body.hostName || "المضيف").trim();
+        const body = await request.json().catch(() => ({}));
+        const title = (body.title || "\u0633\u064A\u0646\u0645\u0627 \u0627\u0644\u0623\u0641\u0644\u0627\u0645 \u0648\u0627\u0644\u0645\u0633\u0644\u0633\u0644\u0627\u062A").trim();
+        const hostName = (body.hostName || "\u0627\u0644\u0645\u0636\u064A\u0641").trim();
         const hostId = body.hostId || "host_" + Math.random().toString(36).substring(2, 8);
         const streamUrl = body.streamUrl || "http://maxshowplayer.site:2052/movie/13968296781874/20098269331298/101.mp4";
-        const movieTitle = body.movieTitle || "ولاد رزق 3: القاضية";
+        const movieTitle = body.movieTitle || "\u0648\u0644\u0627\u062F \u0631\u0632\u0642 3: \u0627\u0644\u0642\u0627\u0636\u064A\u0629";
         const posterUrl = body.posterUrl || "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=600&auto=format&fit=crop&q=80";
         const privacy = body.privacy || "PUBLIC";
-        
-        const codeNum = Math.floor(100000 + Math.random() * 900000);
+        const codeNum = Math.floor(1e5 + Math.random() * 9e5);
         const roomCode = `#MOV-${codeNum}`;
         const roomId = `mov_room_${codeNum}`;
-
         const roomData = {
           roomId,
           roomCode,
@@ -1916,64 +1721,55 @@ export default {
           createdAt: Date.now(),
           lastActive: Date.now()
         };
-
         if (env.SESSIONS) {
           try {
             await env.SESSIONS.put(`mov_room:${roomId}`, JSON.stringify(roomData), { expirationTtl: 86400 });
             await env.SESSIONS.put(`mov_code:${codeNum}`, roomId, { expirationTtl: 86400 });
-
             if (privacy === "PUBLIC") {
               const currentListRaw = await env.SESSIONS.get("mov_public_rooms");
-              const currentList: string[] = currentListRaw ? JSON.parse(currentListRaw) : [];
+              const currentList = currentListRaw ? JSON.parse(currentListRaw) : [];
               if (!currentList.includes(roomId)) {
                 currentList.unshift(roomId);
                 await env.SESSIONS.put("mov_public_rooms", JSON.stringify(currentList.slice(0, 50)), { expirationTtl: 86400 });
               }
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
-
         return json({ success: true, room: roomData });
       }
-
-      // 4. Get Public Active Movies Rooms
       if ((url.pathname === "/api/movies/rooms/public" || url.pathname === "/movies/rooms/public") && method === "GET") {
-        const rooms: any[] = [];
+        const rooms = [];
         if (env.SESSIONS) {
           try {
             const currentListRaw = await env.SESSIONS.get("mov_public_rooms");
-            const currentList: string[] = currentListRaw ? JSON.parse(currentListRaw) : [];
+            const currentList = currentListRaw ? JSON.parse(currentListRaw) : [];
             for (const rId of currentList) {
               const rRaw = await env.SESSIONS.get(`mov_room:${rId}`);
               if (rRaw) rooms.push(JSON.parse(rRaw));
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
         return json({ success: true, rooms });
       }
-
-      // 5. Get Movie Room by Code or ID
       if ((url.pathname === "/api/movies/rooms/get" || url.pathname === "/movies/rooms/get") && method === "GET") {
         const rawCode = (url.searchParams.get("code") || "").replace(/[^0-9]/g, "");
         const rawRoomId = url.searchParams.get("id") || "";
-        
         let targetRoomId = rawRoomId;
         if (!targetRoomId && rawCode && env.SESSIONS) {
-          targetRoomId = (await env.SESSIONS.get(`mov_code:${rawCode}`)) || "";
+          targetRoomId = await env.SESSIONS.get(`mov_code:${rawCode}`) || "";
         }
-
         if (targetRoomId && env.SESSIONS) {
           const rRaw = await env.SESSIONS.get(`mov_room:${targetRoomId}`);
           if (rRaw) {
             return json({ success: true, room: JSON.parse(rRaw) });
           }
         }
-        return json({ success: false, error: "رمز الغرفة غير صحيح أو الغرفة غير موجودة" }, 404);
+        return json({ success: false, error: "\u0631\u0645\u0632 \u0627\u0644\u063A\u0631\u0641\u0629 \u063A\u064A\u0631 \u0635\u062D\u064A\u062D \u0623\u0648 \u0627\u0644\u063A\u0631\u0641\u0629 \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F\u0629" }, 404);
       }
-
-      // 6. Update Movie Room stream & state
       if ((url.pathname === "/api/movies/rooms/update" || url.pathname === "/movies/rooms/update") && method === "POST") {
-        const body: any = await request.json().catch(() => ({}));
+        const body = await request.json().catch(() => ({}));
         const roomId = body.roomId;
         const streamUrl = body.streamUrl;
         const movieTitle = body.movieTitle;
@@ -1989,74 +1785,62 @@ export default {
               r.lastActive = Date.now();
               await env.SESSIONS.put(`mov_room:${roomId}`, JSON.stringify(r), { expirationTtl: 86400 });
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
         return json({ success: true });
       }
-
-      // 7. Delete Movie Room
       if ((url.pathname === "/api/movies/rooms/delete" || url.pathname === "/movies/rooms/delete") && method === "POST") {
-        const body: any = await request.json().catch(() => ({}));
+        const body = await request.json().catch(() => ({}));
         const roomId = body.roomId;
         if (roomId && env.SESSIONS) {
           try {
             await env.SESSIONS.delete(`mov_room:${roomId}`);
             const currentListRaw = await env.SESSIONS.get("mov_public_rooms");
             if (currentListRaw) {
-              const currentList: string[] = JSON.parse(currentListRaw);
-              const updatedList = currentList.filter((id: string) => id !== roomId);
+              const currentList = JSON.parse(currentListRaw);
+              const updatedList = currentList.filter((id) => id !== roomId);
               await env.SESSIONS.put("mov_public_rooms", JSON.stringify(updatedList), { expirationTtl: 86400 });
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
         return json({ success: true });
       }
-
-      // ==========================================
-      // TV CHANNELS & SMART STREAM REBROADCASTER
-      // ==========================================
-
-      // 1. Search & List TV Channels from D1
       if ((url.pathname === "/api/tv/channels" || url.pathname === "/tv/channels") && method === "GET") {
         if (env.DB) await ensureAllTables(env.DB);
         const q = (url.searchParams.get("q") || "").trim().toLowerCase();
         const cat = (url.searchParams.get("category") || "").trim();
         const origin = url.origin;
-
-        let channels: any[] = [];
+        let channels = [];
         if (env.DB) {
           try {
             let query = "SELECT * FROM tv_channels WHERE 1=1";
-            const binds: any[] = [];
+            const binds = [];
             if (q) {
               query += " AND (LOWER(name) LIKE ? OR LOWER(title) LIKE ?)";
               binds.push(`%${q}%`, `%${q}%`);
             }
-            if (cat && cat !== "الكل") {
+            if (cat && cat !== "\u0627\u0644\u0643\u0644") {
               query += " AND category = ?";
               binds.push(cat);
             }
             query += " ORDER BY sort_order ASC, name ASC LIMIT 150";
             const res = await env.DB.prepare(query).bind(...binds).all();
             channels = res.results || [];
-          } catch (_) {}
+          } catch (_) {
+          }
         }
-
-        // Augment with proxy_stream_url for seamless multi-account playback without buffering
-        const enhanced = channels.map((c: any) => ({
+        const enhanced = channels.map((c) => ({
           ...c,
           proxy_stream_url: `${origin}/api/tv/stream/proxy?url=${encodeURIComponent(c.stream_url)}`
         }));
-
         return json({ success: true, count: enhanced.length, channels: enhanced });
       }
-
-      // 2. Sync TV Channels from M3U Source to D1
       if ((url.pathname === "/api/tv/channels/sync" || url.pathname === "/tv/channels/sync") && method === "POST") {
         if (env.DB) await ensureAllTables(env.DB);
-        const body: any = await request.json().catch(() => ({}));
+        const body = await request.json().catch(() => ({}));
         const m3uSource = body.m3uUrl || "http://maxshowplayer.site:2052/get.php?username=13968296781874&password=20098269331298&type=m3u&output=mpegts";
-        
         let syncedCount = 0;
         try {
           const m3uRes = await fetch(m3uSource, { headers: { "User-Agent": "Mozilla/5.0" } });
@@ -2064,20 +1848,22 @@ export default {
           const lines = m3uText.split("\n");
           let currentTitle = "";
           let currentLogo = "";
-          let currentCategory = "قنوات فضائية";
-
+          let currentCategory = "\u0642\u0646\u0648\u0627\u062A \u0641\u0636\u0627\u0626\u064A\u0629";
           for (const line of lines) {
             const trimmed = line.trim();
             if (trimmed.startsWith("#EXTINF:")) {
               const logoMatch = /tvg-logo="([^"]*)"/.exec(trimmed);
               currentLogo = logoMatch ? logoMatch[1] : "";
               const groupMatch = /group-title="([^"]*)"/.exec(trimmed);
-              currentCategory = groupMatch ? groupMatch[1] : "قنوات فضائية";
+              currentCategory = groupMatch ? groupMatch[1] : "\u0642\u0646\u0648\u0627\u062A \u0641\u0636\u0627\u0626\u064A\u0629";
               const commaIdx = trimmed.lastIndexOf(",");
-              currentTitle = commaIdx >= 0 ? trimmed.substring(commaIdx + 1).trim() : "قناة فضائية";
+              currentTitle = commaIdx >= 0 ? trimmed.substring(commaIdx + 1).trim() : "\u0642\u0646\u0627\u0629 \u0641\u0636\u0627\u0626\u064A\u0629";
             } else if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
               if (currentTitle && env.DB) {
-                const id = "ch_" + Math.abs(currentTitle.split("").reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a; }, 0));
+                const id = "ch_" + Math.abs(currentTitle.split("").reduce((a, b) => {
+                  a = (a << 5) - a + b.charCodeAt(0);
+                  return a & a;
+                }, 0));
                 await env.DB.prepare(
                   "INSERT OR REPLACE INTO tv_channels (id, name, title, category, logo_url, stream_url, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                 ).bind(id, currentTitle, currentTitle, currentCategory, currentLogo, trimmed, syncedCount + 1, Date.now()).run();
@@ -2087,47 +1873,38 @@ export default {
               currentLogo = "";
             }
           }
-        } catch (e: any) {
+        } catch (e) {
           return json({ success: false, error: e.message }, 500);
         }
-
         return json({ success: true, message: `Synced ${syncedCount} channels to D1 successfully` });
       }
-
-      // 3. Smart Rebroadcaster Stream Proxy (Anti-Buffering Multi-Account Relay)
       if (url.pathname === "/api/tv/stream/proxy" || url.pathname === "/tv/stream/proxy") {
         const targetUrl = url.searchParams.get("url");
         if (!targetUrl) return new Response("Missing target stream url", { status: 400 });
-
         try {
-          const streamReqHeaders: Record<string, string> = {
+          const streamReqHeaders = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Referer": "http://maxshowplayer.site:2052/",
             "Accept": "*/*"
           };
           const rangeHeader = request.headers.get("range");
           if (rangeHeader) streamReqHeaders["Range"] = rangeHeader;
-
           const upstreamRes = await fetch(targetUrl, {
             headers: streamReqHeaders,
             redirect: "follow"
           });
-
           const contentType = upstreamRes.headers.get("content-type") || "";
           const isHls = targetUrl.includes(".m3u8") || contentType.includes("application/vnd.apple.mpegurl") || contentType.includes("application/x-mpegurl");
-
           if (isHls) {
             const playlistText = await upstreamRes.text();
             const baseUrlObj = new URL(targetUrl);
             const proxyBase = `${url.origin}/api/tv/stream/chunk?url=`;
-
-            const rewrittenLines = playlistText.split("\n").map(line => {
+            const rewrittenLines = playlistText.split("\n").map((line) => {
               const trimmed = line.trim();
               if (!trimmed || trimmed.startsWith("#")) return line;
               const chunkUrl = new URL(trimmed, baseUrlObj.href).href;
               return `${proxyBase}${encodeURIComponent(chunkUrl)}`;
             });
-
             return new Response(rewrittenLines.join("\n"), {
               status: upstreamRes.status,
               headers: {
@@ -2137,28 +1914,23 @@ export default {
               }
             });
           }
-
           const resHeaders = new Headers(corsHeaders);
-          if (upstreamRes.headers.has("content-type")) resHeaders.set("Content-Type", upstreamRes.headers.get("content-type")!);
-          if (upstreamRes.headers.has("content-length")) resHeaders.set("Content-Length", upstreamRes.headers.get("content-length")!);
-          if (upstreamRes.headers.has("content-range")) resHeaders.set("Content-Range", upstreamRes.headers.get("content-range")!);
-          if (upstreamRes.headers.has("accept-ranges")) resHeaders.set("Accept-Ranges", upstreamRes.headers.get("accept-ranges")!);
+          if (upstreamRes.headers.has("content-type")) resHeaders.set("Content-Type", upstreamRes.headers.get("content-type"));
+          if (upstreamRes.headers.has("content-length")) resHeaders.set("Content-Length", upstreamRes.headers.get("content-length"));
+          if (upstreamRes.headers.has("content-range")) resHeaders.set("Content-Range", upstreamRes.headers.get("content-range"));
+          if (upstreamRes.headers.has("accept-ranges")) resHeaders.set("Accept-Ranges", upstreamRes.headers.get("accept-ranges"));
           resHeaders.set("Cache-Control", "no-cache, no-store, must-revalidate");
-
           return new Response(upstreamRes.body, {
             status: upstreamRes.status,
             headers: resHeaders
           });
-        } catch (err: any) {
+        } catch (err) {
           return new Response(`Rebroadcast error: ${err.message}`, { status: 502, headers: corsHeaders });
         }
       }
-
-      // 4. HLS Chunk Edge Cache Proxy (Global Edge Caching for Video Chunks)
       if (url.pathname === "/api/tv/stream/chunk" || url.pathname === "/tv/stream/chunk") {
         const chunkUrl = url.searchParams.get("url");
         if (!chunkUrl) return new Response("Missing chunk url", { status: 400 });
-
         try {
           const chunkRes = await fetch(chunkUrl, {
             headers: {
@@ -2167,36 +1939,30 @@ export default {
               "Accept": "*/*"
             }
           });
-
           const chunkHeaders = new Headers(corsHeaders);
           chunkHeaders.set("Content-Type", chunkRes.headers.get("content-type") || "video/MP2T");
-          if (chunkRes.headers.has("content-length")) chunkHeaders.set("Content-Length", chunkRes.headers.get("content-length")!);
+          if (chunkRes.headers.has("content-length")) chunkHeaders.set("Content-Length", chunkRes.headers.get("content-length"));
           chunkHeaders.set("Cache-Control", "public, max-age=15, s-maxage=30, immutable");
-
           return new Response(chunkRes.body, {
             status: chunkRes.status,
             headers: chunkHeaders
           });
-        } catch (err: any) {
+        } catch (err) {
           return new Response(`Chunk error: ${err.message}`, { status: 502, headers: corsHeaders });
         }
       }
-
-      // 5. TV Rooms API (Create, Public, Verify, Update, Delete)
       if ((url.pathname === "/api/tv/rooms/create" || url.pathname === "/tv/rooms/create") && method === "POST") {
-        const body: any = await request.json().catch(() => ({}));
-        const title = (body.title || "غرفة قنوات تلفزيونية").trim();
-        const hostName = (body.hostName || "المضيف").trim();
+        const body = await request.json().catch(() => ({}));
+        const title = (body.title || "\u063A\u0631\u0641\u0629 \u0642\u0646\u0648\u0627\u062A \u062A\u0644\u0641\u0632\u064A\u0648\u0646\u064A\u0629").trim();
+        const hostName = (body.hostName || "\u0627\u0644\u0645\u0636\u064A\u0641").trim();
         const hostId = body.hostId || "host_" + Math.random().toString(36).substring(2, 8);
         const streamUrl = body.streamUrl || "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/501.m3u8";
         const currentChannelTitle = body.currentChannelTitle || "beIN SPORTS News HD";
         const logoUrl = body.logoUrl || "https://images.unsplash.com/photo-1508098682722-e99c43a406b2?w=600&auto=format&fit=crop&q=80";
         const privacy = body.privacyMode || "PUBLIC";
-        
-        const codeNum = Math.floor(1000 + Math.random() * 9000);
+        const codeNum = Math.floor(1e3 + Math.random() * 9e3);
         const roomCode = body.roomCode || `#TV-${codeNum}`;
         const roomId = body.roomId || `tv_room_${Date.now()}_${codeNum}`;
-
         const roomData = {
           roomId,
           roomCode,
@@ -2212,56 +1978,52 @@ export default {
           createdAt: Date.now(),
           lastActive: Date.now()
         };
-
         if (env.SESSIONS) {
           try {
             await env.SESSIONS.put(`tv_room:${roomId}`, JSON.stringify(roomData), { expirationTtl: 86400 });
             await env.SESSIONS.put(`tv_code:${roomCode.replace(/[^0-9A-Za-z]/g, "")}`, roomId, { expirationTtl: 86400 });
-
             if (privacy === "PUBLIC") {
               const currentListRaw = await env.SESSIONS.get("tv_public_rooms");
-              const currentList: string[] = currentListRaw ? JSON.parse(currentListRaw) : [];
+              const currentList = currentListRaw ? JSON.parse(currentListRaw) : [];
               if (!currentList.includes(roomId)) {
                 currentList.unshift(roomId);
                 await env.SESSIONS.put("tv_public_rooms", JSON.stringify(currentList.slice(0, 50)), { expirationTtl: 86400 });
               }
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
-
         return json({ success: true, room: roomData });
       }
-
       if ((url.pathname === "/api/tv/rooms/active" || url.pathname === "/tv/rooms/active" || url.pathname === "/api/tv/rooms/public") && method === "GET") {
-        const rooms: any[] = [];
+        const rooms = [];
         if (env.SESSIONS) {
           try {
             const currentListRaw = await env.SESSIONS.get("tv_public_rooms");
-            const currentList: string[] = currentListRaw ? JSON.parse(currentListRaw) : [];
+            const currentList = currentListRaw ? JSON.parse(currentListRaw) : [];
             for (const rId of currentList) {
               const rRaw = await env.SESSIONS.get(`tv_room:${rId}`);
               if (rRaw) rooms.push(JSON.parse(rRaw));
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
         return json(rooms);
       }
-
       if ((url.pathname === "/api/tv/rooms/verify" || url.pathname === "/tv/rooms/verify") && method === "GET") {
         const rawCode = (url.searchParams.get("code") || "").replace(/[^0-9A-Za-z]/g, "");
         let targetRoomId = "";
         if (rawCode && env.SESSIONS) {
-          targetRoomId = (await env.SESSIONS.get(`tv_code:${rawCode}`)) || "";
+          targetRoomId = await env.SESSIONS.get(`tv_code:${rawCode}`) || "";
         }
         if (targetRoomId && env.SESSIONS) {
           const rRaw = await env.SESSIONS.get(`tv_room:${targetRoomId}`);
           if (rRaw) return json({ success: true, ...JSON.parse(rRaw) });
         }
-        return json({ success: false, error: "رمز الغرفة غير صحيح أو الغرفة غير موجودة" }, 404);
+        return json({ success: false, error: "\u0631\u0645\u0632 \u0627\u0644\u063A\u0631\u0641\u0629 \u063A\u064A\u0631 \u0635\u062D\u064A\u062D \u0623\u0648 \u0627\u0644\u063A\u0631\u0641\u0629 \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F\u0629" }, 404);
       }
-
       if ((url.pathname === "/api/tv/rooms/update" || url.pathname === "/tv/rooms/update") && method === "POST") {
-        const body: any = await request.json().catch(() => ({}));
+        const body = await request.json().catch(() => ({}));
         const roomId = body.roomId;
         if (roomId && env.SESSIONS) {
           try {
@@ -2274,16 +2036,15 @@ export default {
               r.lastActive = Date.now();
               await env.SESSIONS.put(`tv_room:${roomId}`, JSON.stringify(r), { expirationTtl: 86400 });
             }
-          } catch (e) {}
+          } catch (e) {
+          }
         }
         return json({ success: true });
       }
-
       if (url.pathname === "/init-db" || url.pathname === "/api/init-db") {
         if (env.DB) await ensureAllTables(env.DB);
         return json({ success: true, message: "Database tables initialized" });
       }
-
       if ((url.pathname === "/api/zego/config" || url.pathname === "/zego/config") && method === "GET") {
         return json({
           success: true,
@@ -2291,22 +2052,24 @@ export default {
           appSign: "29c005b621138958b88eea14c91bd62b2189095171ce962ffe3680974493b41d"
         });
       }
-
       if (url.pathname === "/" || url.pathname === "/health") {
-        return json({ 
-          status: "ok", 
-          service: "ps1-combat3-api", 
+        return json({
+          status: "ok",
+          service: "ps1-combat3-api",
           domain: "api.ahmed1986y.com",
           d1: "ps1_db",
           r2: "ps1-media.ahmed1986y.com",
           kv: "SESSIONS",
-          timestamp: Date.now() 
+          timestamp: Date.now()
         });
       }
-
       return json({ error: "Not Found" }, 404);
-    } catch (e: any) {
+    } catch (e) {
       return json({ error: e.message || "Internal Server Error" }, 500);
     }
-  },
+  }
+};
+export {
+  ChatRoomDO,
+  index_default as default
 };

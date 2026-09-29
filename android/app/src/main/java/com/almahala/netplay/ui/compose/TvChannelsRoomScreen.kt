@@ -210,13 +210,16 @@ fun TvChannelsRoomScreen(
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
+    // REAL ZEGO WALKIE-TALKIE INITIALIZATION IN SAFE AUDIENCE MODE (NO CRASH)
+    val zegoAudioRoomId = remember(roomId) { "tv_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}" }
+
     // Record audio permission launcher
     val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
             isIntercomTalking = true
-            ZegoCallManager.startPublishingAudio("tv_room_$roomId", currentUserId)
+            ZegoCallManager.startPublishingAudio(zegoAudioRoomId, currentUserId)
             ZegoCallManager.setSpeakerEnabled(context, true)
             Toast.makeText(context, "الميكروفون قيد البث الآن 🎙️", Toast.LENGTH_SHORT).show()
         } else {
@@ -232,7 +235,7 @@ fun TvChannelsRoomScreen(
             val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             if (hasPerm) {
                 isIntercomTalking = true
-                ZegoCallManager.startPublishingAudio("tv_room_$roomId", currentUserId)
+                ZegoCallManager.startPublishingAudio(zegoAudioRoomId, currentUserId)
                 ZegoCallManager.setSpeakerEnabled(context, true)
             } else {
                 recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -240,8 +243,6 @@ fun TvChannelsRoomScreen(
         }
     }
 
-    // REAL ZEGO WALKIE-TALKIE INITIALIZATION IN SAFE AUDIENCE MODE (NO CRASH)
-    val zegoAudioRoomId = remember(roomId) { "tv_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}" }
     LaunchedEffect(zegoAudioRoomId) {
         try {
             ZegoCallManager.joinWatchParty(
