@@ -200,9 +200,18 @@ fun RootAppShell() {
                     YouTubeLobbyScreen(
                         onBack = { navController.popBackStack() },
                         onEnterRoom = { roomId, videoId, roomTitle, roomCode, isStealth ->
-                            val encTitle = try { java.net.URLEncoder.encode(roomTitle, "UTF-8") } catch (_: Exception) { "room" }
-                            val encCode = try { java.net.URLEncoder.encode(roomCode, "UTF-8") } catch (_: Exception) { "code" }
-                            navController.navigate("youtube_room/$roomId/$videoId/$encTitle/$encCode?stealth=$isStealth")
+                            RoomNavState.setRoom(
+                                roomId = roomId,
+                                videoId = videoId,
+                                roomTitle = roomTitle,
+                                roomCode = roomCode,
+                                isStealth = isStealth
+                            )
+                            try {
+                                navController.navigate("youtube_room")
+                            } catch (e: Exception) {
+                                android.util.Log.e("RootAppShell", "Nav error: ${e.message}", e)
+                            }
                         }
                     )
                 }
@@ -261,6 +270,11 @@ fun RootAppShell() {
                 }
                 composable("youtube_room") {
                     YouTubeRoomScreen(
+                        roomId = RoomNavState.activeRoomId.ifBlank { "yt_room_default" },
+                        initialVideoId = RoomNavState.activeVideoId.ifBlank { "jfKfPfyJRdk" },
+                        roomTitle = RoomNavState.activeRoomTitle.ifBlank { "غرفة مشاهدة يوتيوب" },
+                        roomCode = RoomNavState.activeRoomCode.ifBlank { "#YT-9024" },
+                        isStealthMode = RoomNavState.isStealthMode,
                         onBack = { navController.popBackStack() }
                     )
                 }
@@ -268,10 +282,18 @@ fun RootAppShell() {
                     MoviesLobbyScreen(
                         onBack = { navController.popBackStack() },
                         onEnterRoom = { roomId, streamUrl, roomTitle, roomCode, isStealth ->
-                            val encUrl = try { java.net.URLEncoder.encode(streamUrl, "UTF-8") } catch (_: Exception) { "stream" }
-                            val encTitle = try { java.net.URLEncoder.encode(roomTitle, "UTF-8") } catch (_: Exception) { "room" }
-                            val encCode = try { java.net.URLEncoder.encode(roomCode, "UTF-8") } catch (_: Exception) { "code" }
-                            navController.navigate("movies_room/$roomId/$encUrl/$encTitle/$encCode?stealth=$isStealth")
+                            RoomNavState.setRoom(
+                                roomId = roomId,
+                                streamUrl = streamUrl,
+                                roomTitle = roomTitle,
+                                roomCode = roomCode,
+                                isStealth = isStealth
+                            )
+                            try {
+                                navController.navigate("movies_room")
+                            } catch (e: Exception) {
+                                android.util.Log.e("RootAppShell", "Nav error: ${e.message}", e)
+                            }
                         }
                     )
                 }
@@ -332,6 +354,11 @@ fun RootAppShell() {
                 }
                 composable("movies_room") {
                     MoviesRoomScreen(
+                        roomId = RoomNavState.activeRoomId.ifBlank { "mov_room_default" },
+                        initialStreamUrl = RoomNavState.activeStreamUrl,
+                        roomTitle = RoomNavState.activeRoomTitle.ifBlank { "سينما الأفلام والمسلسلات" },
+                        roomCode = RoomNavState.activeRoomCode.ifBlank { "#MOV-9024" },
+                        isStealthMode = RoomNavState.isStealthMode,
                         onBack = { navController.popBackStack() }
                     )
                 }
@@ -339,10 +366,18 @@ fun RootAppShell() {
                     TvChannelsLobbyScreen(
                         onBack = { navController.popBackStack() },
                         onEnterRoom = { roomId, streamUrl, roomTitle, roomCode, isStealth ->
-                            val encUrl = try { java.net.URLEncoder.encode(streamUrl, "UTF-8") } catch (_: Exception) { "stream" }
-                            val encTitle = try { java.net.URLEncoder.encode(roomTitle, "UTF-8") } catch (_: Exception) { "room" }
-                            val encCode = try { java.net.URLEncoder.encode(roomCode, "UTF-8") } catch (_: Exception) { "code" }
-                            navController.navigate("tv_room/$roomId/$encUrl/$encTitle/$encCode?stealth=$isStealth")
+                            RoomNavState.setRoom(
+                                roomId = roomId,
+                                streamUrl = streamUrl,
+                                roomTitle = roomTitle,
+                                roomCode = roomCode,
+                                isStealth = isStealth
+                            )
+                            try {
+                                navController.navigate("tv_room")
+                            } catch (e: Exception) {
+                                android.util.Log.e("RootAppShell", "Nav error: ${e.message}", e)
+                            }
                         }
                     )
                 }
@@ -403,6 +438,11 @@ fun RootAppShell() {
                 }
                 composable("tv_room") {
                     TvChannelsRoomScreen(
+                        roomId = RoomNavState.activeRoomId.ifBlank { "tv_main_sports" },
+                        initialStreamUrl = RoomNavState.activeStreamUrl,
+                        roomTitle = RoomNavState.activeRoomTitle.ifBlank { "بث القنوات الفضائية والرياضية" },
+                        roomCode = RoomNavState.activeRoomCode.ifBlank { "#TV-SPORTS" },
+                        isStealthMode = RoomNavState.isStealthMode,
                         onBack = { navController.popBackStack() }
                     )
                 }

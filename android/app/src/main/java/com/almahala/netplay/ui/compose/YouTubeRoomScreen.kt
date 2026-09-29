@@ -630,12 +630,22 @@ fun YouTubeRoomScreen(
         isSearchModalOpen = false
         isDropdownOpen = false
 
-        // Instant update via JavaScript loadVideoById
+        // Instant update via JavaScript loadVideoById with robust fallbacks
         val jsCmd = """
             (function() {
-                if (typeof loadVideoById === 'function') {
-                    loadVideoById('$cleanId');
-                }
+                try {
+                    if (typeof loadVideoById === 'function') {
+                        loadVideoById('$cleanId');
+                    } else if (window.player && typeof window.player.loadVideoById === 'function') {
+                        window.player.loadVideoById('$cleanId');
+                        window.player.playVideo();
+                    } else {
+                        var p = document.getElementById('player');
+                        if (p) {
+                            p.innerHTML = '<iframe id="yt-iframe" src="https://www.youtube-nocookie.com/embed/$cleanId?autoplay=1&playsinline=1&enablejsapi=1&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
+                        }
+                    }
+                } catch(e) {}
             })();
         """.trimIndent()
         webViewRef?.evaluateJavascript(jsCmd, null)
@@ -841,8 +851,9 @@ fun YouTubeRoomScreen(
                                                 left: 0;
                                                 width: 100%;
                                                 height: 100%;
-                                                z-index: 9999;
+                                                z-index: 10;
                                                 background: transparent;
+                                                pointer-events: none;
                                             }
                                             /* Complete clean display - hide external links, titles, watermark, pause overlay, and ads */
                                             .ytp-chrome-top, .ytp-title, .ytp-title-text, .ytp-title-channel,
@@ -891,8 +902,8 @@ fun YouTubeRoomScreen(
                                                             'playsinline': 1,
                                                             'enablejsapi': 1,
                                                             'iv_load_policy': 3,
-                                                            'origin': 'https://www.youtube.com',
-                                                            'widget_referrer': 'https://www.youtube.com'
+                                                            'origin': 'https://www.youtube-nocookie.com',
+                                                            'widget_referrer': 'https://www.youtube-nocookie.com'
                                                         },
                                                         events: {
                                                             'onReady': function(e) {
@@ -918,7 +929,7 @@ fun YouTubeRoomScreen(
                                                                 try {
                                                                     var p = document.getElementById('player');
                                                                     if (p) {
-                                                                        p.innerHTML = '<iframe src="https://www.youtube.com/embed/' + currentVideoId + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://www.youtube.com&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
+                                                                        p.innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + currentVideoId + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://www.youtube-nocookie.com&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
                                                                     }
                                                                 } catch(err) {}
                                                             }
@@ -1000,10 +1011,15 @@ fun YouTubeRoomScreen(
                                                     } else {
                                                         var p = document.getElementById('player');
                                                         if (p) {
-                                                            p.innerHTML = '<iframe src="https://www.youtube.com/embed/' + vid + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://www.youtube.com&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
+                                                            p.innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + vid + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://www.youtube-nocookie.com&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
                                                         }
                                                     }
-                                                } catch(e) {}
+                                                } catch(e) {
+                                                    var p = document.getElementById('player');
+                                                    if (p) {
+                                                        p.innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + vid + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://www.youtube-nocookie.com&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
+                                                    }
+                                                }
                                             }
 
                                             // Auto ad-skipper
@@ -1027,7 +1043,7 @@ fun YouTubeRoomScreen(
                                                     if (!isPlayerReady && !document.querySelector('iframe')) {
                                                         var p = document.getElementById('player');
                                                         if (p) {
-                                                            p.innerHTML = '<iframe src="https://www.youtube.com/embed/' + currentVideoId + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://www.youtube.com&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
+                                                            p.innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + currentVideoId + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://www.youtube-nocookie.com&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
                                                         }
                                                     }
                                                 } catch(e) {}
@@ -1048,7 +1064,7 @@ fun YouTubeRoomScreen(
                                     </body>
                                     </html>
                                 """.trimIndent()
-                                loadDataWithBaseURL("https://www.youtube.com", playerHtml, "text/html", "UTF-8", null)
+                                loadDataWithBaseURL("https://www.youtube-nocookie.com", playerHtml, "text/html", "UTF-8", null)
                             }
                         } catch (_: Throwable) {
                             android.view.View(ctx).apply {
@@ -1057,11 +1073,16 @@ fun YouTubeRoomScreen(
                         }
                     },
                     update = { webView ->
-                        if (webView is WebView) {
+                        if (webView is WebView && webViewRef == null) {
                             webViewRef = webView
                         }
                     },
-                        modifier = Modifier.fillMaxSize()
+                    onRelease = { view ->
+                        try {
+                            (view as? WebView)?.destroy()
+                        } catch (_: Throwable) {}
+                    },
+                    modifier = Modifier.fillMaxSize()
                     )
                 }
 

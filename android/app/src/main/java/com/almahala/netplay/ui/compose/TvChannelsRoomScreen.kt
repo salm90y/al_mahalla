@@ -1,14 +1,20 @@
 package com.almahala.netplay.ui.compose
 
 import android.Manifest
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.net.Uri
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
-import android.webkit.*
+import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -17,10 +23,8 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -28,7 +32,6 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -58,12 +61,17 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import coil.compose.AsyncImage
 import com.almahala.netplay.network.CloudflareClient
+import com.almahala.netplay.network.RealVoipEngine
 import com.almahala.netplay.network.ZegoCallManager
+import com.almahala.netplay.ui.RoomCameraHelper
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+// ----------------------------------------------------
+// 1. DATA MODELS & ENUMS FOR TV CHANNELS ROOM (100% Identical to Movies & Series)
+// ----------------------------------------------------
 enum class TvRoomSubTab {
-    CHANNELS,
+    PLAYER,
     CHAT,
     CAMERAS,
     INTERCOM,
@@ -71,30 +79,39 @@ enum class TvRoomSubTab {
     SETTINGS
 }
 
-data class TvChatMessage(
+data class TvRoomChatMessage(
     val id: String,
     val sender: String,
     val text: String,
     val time: String,
     val isMe: Boolean = false,
-    val avatarColor: Color = Color(0xFF0284C7)
+    val avatarColor: Color = Color(0xFF0284C7),
+    val imageUrl: String? = null
 )
 
-data class TvRoomUser(
+data class TvRoomUserItem(
     val id: String,
     val name: String,
     var role: String,
     val isHost: Boolean = false,
     val isOnline: Boolean = true,
     val isSpeaking: Boolean = false,
-    val avatarBg: Color = Color(0xFF0284C7)
+    val hasCameraActive: Boolean = false,
+    val isFrontCamera: Boolean = true,
+    val avatarBg: Color = Color(0xFF0284C7),
+    val canChangeVideo: Boolean = true,
+    val isMutedVoice: Boolean = false,
+    val isMutedChat: Boolean = false
 )
 
+// ----------------------------------------------------
+// 2. MAIN COMPOSABLE: TvChannelsRoomScreen (100% Matching Movies Theme & Design)
+// ----------------------------------------------------
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TvChannelsRoomScreen(
     roomId: String = "tv_main_sports",
-    initialStreamUrl: String = "",
+    initialStreamUrl: String = "http://maxshowplayer.site:2052/live/13968296781874/20098269331298/501.m3u8",
     roomTitle: String = "بث القنوات الفضائية والرياضية",
     roomCode: String = "#TV-SPORTS",
     isStealthMode: Boolean = false,
@@ -104,185 +121,374 @@ fun TvChannelsRoomScreen(
     val haptics = LocalHapticFeedback.current
     val coroutineScope = rememberCoroutineScope()
 
+    // Disable click sound effects globally in room
+    val localView = androidx.compose.ui.platform.LocalView.current
+    DisposableEffect(Unit) {
+        var prevSound = true
+        try {
+            prevSound = localView.isSoundEffectsEnabled
+            localView.isSoundEffectsEnabled = false
+        } catch (_: Throwable) {}
+        onDispose {
+            try {
+                localView.isSoundEffectsEnabled = prevSound
+            } catch (_: Throwable) {}
+        }
+    }
+
+    // Identity and Roles
     val currentUserId = remember { CloudflareClient.getCurrentUserId(context) }
     val currentUserName = remember {
         if (isStealthMode) "مجهول (المطور)" else CloudflareClient.getCurrentUsername(context).ifBlank { "مشاهد المحلة" }
     }
     val isAppOwner = remember { TvChannelsRoomManager.isAppOwner(context) }
     val isHost = remember {
-        roomId.contains(currentUserId) || isAppOwner || roomId.startsWith("tv_main_")
+        isAppOwner ||
+        roomTitle.contains(currentUserName) ||
+        roomId.contains(currentUserId) ||
+        roomId.startsWith("tv_main_") ||
+        TvChannelsRoomManager.activeRealRooms.find { it.roomId == roomId }?.let {
+            it.hostId == currentUserId || it.hostName == currentUserName
+        } == true
     }
 
-    // Current Playing Channel state
+    // Sub-tab selection (PLAYER default)
+    var activeSubTab by remember { mutableStateOf(TvRoomSubTab.PLAYER) }
+
+    // Channel Catalog populated from authentic M3U playlist
+    val channelsCatalog = remember {
+        mutableStateListOf<TvChannelItem>().apply {
+            addAll(TvChannelsRoomManager.DEFAULT_TV_CHANNELS)
+        }
+    }
+
+    // Active currently playing TV channel
     val defaultChannel = TvChannelsRoomManager.DEFAULT_TV_CHANNELS.first()
-    var currentChannel by remember {
-        val matched = TvChannelsRoomManager.DEFAULT_TV_CHANNELS.find { it.streamUrl == initialStreamUrl }
+    var currentChannel by remember(initialStreamUrl) {
+        val found = channelsCatalog.find { it.streamUrl == initialStreamUrl }
         mutableStateOf(
-            matched ?: TvChannelItem(
-                id = "custom_channel",
-                title = if (initialStreamUrl.isNotBlank()) "قناة فضائية مباشرة" else defaultChannel.title,
-                name = if (initialStreamUrl.isNotBlank()) "قناة مباشرة" else defaultChannel.name,
+            found ?: TvChannelItem(
+                id = "m3u_tv_active",
+                title = roomTitle.ifBlank { defaultChannel.title },
+                name = roomTitle.ifBlank { defaultChannel.name },
                 logo = defaultChannel.logo,
                 streamUrl = initialStreamUrl.ifBlank { defaultChannel.streamUrl },
-                category = "بث فضائي"
+                category = "بث فضائي مباشر"
             )
         )
     }
 
-    // Playback & UI States
+    // Playback and Synchronization States
     var isPlaying by remember { mutableStateOf(true) }
+    var videoVolume by remember { mutableFloatStateOf(1.0f) }
     var isMuted by remember { mutableStateOf(false) }
-    var isFullscreen by remember { mutableStateOf(false) }
-    var selectedTab by remember { mutableStateOf(TvRoomSubTab.CHANNELS) }
-    var isCustomStreamDialogOpen by remember { mutableStateOf(false) }
-    var customStreamInput by remember { mutableStateOf("") }
-    var customChannelTitleInput by remember { mutableStateOf("") }
-
-    // Intercom / Walkie-Talkie States
-    var isIntercomTalking by remember { mutableStateOf(false) }
-    var isSpeakerEnabled by remember { mutableStateOf(true) }
-
-    // Active Category Filter for Channels Tab
-    val channelCategories = listOf("الكل", "قنوات رياضية", "قنوات إسلامية", "قنوات إخبارية", "قنوات منوعة", "قنوات وثائقية", "قنوات سينمائية")
-    var selectedCategory by remember { mutableStateOf("الكل") }
-    var channelSearchQuery by remember { mutableStateOf("") }
-    var isSearchingD1 by remember { mutableStateOf(false) }
-    val d1ChannelsList = remember { mutableStateListOf<TvChannelItem>() }
-
-    // Fetch channels from Cloudflare D1
-    LaunchedEffect(channelSearchQuery, selectedCategory) {
-        isSearchingD1 = true
-        TvChannelsRoomManager.searchChannelsFromCloudflare(
-            context = context,
-            query = channelSearchQuery,
-            category = selectedCategory
-        ) { results ->
-            d1ChannelsList.clear()
-            d1ChannelsList.addAll(results)
-            isSearchingD1 = false
-        }
-    }
-
-    // Chat messages
-    val chatMessages = remember {
-        mutableStateListOf(
-            TvChatMessage(
-                id = "msg_welcome",
-                sender = "إدارة البث",
-                text = "مرحباً بكم في غرفة البث التلفزيوني الحي! يمكنكم استخدام جهاز اللاسلكي للتحدث والتبديل بين القنوات بحرية.",
-                time = "الآن",
-                isMe = false,
-                avatarColor = Color(0xFF0284C7)
-            )
-        )
-    }
-    var chatInputText by remember { mutableStateOf("") }
-
-    // Connected Users
-    val roomUsers = remember {
-        mutableStateListOf(
-            TvRoomUser(
-                id = currentUserId,
-                name = currentUserName,
-                role = if (isHost) "مضيف الغرفة" else "مشاهد",
-                isHost = isHost,
-                isOnline = true,
-                avatarBg = Color(0xFF0284C7)
-            ),
-            TvRoomUser(
-                id = "user_2",
-                name = "أبو فهد",
-                role = "مشاهد",
-                isHost = false,
-                isOnline = true,
-                avatarBg = Color(0xFF059669)
-            ),
-            TvRoomUser(
-                id = "user_3",
-                name = "كابتن سيف",
-                role = "مشرف",
-                isHost = false,
-                isOnline = true,
-                avatarBg = Color(0xFF7C3AED)
-            )
-        )
-    }
-
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
 
-    // REAL ZEGO WALKIE-TALKIE INITIALIZATION IN SAFE AUDIENCE MODE (NO CRASH)
-    val zegoAudioRoomId = remember(roomId) { "tv_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}" }
-
-    // Record audio permission launcher
-    val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            isIntercomTalking = true
-            ZegoCallManager.startPublishingAudio(context, zegoAudioRoomId, currentUserId)
-            ZegoCallManager.setSpeakerEnabled(context, true)
-            Toast.makeText(context, "الميكروفون قيد البث الآن 🎙️", Toast.LENGTH_SHORT).show()
-        } else {
-            Toast.makeText(context, "يلزم السماح بالميكروفون لاستخدام جهاز اللاسلكي", Toast.LENGTH_SHORT).show()
-        }
+    // Instant volume sync to player
+    LaunchedEffect(videoVolume) {
+        val volInt = (videoVolume * 100).toInt().coerceIn(0, 100)
+        webViewRef?.evaluateJavascript(
+            "if (typeof setPlayerVolume === 'function') { setPlayerVolume($volInt); }",
+            null
+        )
     }
 
-    fun toggleIntercom() {
-        if (isIntercomTalking) {
-            isIntercomTalking = false
-            ZegoCallManager.stopPublishingAudio()
-        } else {
-            val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-            if (hasPerm) {
-                isIntercomTalking = true
-                ZegoCallManager.startPublishingAudio(context, zegoAudioRoomId, currentUserId)
-                ZegoCallManager.setSpeakerEnabled(context, true)
-            } else {
-                recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    // Search Bar & Modal States
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedCategory by remember { mutableStateOf("الكل") }
+    val channelCategories = listOf("الكل", "قنوات رياضية", "قنوات إسلامية", "قنوات إخبارية", "قنوات منوعة", "قنوات وثائقية", "قنوات سينمائية")
+    var isExitConfirmDialogOpen by remember { mutableStateOf(false) }
+
+    // Walkie-Talkie Intercom State (Real Zego Engine + Loudspeaker)
+    var isIntercomTalking by remember { mutableStateOf(false) }
+    var isIntercomLoudspeaker by remember { mutableStateOf(true) }
+    var isNoiseSuppressionEnabled by remember { mutableStateOf(true) }
+    var isEchoCancellationEnabled by remember { mutableStateOf(true) }
+    var isAutoGainControlEnabled by remember { mutableStateOf(true) }
+    var micSensitivity by remember { mutableFloatStateOf(0.85f) }
+    var isPushToTalkMode by remember { mutableStateOf(false) }
+
+    // Cameras Configuration & State
+    var isCameraActive by remember { mutableStateOf(false) }
+    var isFrontCamera by remember { mutableStateOf(true) }
+    var cameraBoxSize by remember { mutableStateOf<CameraBoxSize>(CameraBoxSize.SMALL) }
+    var cameraBoxShape by remember { mutableStateOf<CameraBoxShape>(CameraBoxShape.ROUNDED) }
+
+    // Dialog & Permission States
+    var selectedUserForPermissions by remember { mutableStateOf<TvRoomUserItem?>(null) }
+
+    // Room Participants state (Real authentic users only)
+    val roomUsers = remember {
+        mutableStateListOf<TvRoomUserItem>().apply {
+            if (!isStealthMode) {
+                add(
+                    TvRoomUserItem(
+                        id = currentUserId,
+                        name = currentUserName,
+                        role = if (isHost) "مضيف الغرفة 👑" else if (isAppOwner) "مالك التطبيق 🛡️" else "مشاهد",
+                        isHost = isHost,
+                        isOnline = true,
+                        isSpeaking = false,
+                        hasCameraActive = false,
+                        isFrontCamera = true,
+                        avatarBg = Color(0xFF0284C7),
+                        canChangeVideo = true
+                    )
+                )
             }
         }
     }
 
-    DisposableEffect(roomId, zegoAudioRoomId) {
+    // Keep camera status in roomUsers updated for local user
+    LaunchedEffect(isCameraActive, isFrontCamera) {
+        val idx = roomUsers.indexOfFirst { it.id == currentUserId }
+        if (idx >= 0) {
+            roomUsers[idx] = roomUsers[idx].copy(hasCameraActive = isCameraActive, isFrontCamera = isFrontCamera)
+        }
+    }
+
+    // Live Room Chat Messages State
+    val chatMessages = remember {
+        mutableStateListOf(
+            TvRoomChatMessage("1", "النظام", "مرحباً بك في غرفة $roomTitle! البث الفضائي والصوت متزامن بالكامل ⚡", "الآن", false, Color(0xFF0284C7))
+        )
+    }
+    val chatListState = rememberLazyListState()
+    var chatInputText by remember { mutableStateOf("") }
+
+    LaunchedEffect(chatMessages.size) {
+        if (chatMessages.isNotEmpty()) {
+            chatListState.animateScrollToItem(chatMessages.size - 1)
+        }
+    }
+
+    // Search channels from Cloudflare backend or authentic local M3U
+    LaunchedEffect(searchQuery, selectedCategory) {
+        TvChannelsRoomManager.searchChannelsFromCloudflare(
+            context = context,
+            query = searchQuery,
+            category = selectedCategory
+        ) { results ->
+            if (results.isNotEmpty()) {
+                channelsCatalog.clear()
+                channelsCatalog.addAll(results)
+            }
+        }
+    }
+
+    // REAL-TIME WEBSOCKET SYNCHRONIZATION CLIENT
+    val syncSocket = remember(roomId) {
+        MoviesSyncWebSocket(
+            context = context,
+            roomId = roomId,
+            isStealthMode = isStealthMode,
+            onMovieChangeReceived = { stream, title, poster ->
+                currentChannel = TvChannelItem(
+                    id = "synced_${System.currentTimeMillis()}",
+                    title = title.ifBlank { "قناة فضائية متزامنة" },
+                    name = title.ifBlank { "قناة فضائية" },
+                    logo = poster.ifBlank { defaultChannel.logo },
+                    streamUrl = stream,
+                    category = "بث متزامن"
+                )
+                isPlaying = true
+                webViewRef?.evaluateJavascript(
+                    "if (typeof loadStream === 'function') { loadStream('$stream'); }",
+                    null
+                )
+                Toast.makeText(context, "تم تغيير القناة للغرفة: ${title.take(30)} 📺", Toast.LENGTH_SHORT).show()
+            },
+            onPlaybackStateReceived = { playState, _ ->
+                if (playState && !isPlaying) {
+                    isPlaying = true
+                    webViewRef?.evaluateJavascript("if (typeof playVideo === 'function') { playVideo(); }", null)
+                } else if (!playState && isPlaying) {
+                    isPlaying = false
+                    webViewRef?.evaluateJavascript("if (typeof pauseVideo === 'function') { pauseVideo(); }", null)
+                }
+            },
+            onChatMessageReceived = { newMsg ->
+                if (newMsg.text.startsWith("[IMAGE]:")) {
+                    val imgUri = newMsg.text.removePrefix("[IMAGE]:")
+                    chatMessages.add(TvRoomChatMessage(newMsg.id, newMsg.sender, "📷 صورة", newMsg.time, newMsg.isMe, newMsg.avatarColor, imgUri))
+                } else {
+                    chatMessages.add(TvRoomChatMessage(newMsg.id, newMsg.sender, newMsg.text, newMsg.time, newMsg.isMe, newMsg.avatarColor))
+                }
+            },
+            onStateRequested = { client ->
+                client.broadcastMovieChange(currentChannel.streamUrl, currentChannel.title, currentChannel.logo)
+                client.broadcastPlaybackState(isPlaying, 0f)
+            },
+            onMemberActionReceived = { targetId, action ->
+                if (targetId == currentUserId) {
+                    when (action) {
+                        "KICK" -> {
+                            Toast.makeText(context, "تم إخراجك من الغرفة بواسطة المشرف", Toast.LENGTH_LONG).show()
+                            onBack()
+                        }
+                        "MUTE_VOICE" -> {
+                            isIntercomTalking = false
+                            ZegoCallManager.setMicrophoneMute(true)
+                            RealVoipEngine.setMute(true)
+                            Toast.makeText(context, "تم كتم صوت المايكروفون الخاص بك من قبل المشرف 🔇", Toast.LENGTH_SHORT).show()
+                        }
+                        "ALLOW_VIDEO" -> {
+                            val idx = roomUsers.indexOfFirst { it.id == currentUserId }
+                            if (idx >= 0) roomUsers[idx] = roomUsers[idx].copy(canChangeVideo = true)
+                            Toast.makeText(context, "منحك المشرف صلاحية تبديل القنوات 📺", Toast.LENGTH_SHORT).show()
+                        }
+                        "RESTRICT_VIDEO" -> {
+                            val idx = roomUsers.indexOfFirst { it.id == currentUserId }
+                            if (idx >= 0) roomUsers[idx] = roomUsers[idx].copy(canChangeVideo = false)
+                            Toast.makeText(context, "تم تقييد صلاحية تبديل القنوات 🔒", Toast.LENGTH_SHORT).show()
+                        }
+                        "SET_MODERATOR" -> {
+                            val idx = roomUsers.indexOfFirst { it.id == currentUserId }
+                            if (idx >= 0) roomUsers[idx] = roomUsers[idx].copy(role = "مشرف 🛡️", canChangeVideo = true)
+                            Toast.makeText(context, "تمت ترقيتك إلى مشرف الغرفة 🛡️", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            },
+            onVoiceStateReceived = { uId, _, isTalking ->
+                val idx = roomUsers.indexOfFirst { it.id == uId }
+                if (idx >= 0) {
+                    roomUsers[idx] = roomUsers[idx].copy(isSpeaking = isTalking)
+                }
+            },
+            onCameraStateReceived = { uId, _, isCamActive, isFront ->
+                val idx = roomUsers.indexOfFirst { it.id == uId }
+                if (idx >= 0) {
+                    roomUsers[idx] = roomUsers[idx].copy(hasCameraActive = isCamActive, isFrontCamera = isFront)
+                }
+            }
+        )
+    }
+
+    // REAL ZEGO WALKIE-TALKIE AUDIO ROOM INITIALIZATION IN SAFE AUDIENCE MODE
+    val zegoAudioRoomId = remember(roomId) { "tv_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}" }
+
+    // Permission launchers
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            isCameraActive = true
+            syncSocket.broadcastCameraState(true, isFrontCamera)
+            Toast.makeText(context, "تم تفعيل الكاميرا 📹", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "يرجى منح إذن الكاميرا للمتابعة 🔒", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            isIntercomTalking = true
+            ZegoCallManager.setMicrophoneMute(false)
+            ZegoCallManager.setSpeakerEnabled(context, true)
+            RealVoipEngine.ensureAudioCaptureStarted(context)
+            RealVoipEngine.setMute(false)
+            RealVoipEngine.setSpeaker(context, true)
+            syncSocket.broadcastVoiceState(true)
+            Toast.makeText(context, "تم تشغيل المايكروفون 🎙️", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "يرجى منح إذن المايكروفون للتحدث 🔒", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Image Picker for Chat
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val imgMsg = TvRoomChatMessage(
+                id = System.currentTimeMillis().toString(),
+                sender = currentUserName,
+                text = "📷 صورة",
+                time = "الآن",
+                isMe = true,
+                avatarColor = Color(0xFF0284C7),
+                imageUrl = uri.toString()
+            )
+            chatMessages.add(imgMsg)
+            syncSocket.broadcastChatMessage("[IMAGE]:$uri")
+        }
+    }
+
+    // Initialize Zego audio room
+    DisposableEffect(Unit) {
+        try {
+            ZegoCallManager.initialize(context)
+            ZegoCallManager.setSpeakerEnabled(context, true)
+            ZegoCallManager.setMicrophoneMute(true)
+            ZegoCallManager.setAudioNoiseSuppression(isNoiseSuppressionEnabled)
+            ZegoCallManager.setAudioEchoCancellation(isEchoCancellationEnabled)
+            ZegoCallManager.setAudioAutoGainControl(isAutoGainControlEnabled)
+            RealVoipEngine.init(context)
+            RealVoipEngine.setSpeaker(context, true)
+            RealVoipEngine.setMute(true)
+        } catch (_: Throwable) {}
         onDispose {
             try {
-                if (isIntercomTalking) {
-                    ZegoCallManager.stopPublishingAudio()
-                    ZegoCallManager.endCall(context, zegoAudioRoomId)
-                }
-                webViewRef?.destroy()
-                webViewRef = null
+                ZegoCallManager.setMicrophoneMute(true)
+                RealVoipEngine.setMute(true)
+                syncSocket.disconnect()
+                RoomCameraHelper.stopCamera()
             } catch (_: Throwable) {}
         }
     }
 
-    // Channel Switch Function
-    fun switchChannel(ch: TvChannelItem) {
-        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        currentChannel = ch
-        isPlaying = true
-        val stream = ch.streamUrl.trim()
-        val rebroadcastUrl = TvChannelsRoomManager.getRebroadcastStreamUrl(context, stream)
-        val jsCmd = """
-            (function() {
-                if (typeof loadStream === 'function') {
-                    loadStream('$rebroadcastUrl');
-                }
-            })();
-        """.trimIndent()
-        webViewRef?.evaluateJavascript(jsCmd, null)
-        TvChannelsRoomManager.updateRoomChannel(context, roomId, stream, ch.title, ch.logo)
-        Toast.makeText(context, "تم التحويل إلى: ${ch.name} عبر البث المسرّع 📺", Toast.LENGTH_SHORT).show()
-    }
-
-    val filteredChannels = remember(selectedCategory) {
-        if (selectedCategory == "الكل") {
-            TvChannelsRoomManager.DEFAULT_TV_CHANNELS
-        } else {
-            TvChannelsRoomManager.DEFAULT_TV_CHANNELS.filter { it.category == selectedCategory }
+    // Play/Pause & Channel Switch Handler
+    fun playSelectedChannel(channel: TvChannelItem) {
+        val myUser = roomUsers.find { it.id == currentUserId }
+        val canControl = isHost || isAppOwner || (myUser?.canChangeVideo == true) || roomUsers.size <= 1
+        if (!canControl) {
+            Toast.makeText(context, "التبديل مخصص للمشرفين، تم التغيير محلياً لك 📺", Toast.LENGTH_SHORT).show()
+            currentChannel = channel
+            isPlaying = true
+            webViewRef?.evaluateJavascript("if (typeof loadStream === 'function') { loadStream('${channel.streamUrl}'); }", null)
+            return
         }
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        currentChannel = channel
+        isPlaying = true
+
+        val jsCmd = "if (typeof loadStream === 'function') { loadStream('${channel.streamUrl}'); }"
+        webViewRef?.evaluateJavascript(jsCmd, null)
+
+        TvChannelsRoomManager.updateRoomChannel(context, roomId, channel.streamUrl, channel.title, channel.logo)
+        syncSocket.broadcastMovieChange(channel.streamUrl, channel.title, channel.logo)
+        syncSocket.broadcastPlaybackState(true, 0f)
+        Toast.makeText(context, "جاري بث: ${channel.title.take(35)}... 📺", Toast.LENGTH_SHORT).show()
     }
 
+    fun togglePlayback() {
+        val myUser = roomUsers.find { it.id == currentUserId }
+        val canControl = isHost || isAppOwner || (myUser?.canChangeVideo == true) || roomUsers.size <= 1
+        if (!canControl) {
+            Toast.makeText(context, "التحكم في البث مخصص للمشرفين 🔒", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val nextPlay = !isPlaying
+        isPlaying = nextPlay
+        if (nextPlay) {
+            webViewRef?.evaluateJavascript("if (typeof playVideo === 'function') { playVideo(); }", null)
+        } else {
+            webViewRef?.evaluateJavascript("if (typeof pauseVideo === 'function') { pauseVideo(); }", null)
+        }
+        syncSocket.broadcastPlaybackState(nextPlay, 0f)
+    }
+
+    // Camera box shape converter
+    val activeBoxShape = when (cameraBoxShape) {
+        CameraBoxShape.ROUNDED -> RoundedCornerShape(12.dp)
+        CameraBoxShape.SQUARE -> RoundedCornerShape(2.dp)
+        CameraBoxShape.CIRCLE -> CircleShape
+    }
+
+    // Full RTL Root Layout matching Movies & Series Screen
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
         Box(
             modifier = Modifier
@@ -294,623 +500,649 @@ fun TvChannelsRoomScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = if (isFullscreen) 0.dp else 10.dp, vertical = if (isFullscreen) 0.dp else 4.dp),
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // 1. TOP HEADER (Hidden when fullscreen)
-                if (!isFullscreen) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(
-                            onClick = onBack,
-                            modifier = Modifier
-                                .size(34.dp)
-                                .background(Color.White, CircleShape)
-                                .border(1.dp, Color(0xFFE2E8F0), CircleShape)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ArrowForward,
-                                contentDescription = "رجوع",
-                                tint = Color(0xFF0F172A),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
+                val isDark = isAppInDarkTheme()
 
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Text(
-                                    text = currentChannel.name,
-                                    fontFamily = TajawalFontFamily,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 15.sp,
-                                    color = Color(0xFF0F172A),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Box(
-                                    modifier = Modifier
-                                        .background(Color(0xFFDC2626), RoundedCornerShape(4.dp))
-                                        .padding(horizontal = 5.dp, vertical = 1.dp)
-                                ) {
-                                    Text(
-                                        text = "LIVE",
-                                        fontFamily = TajawalFontFamily,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 9.sp,
-                                        color = Color.White
-                                    )
-                                }
-                            }
-
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Text(
-                                    text = roomCode,
-                                    fontFamily = TajawalFontFamily,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 11.sp,
-                                    color = Color(0xFF0284C7)
-                                )
-                                Text(text = "•", color = Color(0xFFCBD5E1), fontSize = 10.sp)
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(6.dp)
-                                            .background(Color(0xFF10B981), CircleShape)
-                                    )
-                                    Text(
-                                        text = "${roomUsers.size} متصل",
-                                        fontFamily = TajawalFontFamily,
-                                        fontSize = 10.sp,
-                                        color = Color(0xFF10B981),
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
-
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(
-                                onClick = {
-                                    val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    cb.setPrimaryClip(ClipData.newPlainText("TV Room Code", roomCode))
-                                    Toast.makeText(context, "تم نسخ رمز الغرفة: $roomCode 📋", Toast.LENGTH_SHORT).show()
-                                },
-                                modifier = Modifier
-                                    .size(34.dp)
-                                    .background(Color.White, CircleShape)
-                                    .border(1.dp, Color(0xFFE2E8F0), CircleShape)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.ContentCopy,
-                                    contentDescription = "نسخ الرمز",
-                                    tint = Color(0xFF0284C7),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-
-                            IconButton(
-                                onClick = onBack,
-                                modifier = Modifier
-                                    .size(34.dp)
-                                    .background(Color(0xFFFEE2E2), CircleShape)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Logout,
-                                    contentDescription = "مغادرة",
-                                    tint = Color(0xFFDC2626),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // 2. VIDEO PLAYER BOX (Pure Live Stream in 16:9 or Fullscreen)
+                // ====================================================
+                // 1. DEDICATED TOP VIDEO PLAYER BOX (265dp, Framed & Clean, Identical to Movies)
+                // ====================================================
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .then(
-                            if (isFullscreen) Modifier.fillMaxSize()
-                            else Modifier
-                                .aspectRatio(16f / 9.4f)
-                                .clip(RoundedCornerShape(16.dp))
-                                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(16.dp))
-                        )
+                        .padding(top = 16.dp, start = 4.dp, end = 4.dp, bottom = 6.dp)
+                        .height(265.dp)
+                        .clip(RoundedCornerShape(16.dp))
                         .background(Color.Black)
+                        .border(1.5.dp, if (isDark) DarkBorder else Color(0xFFCBD5E1), RoundedCornerShape(16.dp)),
+                    contentAlignment = Alignment.Center
                 ) {
                     AndroidView(
                         factory = { ctx ->
                             try {
                                 WebView(ctx).apply {
-                                try {
-                                    val cookieMgr = CookieManager.getInstance()
-                                    cookieMgr.setAcceptCookie(true)
-                                    cookieMgr.setAcceptThirdPartyCookies(this, true)
-                                } catch (_: Throwable) {}
-                                layoutParams = ViewGroup.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.MATCH_PARENT
-                                )
-                                settings.apply {
-                                    javaScriptEnabled = true
-                                    domStorageEnabled = true
-                                    mediaPlaybackRequiresUserGesture = false
-                                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                                    loadWithOverviewMode = true
-                                    useWideViewPort = true
-                                    allowFileAccess = false
-                                    cacheMode = WebSettings.LOAD_DEFAULT
-                                    userAgentString = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
-                                }
-                                webChromeClient = WebChromeClient()
-                                webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
-                                }
+                                    try {
+                                        val cookieMgr = CookieManager.getInstance()
+                                        cookieMgr.setAcceptCookie(true)
+                                        cookieMgr.setAcceptThirdPartyCookies(this, true)
+                                    } catch (_: Throwable) {}
+                                    layoutParams = ViewGroup.LayoutParams(
+                                        ViewGroup.LayoutParams.MATCH_PARENT,
+                                        ViewGroup.LayoutParams.MATCH_PARENT
+                                    )
+                                    settings.apply {
+                                        javaScriptEnabled = true
+                                        domStorageEnabled = true
+                                        databaseEnabled = true
+                                        mediaPlaybackRequiresUserGesture = false
+                                        loadWithOverviewMode = true
+                                        useWideViewPort = true
+                                        allowContentAccess = true
+                                        allowFileAccess = true
+                                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                        cacheMode = WebSettings.LOAD_DEFAULT
+                                        userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                                    }
+                                    webChromeClient = WebChromeClient()
+                                    webViewClient = object : WebViewClient() {
+                                        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+                                    }
+                                    val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+                                    addJavascriptInterface(
+                                        object {
+                                            @JavascriptInterface
+                                            fun reportState(state: Int) {
+                                                mainHandler.post {
+                                                    if (state == 1) isPlaying = true
+                                                    else if (state == 2) isPlaying = false
+                                                }
+                                            }
+                                        },
+                                        "AndroidBridge"
+                                    )
+                                    webViewRef = this
 
-                                val initialUrl = TvChannelsRoomManager.getRebroadcastStreamUrl(context, currentChannel.streamUrl)
-                                val playerHtml = """
-                                    <!DOCTYPE html>
-                                    <html lang="ar">
-                                    <head>
-                                        <meta charset="utf-8">
-                                        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-                                        <style>
-                                            * { margin: 0; padding: 0; box-sizing: border-box; }
-                                            html, body {
-                                                width: 100%; height: 100%;
-                                                background: #000000;
-                                                overflow: hidden;
-                                                display: flex; align-items: center; justify-content: center;
-                                            }
-                                            #player-container {
-                                                width: 100%; height: 100%;
-                                                position: relative;
-                                                background: #000000;
-                                            }
-                                            video {
-                                                width: 100% !important;
-                                                height: 100% !important;
-                                                object-fit: contain;
-                                                background: #000000;
-                                            }
-                                        </style>
-                                    </head>
-                                    <body>
-                                        <div id="player-container">
-                                            <video id="video-player" playsinline autoplay webkit-playsinline></video>
-                                        </div>
-                                        <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-                                        <script>
-                                            var video = document.getElementById('video-player');
-                                            var hls = null;
+                                    val initialUrl = currentChannel.streamUrl
+                                    val initialVolPercent = (videoVolume * 100).toInt()
+                                    val playerHtml = """
+                                        <!DOCTYPE html>
+                                        <html lang="ar">
+                                        <head>
+                                            <meta charset="utf-8">
+                                            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                                            <style>
+                                                * { margin: 0; padding: 0; box-sizing: border-box; }
+                                                html, body {
+                                                    width: 100%;
+                                                    height: 100%;
+                                                    background: #000000;
+                                                    overflow: hidden;
+                                                    display: flex;
+                                                    align-items: center;
+                                                    justify-content: center;
+                                                }
+                                                #player-container {
+                                                    width: 100%;
+                                                    height: 100%;
+                                                    position: relative;
+                                                    overflow: hidden;
+                                                    background: #000000;
+                                                }
+                                                video {
+                                                    width: 100% !important;
+                                                    height: 100% !important;
+                                                    object-fit: contain;
+                                                    background: #000000;
+                                                }
+                                                #touch-shield {
+                                                    position: absolute;
+                                                    top: 0; left: 0;
+                                                    width: 100%; height: 100%;
+                                                    z-index: 10;
+                                                    background: transparent;
+                                                    pointer-events: none;
+                                                }
+                                            </style>
+                                        </head>
+                                        <body>
+                                            <div id="player-container">
+                                                <video id="video-player" playsinline autoplay webkit-playsinline></video>
+                                                <div id="touch-shield"></div>
+                                            </div>
+                                            <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+                                            <script>
+                                                var video = document.getElementById('video-player');
+                                                var hls = null;
+                                                var currentUrl = '$initialUrl';
+                                                var pendingVolume = $initialVolPercent;
 
-                                            function loadStream(url) {
-                                                if (!url) return;
-                                                try {
-                                                    if (hls) { hls.destroy(); hls = null; }
-                                                    if (url.indexOf('.m3u8') !== -1 && Hls.isSupported()) {
-                                                        hls = new Hls();
-                                                        hls.loadSource(url);
-                                                        hls.attachMedia(video);
-                                                        hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                                                function loadStream(url) {
+                                                    if (!url) return;
+                                                    currentUrl = url;
+                                                    try {
+                                                        if (hls) { hls.destroy(); hls = null; }
+                                                        if (url.indexOf('.m3u8') !== -1 && Hls.isSupported()) {
+                                                            hls = new Hls({
+                                                                enableWorker: true,
+                                                                lowLatencyMode: true,
+                                                                backBufferLength: 90
+                                                            });
+                                                            hls.loadSource(url);
+                                                            hls.attachMedia(video);
+                                                            hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                                                                video.play().catch(function(){});
+                                                            });
+                                                        } else {
+                                                            video.src = url;
+                                                            video.load();
                                                             video.play().catch(function(){});
-                                                        });
-                                                    } else {
-                                                        video.src = url;
-                                                        video.load();
-                                                        video.play().catch(function(){});
-                                                    }
-                                                } catch(e) {}
-                                            }
+                                                        }
+                                                    } catch(e) {}
+                                                }
 
-                                            function togglePlay(play) {
-                                                try {
-                                                    if (play) video.play();
-                                                    else video.pause();
-                                                } catch(e) {}
-                                            }
+                                                function playVideo() {
+                                                    try { video.play(); } catch(e) {}
+                                                }
 
-                                            function setMute(muted) {
-                                                try { video.muted = muted; } catch(e) {}
-                                            }
+                                                function pauseVideo() {
+                                                    try { video.pause(); } catch(e) {}
+                                                }
 
-                                            loadStream('$initialUrl');
-                                        </script>
-                                    </body>
-                                    </html>
-                                """.trimIndent()
+                                                function setPlayerVolume(vol) {
+                                                    try {
+                                                        if (video) {
+                                                            video.volume = vol / 100.0;
+                                                            video.muted = (vol <= 0);
+                                                        }
+                                                    } catch(e) {}
+                                                }
 
-                                loadDataWithBaseURL("https://tv.almahala.com", playerHtml, "text/html", "UTF-8", null)
-                                webViewRef = this
+                                                video.addEventListener('play', function() {
+                                                    try {
+                                                        if (window.AndroidBridge && window.AndroidBridge.reportState) {
+                                                            window.AndroidBridge.reportState(1);
+                                                        }
+                                                    } catch(e) {}
+                                                });
+
+                                                video.addEventListener('pause', function() {
+                                                    try {
+                                                        if (window.AndroidBridge && window.AndroidBridge.reportState) {
+                                                            window.AndroidBridge.reportState(2);
+                                                        }
+                                                    } catch(e) {}
+                                                });
+
+                                                if (currentUrl) {
+                                                    loadStream(currentUrl);
+                                                    setPlayerVolume(pendingVolume);
+                                                }
+                                            </script>
+                                        </body>
+                                        </html>
+                                    """.trimIndent()
+                                    loadDataWithBaseURL("http://maxshowplayer.site:2052", playerHtml, "text/html", "UTF-8", null)
+                                }
+                            } catch (_: Throwable) {
+                                android.view.View(ctx).apply {
+                                    setBackgroundColor(android.graphics.Color.BLACK)
+                                }
                             }
-                        } catch (_: Throwable) {
-                            android.view.View(ctx).apply {
-                                setBackgroundColor(android.graphics.Color.BLACK)
+                        },
+                        update = { webView ->
+                            if (webView is WebView && webViewRef == null) {
+                                webViewRef = webView
                             }
-                        }
-                    },
-                    update = { webView ->
-                        if (webView is WebView) {
-                            webViewRef = webView
-                        }
-                    },
+                        },
+                        onRelease = { view ->
+                            try {
+                                (view as? WebView)?.destroy()
+                            } catch (_: Throwable) {}
+                        },
                         modifier = Modifier.fillMaxSize()
                     )
 
-                    // Overlay Controls (Fullscreen, Mute, Refresh, Custom Stream)
-                    Row(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        IconButton(
-                            onClick = {
-                                isMuted = !isMuted
-                                webViewRef?.evaluateJavascript("setMute($isMuted);", null)
-                            },
-                            modifier = Modifier
-                                .size(32.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                        ) {
-                            Icon(
-                                imageVector = if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                                contentDescription = "كتم الصوت",
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-
-                        IconButton(
-                            onClick = {
-                                val s = currentChannel.streamUrl
-                                webViewRef?.evaluateJavascript("loadStream('$s');", null)
-                                Toast.makeText(context, "جاري تحديث البث... 🔄", Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier
-                                .size(32.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "تحديث البث",
-                                tint = Color.White,
-                                modifier = Modifier.size(16.dp)
-                            )
-                        }
-
-                        IconButton(
-                            onClick = { isFullscreen = !isFullscreen },
-                            modifier = Modifier
-                                .size(32.dp)
-                                .background(Color.Black.copy(alpha = 0.6f), CircleShape)
-                        ) {
-                            Icon(
-                                imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                                contentDescription = "ملء الشاشة",
-                                tint = Color.White,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-                }
-
-                // If fullscreen, stop here
-                if (isFullscreen) return@Column
-
-                // 3. WALKIE-TALKIE / INTERCOM COMPACT STRIP
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp),
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color.White),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-                ) {
+                    // Overlaid Top Bar (Back, Title, Code, Viewers)
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                            .align(Alignment.TopCenter)
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color(0xCC000000), Color.Transparent)
+                                )
+                            )
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        IconButton(
+                            onClick = { isExitConfirmDialogOpen = true },
+                            modifier = Modifier.size(32.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(34.dp)
-                                    .background(
-                                        if (isIntercomTalking) Color(0xFFDC2626) else Color(0xFFE0F2FE),
-                                        CircleShape
-                                    ),
-                                contentAlignment = Alignment.Center
+                            Icon(
+                                imageVector = Icons.Default.ArrowBack,
+                                contentDescription = "رجوع",
+                                tint = Color.White
+                            )
+                        }
+
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(
+                                text = currentChannel.title,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "$roomCode • $roomTitle",
+                                fontSize = 9.sp,
+                                color = Color(0xFF94A3B8),
+                                maxLines = 1
+                            )
+                        }
+
+                        // Live Badge
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Color(0xCCDC2626),
+                            modifier = Modifier.padding(end = 4.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(3.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .background(Color.White, CircleShape)
+                                )
+                                Text(
+                                    text = "مباشر",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    }
+
+                    // Overlaid Bottom Bar (Play/Pause, Volume, Fullscreen)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .align(Alignment.BottomCenter)
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color.Transparent, Color(0xCC000000))
+                                )
+                            )
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            IconButton(
+                                onClick = { togglePlayback() },
+                                modifier = Modifier.size(28.dp)
                             ) {
                                 Icon(
-                                    imageVector = if (isIntercomTalking) Icons.Default.Mic else Icons.Default.Radio,
-                                    contentDescription = null,
-                                    tint = if (isIntercomTalking) Color.White else Color(0xFF0284C7),
+                                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                    contentDescription = if (isPlaying) "إيقاف" else "تشغيل",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+
+                            IconButton(
+                                onClick = {
+                                    isMuted = !isMuted
+                                    val targetVol = if (isMuted) 0.0f else 1.0f
+                                    videoVolume = targetVol
+                                },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = if (isMuted || videoVolume <= 0f) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                    contentDescription = "كتم/تشغيل الصوت",
+                                    tint = Color.White,
                                     modifier = Modifier.size(18.dp)
                                 )
                             }
 
-                            Column {
-                                Text(
-                                    text = if (isIntercomTalking) "الميكروفون قيد البث (الجميع يستمع إليك)" else "جهاز اللاسلكي الفضائي (Intercom)",
-                                    fontFamily = TajawalFontFamily,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp,
-                                    color = if (isIntercomTalking) Color(0xFFDC2626) else Color(0xFF0F172A)
+                            Text(
+                                text = currentChannel.category,
+                                fontSize = 10.sp,
+                                color = Color(0xFFE2E8F0),
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+
+                        // Participants counter
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0x801E293B)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.People,
+                                    contentDescription = null,
+                                    tint = Color(0xFF38BDF8),
+                                    modifier = Modifier.size(12.dp)
                                 )
                                 Text(
-                                    text = if (isIntercomTalking) "اضغط مرة أخرى لكتم الصوت" else "تحدث مع رفاق الغرفة بصوت فوري وواضح",
-                                    fontFamily = TajawalFontFamily,
+                                    text = "${roomUsers.size} مشاهدين",
                                     fontSize = 10.sp,
-                                    color = Color(0xFF64748B)
+                                    color = Color.White,
+                                    fontWeight = FontWeight.Bold
                                 )
                             }
                         }
+                    }
+                }
 
-                        Button(
-                            onClick = { toggleIntercom() },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isIntercomTalking) Color(0xFFDC2626) else Color(0xFF0284C7)
-                            ),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Text(
-                                text = if (isIntercomTalking) "كتم اللاسلكي" else "تحدث الآن",
-                                fontFamily = TajawalFontFamily,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                                color = Color.White
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // ====================================================
+                // 2. SUB-TABS DOCK BAR (Slim, Identical to Movies Room)
+                // ====================================================
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isDark) DarkSurface else Color.White,
+                    border = BorderStroke(0.5.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
+                    shadowElevation = 0.5.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(38.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // 1. Catalog / Channels
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                            DockSubTabButton(
+                                label = "القنوات",
+                                icon = Icons.Default.LiveTv,
+                                isSelected = activeSubTab == TvRoomSubTab.PLAYER,
+                                isDark = isDark,
+                                onClick = {
+                                    activeSubTab = TvRoomSubTab.PLAYER
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
+                            )
+                        }
+
+                        // 2. Chat
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                            DockSubTabButton(
+                                label = "الدردشة",
+                                icon = Icons.Default.ChatBubbleOutline,
+                                isSelected = activeSubTab == TvRoomSubTab.CHAT,
+                                isDark = isDark,
+                                badgeCount = if (activeSubTab != TvRoomSubTab.CHAT) chatMessages.size else 0,
+                                onClick = {
+                                    activeSubTab = TvRoomSubTab.CHAT
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
+                            )
+                        }
+
+                        // 3. Cameras
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                            DockSubTabButton(
+                                label = "الكاميرات",
+                                icon = Icons.Default.Videocam,
+                                isSelected = activeSubTab == TvRoomSubTab.CAMERAS,
+                                isDark = isDark,
+                                isLivePulse = isCameraActive,
+                                onClick = {
+                                    activeSubTab = TvRoomSubTab.CAMERAS
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
+                            )
+                        }
+
+                        // 4. Intercom / Walkie-Talkie
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                            DockSubTabButton(
+                                label = "اللاسلكي",
+                                icon = Icons.Default.Mic,
+                                isSelected = activeSubTab == TvRoomSubTab.INTERCOM,
+                                isDark = isDark,
+                                isLivePulse = isIntercomTalking,
+                                onClick = {
+                                    activeSubTab = TvRoomSubTab.INTERCOM
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
+                            )
+                        }
+
+                        // 5. Users
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                            DockSubTabButton(
+                                label = "المتواجدون",
+                                icon = Icons.Default.PeopleOutline,
+                                isSelected = activeSubTab == TvRoomSubTab.USERS,
+                                isDark = isDark,
+                                badgeCount = roomUsers.size,
+                                onClick = {
+                                    activeSubTab = TvRoomSubTab.USERS
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
+                            )
+                        }
+
+                        // 6. Settings
+                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                            DockSubTabButton(
+                                label = "الإعدادات",
+                                icon = Icons.Default.Settings,
+                                isSelected = activeSubTab == TvRoomSubTab.SETTINGS,
+                                isDark = isDark,
+                                onClick = {
+                                    activeSubTab = TvRoomSubTab.SETTINGS
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                }
                             )
                         }
                     }
                 }
 
-                // 4. SUB-TABS NAVIGATION BAR
-                ScrollableTabRow(
-                    selectedTabIndex = selectedTab.ordinal,
-                    containerColor = Color.Transparent,
-                    contentColor = Color(0xFF0284C7),
-                    edgePadding = 0.dp,
-                    indicator = {},
-                    divider = {},
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    val tabs = listOf(
-                        TvRoomSubTab.CHANNELS to ("القنوات" to Icons.Default.Tv),
-                        TvRoomSubTab.CHAT to ("المحادثة" to Icons.Default.ChatBubble),
-                        TvRoomSubTab.USERS to ("المشاهدون" to Icons.Default.People),
-                        TvRoomSubTab.INTERCOM to ("اللاسلكي" to Icons.Default.SettingsVoice),
-                        TvRoomSubTab.SETTINGS to ("الإعدادات" to Icons.Default.Settings)
-                    )
+                Spacer(modifier = Modifier.height(6.dp))
 
-                    tabs.forEach { (tab, pair) ->
-                        val isSelected = selectedTab == tab
-                        Tab(
-                            selected = isSelected,
-                            onClick = { selectedTab = tab },
-                            modifier = Modifier
-                                .padding(horizontal = 4.dp, vertical = 4.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(if (isSelected) Color(0xFF0284C7) else Color.White)
-                                .border(1.dp, if (isSelected) Color(0xFF0284C7) else Color(0xFFE2E8F0), RoundedCornerShape(10.dp))
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Icon(
-                                    imageVector = pair.second,
-                                    contentDescription = null,
-                                    tint = if (isSelected) Color.White else Color(0xFF64748B),
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Text(
-                                    text = pair.first,
-                                    fontFamily = TajawalFontFamily,
-                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                    fontSize = 11.sp,
-                                    color = if (isSelected) Color.White else Color(0xFF64748B)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // 5. TAB CONTENT
+                // ====================================================
+                // 3. SUB-TAB VIEW CONTENT (100% Matching Movies Room)
+                // ====================================================
                 Box(
                     modifier = Modifier
-                        .fillMaxWidth()
                         .weight(1f)
-                        .padding(top = 4.dp)
+                        .fillMaxWidth()
                 ) {
-                    when (selectedTab) {
-                        TvRoomSubTab.CHANNELS -> {
+                    when (activeSubTab) {
+                        // ----------------------------------------------------
+                        // 3A. CHANNELS CATALOG SUB-VIEW
+                        // ----------------------------------------------------
+                        TvRoomSubTab.PLAYER -> {
                             Column(
                                 modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                // Search Input in Cloudflare D1 Channels
+                                // Search Input Field
                                 OutlinedTextField(
-                                    value = channelSearchQuery,
-                                    onValueChange = { channelSearchQuery = it },
+                                    value = searchQuery,
+                                    onValueChange = { searchQuery = it },
                                     placeholder = {
                                         Text(
-                                            text = "ابحث في قنوات Cloudflare D1 (beIN, MBC, أخبار، كورة...)",
-                                            fontFamily = TajawalFontFamily,
+                                            "ابحث في القنوات التلفزيونية والرياضية...",
                                             fontSize = 11.sp,
-                                            color = Color(0xFF94A3B8)
+                                            color = if (isDark) DarkTextSecondary else Color(0xFF94A3B8)
                                         )
                                     },
                                     leadingIcon = {
-                                        if (isSearchingD1) {
-                                            CircularProgressIndicator(color = Color(0xFF0284C7), modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                        } else {
-                                            Icon(
-                                                imageVector = Icons.Default.Search,
-                                                contentDescription = "بحث",
-                                                tint = Color(0xFF0284C7),
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                        }
+                                        Icon(
+                                            imageVector = Icons.Default.Search,
+                                            contentDescription = null,
+                                            tint = Color(0xFF0284C7),
+                                            modifier = Modifier.size(18.dp)
+                                        )
                                     },
                                     trailingIcon = {
-                                        if (channelSearchQuery.isNotEmpty()) {
-                                            IconButton(onClick = { channelSearchQuery = "" }) {
+                                        if (searchQuery.isNotEmpty()) {
+                                            IconButton(onClick = { searchQuery = "" }) {
                                                 Icon(
                                                     imageVector = Icons.Default.Close,
                                                     contentDescription = "مسح",
-                                                    tint = Color(0xFF64748B),
+                                                    tint = Color(0xFF94A3B8),
                                                     modifier = Modifier.size(16.dp)
                                                 )
                                             }
                                         }
                                     },
+                                    singleLine = true,
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedContainerColor = if (isDark) DarkSurface else Color.White,
+                                        unfocusedContainerColor = if (isDark) DarkSurface else Color.White,
+                                        focusedBorderColor = Color(0xFF0284C7),
+                                        unfocusedBorderColor = if (isDark) DarkBorder else Color(0xFFE2E8F0),
+                                        focusedTextColor = if (isDark) DarkTextPrimary else Color(0xFF0F172A),
+                                        unfocusedTextColor = if (isDark) DarkTextPrimary else Color(0xFF0F172A)
+                                    ),
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(48.dp),
-                                    shape = RoundedCornerShape(12.dp),
-                                    singleLine = true,
-                                    colors = OutlinedTextFieldDefaults.colors(
-                                        focusedContainerColor = Color.White,
-                                        unfocusedContainerColor = Color.White,
-                                        focusedBorderColor = Color(0xFF0284C7),
-                                        unfocusedBorderColor = Color(0xFFE2E8F0)
-                                    )
+                                        .height(46.dp)
                                 )
 
-                                // Category Filters & Add Stream Button
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
+                                // Category Filter Chips
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    LazyRow(
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                        modifier = Modifier.weight(1f)
-                                    ) {
-                                        items(channelCategories) { cat ->
-                                            val isCatSelected = selectedCategory == cat
-                                            Box(
-                                                modifier = Modifier
-                                                    .clip(RoundedCornerShape(8.dp))
-                                                    .background(if (isCatSelected) Color(0xFFE0F2FE) else Color.White)
-                                                    .border(1.dp, if (isCatSelected) Color(0xFF0284C7) else Color(0xFFE2E8F0), RoundedCornerShape(8.dp))
-                                                    .clickable { selectedCategory = cat }
-                                                    .padding(horizontal = 10.dp, vertical = 4.dp)
-                                            ) {
-                                                Text(
-                                                    text = cat,
-                                                    fontFamily = TajawalFontFamily,
-                                                    fontSize = 11.sp,
-                                                    fontWeight = if (isCatSelected) FontWeight.Bold else FontWeight.Normal,
-                                                    color = if (isCatSelected) Color(0xFF0284C7) else Color(0xFF475569)
-                                                )
+                                    items(channelCategories) { cat ->
+                                        val isSelected = cat == selectedCategory
+                                        Surface(
+                                            shape = RoundedCornerShape(20.dp),
+                                            color = if (isSelected) Color(0xFF0284C7) else (if (isDark) DarkSurface else Color(0xFFF1F5F9)),
+                                            border = BorderStroke(1.dp, if (isSelected) Color(0xFF0284C7) else (if (isDark) DarkBorder else Color(0xFFE2E8F0))),
+                                            modifier = Modifier.clickable {
+                                                selectedCategory = cat
+                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                             }
+                                        ) {
+                                            Text(
+                                                text = cat,
+                                                fontSize = 11.sp,
+                                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                                color = if (isSelected) Color.White else (if (isDark) DarkTextPrimary else Color(0xFF475569)),
+                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                            )
                                         }
-                                    }
-
-                                    IconButton(
-                                        onClick = { isCustomStreamDialogOpen = true },
-                                        modifier = Modifier
-                                            .size(30.dp)
-                                            .background(Color(0xFFE0F2FE), CircleShape)
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.AddLink,
-                                            contentDescription = "رابط مخصص",
-                                            tint = Color(0xFF0284C7),
-                                            modifier = Modifier.size(16.dp)
-                                        )
                                     }
                                 }
 
-                                val displayChannels = if (d1ChannelsList.isNotEmpty()) d1ChannelsList else filteredChannels
-
-                                // Channels Grid
-                                LazyVerticalGrid(
-                                    columns = GridCells.Fixed(2),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                                    modifier = Modifier.fillMaxSize(),
-                                    contentPadding = PaddingValues(bottom = 12.dp)
+                                // Channels List
+                                LazyColumn(
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.weight(1f).fillMaxWidth()
                                 ) {
-                                    items(displayChannels, key = { it.id }) { ch ->
-                                        val isCurrent = currentChannel.id == ch.id
-                                        Card(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .clickable { switchChannel(ch) },
+                                    items(channelsCatalog, key = { it.id }) { channel ->
+                                        val isCurrent = channel.streamUrl == currentChannel.streamUrl
+                                        Surface(
+                                            onClick = { playSelectedChannel(channel) },
                                             shape = RoundedCornerShape(12.dp),
-                                            colors = CardDefaults.cardColors(
-                                                containerColor = if (isCurrent) Color(0xFFE0F2FE) else Color.White
-                                            ),
+                                            color = if (isCurrent) (if (isDark) Color(0xFF0C4A6E) else Color(0xFFE0F2FE)) else (if (isDark) DarkSurface else Color.White),
                                             border = BorderStroke(
-                                                width = if (isCurrent) 2.dp else 1.dp,
-                                                color = if (isCurrent) Color(0xFF0284C7) else Color(0xFFE2E8F0)
-                                            )
+                                                width = if (isCurrent) 1.5.dp else 0.5.dp,
+                                                color = if (isCurrent) Color(0xFF0284C7) else (if (isDark) DarkBorder else Color(0xFFE2EAFD))
+                                            ),
+                                            shadowElevation = 0.5.dp,
+                                            modifier = Modifier.fillMaxWidth()
                                         ) {
                                             Row(
-                                                modifier = Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(8.dp),
+                                                modifier = Modifier.padding(8.dp),
                                                 verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                                             ) {
-                                                AsyncImage(
-                                                    model = ch.logo,
-                                                    contentDescription = ch.name,
-                                                    contentScale = ContentScale.Crop,
+                                                // Channel Logo
+                                                Box(
                                                     modifier = Modifier
-                                                        .size(38.dp)
-                                                        .clip(RoundedCornerShape(8.dp))
-                                                )
+                                                        .size(54.dp)
+                                                        .clip(RoundedCornerShape(10.dp))
+                                                        .background(Color(0xFF0F172A)),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    AsyncImage(
+                                                        model = channel.logo,
+                                                        contentDescription = channel.title,
+                                                        contentScale = ContentScale.Crop,
+                                                        modifier = Modifier.fillMaxSize()
+                                                    )
+                                                }
+
+                                                // Channel Details
                                                 Column(modifier = Modifier.weight(1f)) {
                                                     Text(
-                                                        text = ch.name,
-                                                        fontFamily = TajawalFontFamily,
+                                                        text = channel.title,
+                                                        fontSize = 12.sp,
                                                         fontWeight = FontWeight.Bold,
-                                                        fontSize = 11.sp,
-                                                        color = if (isCurrent) Color(0xFF0284C7) else Color(0xFF0F172A),
+                                                        color = if (isCurrent) Color(0xFF0284C7) else (if (isDark) DarkTextPrimary else Color(0xFF0F172A)),
                                                         maxLines = 1,
                                                         overflow = TextOverflow.Ellipsis
                                                     )
-                                                    Text(
-                                                        text = ch.category,
-                                                        fontFamily = TajawalFontFamily,
-                                                        fontSize = 9.sp,
-                                                        color = Color(0xFF64748B)
-                                                    )
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                                        modifier = Modifier.padding(top = 2.dp)
+                                                    ) {
+                                                        Surface(
+                                                            shape = RoundedCornerShape(4.dp),
+                                                            color = if (isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9)
+                                                        ) {
+                                                            Text(
+                                                                text = channel.category,
+                                                                fontSize = 9.sp,
+                                                                color = if (isDark) DarkTextSecondary else Color(0xFF64748B),
+                                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                            )
+                                                        }
+                                                        Text(
+                                                            text = "• بث فضائي حي",
+                                                            fontSize = 9.sp,
+                                                            color = Color(0xFF10B981),
+                                                            fontWeight = FontWeight.Bold
+                                                        )
+                                                    }
                                                 }
+
+                                                // Play / Active Indicator
                                                 if (isCurrent) {
                                                     Icon(
-                                                        imageVector = Icons.Default.PlayCircle,
-                                                        contentDescription = null,
+                                                        imageVector = Icons.Default.Equalizer,
+                                                        contentDescription = "مشغل الآن",
                                                         tint = Color(0xFF0284C7),
-                                                        modifier = Modifier.size(16.dp)
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                } else {
+                                                    Icon(
+                                                        imageVector = Icons.Default.PlayCircle,
+                                                        contentDescription = "تشغيل",
+                                                        tint = Color(0xFF0284C7),
+                                                        modifier = Modifier.size(20.dp)
                                                     )
                                                 }
                                             }
@@ -920,115 +1152,188 @@ fun TvChannelsRoomScreen(
                             }
                         }
 
+                        // ----------------------------------------------------
+                        // 3B. CHAT SUB-VIEW (RTL, Bubbles, Images)
+                        // ----------------------------------------------------
                         TvRoomSubTab.CHAT -> {
                             Column(
-                                modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.SpaceBetween
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .imePadding()
                             ) {
                                 LazyColumn(
+                                    state = chatListState,
                                     modifier = Modifier
                                         .weight(1f)
                                         .fillMaxWidth(),
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                                    contentPadding = PaddingValues(vertical = 6.dp)
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
                                     items(chatMessages, key = { it.id }) { msg ->
-                                        Card(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            shape = RoundedCornerShape(10.dp),
-                                            colors = CardDefaults.cardColors(
-                                                containerColor = if (msg.isMe) Color(0xFFE0F2FE) else Color.White
-                                            )
-                                        ) {
+                                        if (msg.sender == "النظام") {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 3.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Surface(
+                                                    shape = RoundedCornerShape(10.dp),
+                                                    color = if (isDark) Color(0xFF131B2E) else Color(0xFFF8FAFC),
+                                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0))
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Info,
+                                                            contentDescription = null,
+                                                            tint = Color(0xFF0284C7),
+                                                            modifier = Modifier.size(12.dp)
+                                                        )
+                                                        Text(
+                                                            text = msg.text,
+                                                            fontSize = 10.sp,
+                                                            color = if (isDark) DarkTextSecondary else Color(0xFF475569)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        } else {
                                             Row(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
-                                                    .padding(8.dp),
-                                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                                                horizontalArrangement = if (msg.isMe) Arrangement.Start else Arrangement.End
                                             ) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(28.dp)
-                                                        .background(msg.avatarColor, CircleShape),
-                                                    contentAlignment = Alignment.Center
+                                                Surface(
+                                                    shape = RoundedCornerShape(
+                                                        topStart = 14.dp,
+                                                        topEnd = 14.dp,
+                                                        bottomStart = if (msg.isMe) 14.dp else 3.dp,
+                                                        bottomEnd = if (msg.isMe) 3.dp else 14.dp
+                                                    ),
+                                                    color = if (msg.isMe) Color(0xFF0284C7) else (if (isDark) DarkSurface else Color.White),
+                                                    border = BorderStroke(
+                                                        width = if (msg.imageUrl != null) 0.5.dp else 1.dp,
+                                                        color = if (msg.isMe) Color(0xFF0369A1) else (if (isDark) DarkBorder else Color(0xFFE2E8F0))
+                                                    ),
+                                                    shadowElevation = 0.5.dp,
+                                                    modifier = Modifier.widthIn(max = 280.dp)
                                                 ) {
-                                                    Text(
-                                                        text = msg.sender.take(1),
-                                                        fontFamily = TajawalFontFamily,
-                                                        fontWeight = FontWeight.Bold,
-                                                        fontSize = 11.sp,
-                                                        color = Color.White
-                                                    )
-                                                }
-                                                Column(modifier = Modifier.weight(1f)) {
-                                                    Row(
-                                                        modifier = Modifier.fillMaxWidth(),
-                                                        horizontalArrangement = Arrangement.SpaceBetween
-                                                    ) {
-                                                        Text(
-                                                            text = msg.sender,
-                                                            fontFamily = TajawalFontFamily,
-                                                            fontWeight = FontWeight.Bold,
-                                                            fontSize = 11.sp,
-                                                            color = Color(0xFF0F172A)
+                                                    Column(
+                                                        modifier = Modifier.padding(
+                                                            horizontal = if (msg.imageUrl != null) 3.dp else 10.dp,
+                                                            vertical = if (msg.imageUrl != null) 3.dp else 6.dp
                                                         )
+                                                    ) {
+                                                        if (!msg.isMe) {
+                                                            Text(
+                                                                text = msg.sender,
+                                                                fontSize = 10.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = Color(0xFF0284C7),
+                                                                modifier = Modifier.padding(bottom = 2.dp)
+                                                            )
+                                                        }
+                                                        if (msg.imageUrl != null) {
+                                                            AsyncImage(
+                                                                model = msg.imageUrl,
+                                                                contentDescription = "صورة",
+                                                                contentScale = ContentScale.Crop,
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth()
+                                                                    .height(160.dp)
+                                                                    .clip(RoundedCornerShape(10.dp))
+                                                            )
+                                                        } else {
+                                                            Text(
+                                                                text = msg.text,
+                                                                fontSize = 12.sp,
+                                                                color = if (msg.isMe) Color.White else (if (isDark) DarkTextPrimary else Color(0xFF0F172A))
+                                                            )
+                                                        }
                                                         Text(
                                                             text = msg.time,
-                                                            fontFamily = TajawalFontFamily,
-                                                            fontSize = 9.sp,
-                                                            color = Color(0xFF94A3B8)
+                                                            fontSize = 8.sp,
+                                                            color = if (msg.isMe) Color(0xFFBAE6FD) else (if (isDark) DarkTextSecondary else Color(0xFF94A3B8)),
+                                                            modifier = Modifier.align(Alignment.End).padding(top = 2.dp)
                                                         )
                                                     }
-                                                    Text(
-                                                        text = msg.text,
-                                                        fontFamily = TajawalFontFamily,
-                                                        fontSize = 11.sp,
-                                                        color = Color(0xFF334155)
-                                                    )
                                                 }
                                             }
                                         }
                                     }
                                 }
 
+                                // Chat Input Bar
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(vertical = 4.dp),
+                                        .padding(top = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
+                                    IconButton(
+                                        onClick = { imagePickerLauncher.launch("image/*") },
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .background(if (isDark) DarkSurface else Color.White, CircleShape)
+                                            .border(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0), CircleShape)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Image,
+                                            contentDescription = "إرسال صورة",
+                                            tint = Color(0xFF0284C7),
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+
                                     OutlinedTextField(
                                         value = chatInputText,
                                         onValueChange = { chatInputText = it },
-                                        placeholder = { Text("اكتب رسالة لرواد الغرفة...", fontSize = 11.sp) },
-                                        modifier = Modifier.weight(1f),
-                                        shape = RoundedCornerShape(12.dp),
+                                        placeholder = {
+                                            Text(
+                                                "اكتب رسالة للمتواجدين...",
+                                                fontSize = 11.sp,
+                                                color = if (isDark) DarkTextSecondary else Color(0xFF94A3B8)
+                                            )
+                                        },
                                         singleLine = true,
+                                        shape = RoundedCornerShape(20.dp),
                                         colors = OutlinedTextFieldDefaults.colors(
-                                            focusedContainerColor = Color.White,
-                                            unfocusedContainerColor = Color.White
-                                        )
+                                            focusedContainerColor = if (isDark) DarkSurface else Color.White,
+                                            unfocusedContainerColor = if (isDark) DarkSurface else Color.White,
+                                            focusedBorderColor = Color(0xFF0284C7),
+                                            unfocusedBorderColor = if (isDark) DarkBorder else Color(0xFFE2E8F0),
+                                            focusedTextColor = if (isDark) DarkTextPrimary else Color(0xFF0F172A),
+                                            unfocusedTextColor = if (isDark) DarkTextPrimary else Color(0xFF0F172A)
+                                        ),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(42.dp)
                                     )
+
                                     IconButton(
                                         onClick = {
                                             val t = chatInputText.trim()
                                             if (t.isNotEmpty()) {
-                                                chatMessages.add(
-                                                    TvChatMessage(
-                                                        id = "msg_${System.currentTimeMillis()}",
-                                                        sender = currentUserName,
-                                                        text = t,
-                                                        time = "الآن",
-                                                        isMe = true,
-                                                        avatarColor = Color(0xFF0284C7)
-                                                    )
+                                                val m = TvRoomChatMessage(
+                                                    id = System.currentTimeMillis().toString(),
+                                                    sender = currentUserName,
+                                                    text = t,
+                                                    time = "الآن",
+                                                    isMe = true,
+                                                    avatarColor = Color(0xFF0284C7)
                                                 )
+                                                chatMessages.add(m)
+                                                syncSocket.broadcastChatMessage(t)
                                                 chatInputText = ""
                                             }
                                         },
                                         modifier = Modifier
-                                            .size(44.dp)
+                                            .size(40.dp)
                                             .background(Color(0xFF0284C7), CircleShape)
                                     ) {
                                         Icon(
@@ -1042,277 +1347,683 @@ fun TvChannelsRoomScreen(
                             }
                         }
 
-                        TvRoomSubTab.USERS -> {
-                            LazyColumn(
+                        // ----------------------------------------------------
+                        // 3C. CAMERAS SUB-VIEW
+                        // ----------------------------------------------------
+                        TvRoomSubTab.CAMERAS -> {
+                            Column(
                                 modifier = Modifier.fillMaxSize(),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
-                                contentPadding = PaddingValues(vertical = 6.dp)
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                items(roomUsers) { user ->
-                                    Card(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        shape = RoundedCornerShape(12.dp),
-                                        colors = CardDefaults.cardColors(containerColor = Color.White)
+                                // Camera Controls Toolbar
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (isDark) DarkSurface else Color.White,
+                                    border = BorderStroke(0.5.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0)),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .padding(10.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                                        ) {
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(36.dp)
-                                                    .background(user.avatarBg, CircleShape),
-                                                contentAlignment = Alignment.Center
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            Button(
+                                                onClick = {
+                                                    if (isCameraActive) {
+                                                        isCameraActive = false
+                                                        RoomCameraHelper.stopCamera()
+                                                        syncSocket.broadcastCameraState(false, isFrontCamera)
+                                                    } else {
+                                                        val hasCam = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+                                                        if (hasCam) {
+                                                            isCameraActive = true
+                                                            syncSocket.broadcastCameraState(true, isFrontCamera)
+                                                        } else {
+                                                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                                        }
+                                                    }
+                                                },
+                                                shape = RoundedCornerShape(8.dp),
+                                                colors = ButtonDefaults.buttonColors(
+                                                    containerColor = if (isCameraActive) Color(0xFFDC2626) else Color(0xFF0284C7)
+                                                ),
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                modifier = Modifier.height(32.dp)
                                             ) {
+                                                Icon(
+                                                    imageVector = if (isCameraActive) Icons.Default.VideocamOff else Icons.Default.Videocam,
+                                                    contentDescription = null,
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(14.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(4.dp))
                                                 Text(
-                                                    text = user.name.take(1),
-                                                    fontFamily = TajawalFontFamily,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 13.sp,
-                                                    color = Color.White
+                                                    text = if (isCameraActive) "إيقاف كاميرتي" else "تشغيل كاميرتي",
+                                                    fontSize = 11.sp,
+                                                    color = Color.White,
+                                                    fontWeight = FontWeight.Bold
                                                 )
                                             }
-                                            Column(modifier = Modifier.weight(1f)) {
-                                                Text(
-                                                    text = user.name,
-                                                    fontFamily = TajawalFontFamily,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontSize = 12.sp,
-                                                    color = Color(0xFF0F172A)
+
+                                            if (isCameraActive) {
+                                                IconButton(
+                                                    onClick = {
+                                                        isFrontCamera = !isFrontCamera
+                                                        RoomCameraHelper.switchCamera(context, isFrontCamera)
+                                                        syncSocket.broadcastCameraState(true, isFrontCamera)
+                                                    },
+                                                    modifier = Modifier.size(32.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.FlipCameraAndroid,
+                                                        contentDescription = "تبديل الكاميرا",
+                                                        tint = Color(0xFF0284C7)
+                                                    )
+                                                }
+                                            }
+                                        }
+
+                                        Text(
+                                            text = "${roomUsers.count { it.hasCameraActive }} كاميرات نشطة",
+                                            fontSize = 10.sp,
+                                            color = if (isDark) DarkTextSecondary else Color(0xFF64748B)
+                                        )
+                                    }
+                                }
+
+                                // Cameras Grid
+                                LazyRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    // 1. My Camera Box
+                                    item {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(cameraBoxSize.sizeDp)
+                                                .clip(activeBoxShape)
+                                                .background(if (isDark) Color(0xFF0F172A) else Color(0xFFF8FAFC))
+                                                .border(2.dp, if (isCameraActive) Color(0xFF0284C7) else (if (isDark) DarkBorder else Color(0xFFCBD5E1)), activeBoxShape),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            if (isCameraActive) {
+                                                AndroidView(
+                                                    factory = { ctx ->
+                                                        TextureView(ctx).apply {
+                                                            RoomCameraHelper.startCamera(ctx, this, isFrontCamera)
+                                                        }
+                                                    },
+                                                    modifier = Modifier.fillMaxSize()
                                                 )
+                                                Surface(
+                                                    shape = RoundedCornerShape(4.dp),
+                                                    color = Color(0xCC000000),
+                                                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 3.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "أنت (مباشر)",
+                                                        fontSize = 8.sp,
+                                                        color = Color.White,
+                                                        fontWeight = FontWeight.Bold,
+                                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                                    )
+                                                }
+                                            } else {
+                                                Column(
+                                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.VideocamOff,
+                                                        contentDescription = null,
+                                                        tint = Color(0xFF94A3B8),
+                                                        modifier = Modifier.size(24.dp)
+                                                    )
+                                                    Text(
+                                                        text = "كاميرتك مغلقة",
+                                                        fontSize = 9.sp,
+                                                        color = Color(0xFF94A3B8)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // 2. Participants Cameras
+                                    items(roomUsers.filter { it.id != currentUserId }) { participant ->
+                                        Box(
+                                            modifier = Modifier
+                                                .size(cameraBoxSize.sizeDp)
+                                                .clip(activeBoxShape)
+                                                .background(if (participant.hasCameraActive) Color(0xFF0F172A) else (if (isDark) Color(0xFF1E293B) else Color(0xFFF8FAFC)))
+                                                .border(2.dp, if (participant.isSpeaking) Color(0xFF10B981) else if (participant.hasCameraActive) Color(0xFF38BDF8) else (if (isDark) DarkBorder else Color(0xFFE2E8F0)), activeBoxShape),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Column(
+                                                horizontalAlignment = Alignment.CenterHorizontally,
+                                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(32.dp)
+                                                        .background(participant.avatarBg, CircleShape),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Text(
+                                                        text = participant.name.take(1),
+                                                        color = Color.White,
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontSize = 12.sp
+                                                    )
+                                                }
                                                 Text(
-                                                    text = user.role,
-                                                    fontFamily = TajawalFontFamily,
-                                                    fontSize = 10.sp,
-                                                    color = Color(0xFF64748B)
+                                                    text = participant.name,
+                                                    fontSize = 8.sp,
+                                                    color = if (isDark) DarkTextPrimary else Color(0xFF0F172A),
+                                                    maxLines = 1
                                                 )
                                             }
-                                            Box(
-                                                modifier = Modifier
-                                                    .size(8.dp)
-                                                    .background(Color(0xFF10B981), CircleShape)
-                                            )
                                         }
                                     }
                                 }
                             }
                         }
 
+                        // ----------------------------------------------------
+                        // 3D. INTERCOM / WALKIE-TALKIE SUB-VIEW (Zego Loudspeaker)
+                        // ----------------------------------------------------
                         TvRoomSubTab.INTERCOM -> {
+                            Column(
+                                modifier = Modifier.fillMaxSize(),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                val myUser = roomUsers.find { it.id == currentUserId }
+                                val isMutedByMod = myUser?.isMutedVoice == true
+
+                                Box(
+                                    modifier = Modifier
+                                        .size(135.dp)
+                                        .background(
+                                            if (isMutedByMod) Color(0xFF64748B) else if (isIntercomTalking) Color(0xFF10B981) else Color(0xFF0284C7),
+                                            CircleShape
+                                        )
+                                        .border(4.dp, Color.White, CircleShape)
+                                        .shadow(10.dp, CircleShape)
+                                        .clickable {
+                                            if (isMutedByMod) {
+                                                Toast.makeText(context, "المايكروفون مكتوم من قبل المشرف 🔇", Toast.LENGTH_SHORT).show()
+                                                return@clickable
+                                            }
+                                            val hasAudio = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                                            if (!hasAudio) {
+                                                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                                return@clickable
+                                            }
+                                            isIntercomTalking = !isIntercomTalking
+                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            ZegoCallManager.setMicrophoneMute(!isIntercomTalking)
+                                            ZegoCallManager.setSpeakerEnabled(context, true)
+                                            RealVoipEngine.ensureAudioCaptureStarted(context)
+                                            RealVoipEngine.setMute(!isIntercomTalking)
+                                            RealVoipEngine.setSpeaker(context, true)
+                                            syncSocket.broadcastVoiceState(isIntercomTalking)
+                                        },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = if (isMutedByMod) Icons.Default.MicOff else if (isIntercomTalking) Icons.Default.Mic else Icons.Default.MicNone,
+                                        contentDescription = "تحدث",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(52.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Text(
+                                    text = if (isMutedByMod) "المايك مكتوم من قبل المشرف 🔇" else if (isIntercomTalking) "الميكروفون مفتوح - البث مباشر لجميع الأعضاء 🎙️" else "اضغط للتحدث في الهوكي توكي الصوتي المباشر",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isIntercomTalking) Color(0xFF10B981) else Color(0xFF0369A1)
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "الصوت مباشر من مكبر الصوت لجميع المتواجدين (Zego Audio Engine)",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF64748B)
+                                )
+                            }
+                        }
+
+                        // ----------------------------------------------------
+                        // 3E. USERS SUB-VIEW (Real Participants & Roles)
+                        // ----------------------------------------------------
+                        TvRoomSubTab.USERS -> {
+                            LazyColumn(
+                                modifier = Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                items(roomUsers, key = { it.id }) { user ->
+                                    val isMe = user.id == currentUserId
+                                    val isSelected = selectedUserForPermissions?.id == user.id
+                                    val canManage = (isHost || isAppOwner) && !isMe
+
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = if (isDark) DarkSurface else Color.White,
+                                        border = BorderStroke(0.5.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                selectedUserForPermissions = if (isSelected) null else user
+                                            }
+                                    ) {
+                                        Column(modifier = Modifier.padding(10.dp)) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                ) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(34.dp)
+                                                            .background(user.avatarBg, CircleShape),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Text(
+                                                            text = user.name.take(1),
+                                                            color = Color.White,
+                                                            fontWeight = FontWeight.Bold,
+                                                            fontSize = 13.sp
+                                                        )
+                                                    }
+                                                    Column {
+                                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                                            Text(
+                                                                text = user.name,
+                                                                fontSize = 12.sp,
+                                                                fontWeight = FontWeight.Bold,
+                                                                color = if (isDark) DarkTextPrimary else Color(0xFF0F172A)
+                                                            )
+                                                            if (isMe) {
+                                                                Text(
+                                                                    text = "(أنت)",
+                                                                    fontSize = 10.sp,
+                                                                    color = Color(0xFF0284C7),
+                                                                    fontWeight = FontWeight.Bold
+                                                                )
+                                                            }
+                                                        }
+                                                        Text(
+                                                            text = user.role,
+                                                            fontSize = 9.sp,
+                                                            color = if (user.isHost) Color(0xFF0284C7) else (if (isDark) DarkTextSecondary else Color(0xFF64748B))
+                                                        )
+                                                    }
+                                                }
+
+                                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                    if (user.isSpeaking) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.VolumeUp,
+                                                            contentDescription = "يتحدث",
+                                                            tint = Color(0xFF10B981),
+                                                            modifier = Modifier.size(16.dp)
+                                                        )
+                                                    }
+                                                    Icon(
+                                                        imageVector = if (isSelected) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                                        contentDescription = null,
+                                                        tint = Color(0xFF94A3B8),
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
+                                            }
+
+                                            // Direct permission chips if expanded
+                                            AnimatedVisibility(visible = isSelected) {
+                                                Column(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(top = 6.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                                ) {
+                                                    if (canManage) {
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                        ) {
+                                                            InlinePermissionChip(
+                                                                label = if (user.role.contains("مشرف")) "إلغاء الإشراف" else "ترقية لمشرف 🛡️",
+                                                                icon = Icons.Default.Shield,
+                                                                color = Color(0xFF0284C7),
+                                                                modifier = Modifier.weight(1f),
+                                                                onClick = {
+                                                                    val newRole = if (user.role.contains("مشرف")) "مشاهد" else "مشرف 🛡️"
+                                                                    val updated = user.copy(role = newRole)
+                                                                    val idx = roomUsers.indexOfFirst { it.id == user.id }
+                                                                    if (idx >= 0) roomUsers[idx] = updated
+                                                                    syncSocket.broadcastMemberAction(user.id, if (newRole.contains("مشرف")) "SET_MODERATOR" else "DEMOTE")
+                                                                    Toast.makeText(context, "تم تعديل رتبة ${user.name}", Toast.LENGTH_SHORT).show()
+                                                                }
+                                                            )
+                                                            InlinePermissionChip(
+                                                                label = if (user.canChangeVideo) "منع التبديل 🔒" else "سماح بالتبديل 📺",
+                                                                icon = Icons.Default.LiveTv,
+                                                                color = if (user.canChangeVideo) Color(0xFFDC2626) else Color(0xFF10B981),
+                                                                modifier = Modifier.weight(1f),
+                                                                onClick = {
+                                                                    val updated = user.copy(canChangeVideo = !user.canChangeVideo)
+                                                                    val idx = roomUsers.indexOfFirst { it.id == user.id }
+                                                                    if (idx >= 0) roomUsers[idx] = updated
+                                                                    syncSocket.broadcastMemberAction(user.id, if (updated.canChangeVideo) "ALLOW_VIDEO" else "RESTRICT_VIDEO")
+                                                                    Toast.makeText(context, "تم تعديل صلاحية التبديل لـ ${user.name}", Toast.LENGTH_SHORT).show()
+                                                                }
+                                                            )
+                                                        }
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                                        ) {
+                                                            InlinePermissionChip(
+                                                                label = if (user.isMutedVoice) "تشغيل المايك 🎙️" else "كتم المايك 🔇",
+                                                                icon = if (user.isMutedVoice) Icons.Default.Mic else Icons.Default.MicOff,
+                                                                color = Color(0xFFD97706),
+                                                                modifier = Modifier.weight(1f),
+                                                                onClick = {
+                                                                    val updated = user.copy(isMutedVoice = !user.isMutedVoice)
+                                                                    val idx = roomUsers.indexOfFirst { it.id == user.id }
+                                                                    if (idx >= 0) roomUsers[idx] = updated
+                                                                    syncSocket.broadcastMemberAction(user.id, if (updated.isMutedVoice) "MUTE_VOICE" else "UNMUTE_VOICE")
+                                                                }
+                                                            )
+                                                            InlinePermissionChip(
+                                                                label = "طرد العضو 🚪",
+                                                                icon = Icons.Default.ExitToApp,
+                                                                color = Color(0xFFEF4444),
+                                                                modifier = Modifier.weight(1f),
+                                                                onClick = {
+                                                                    roomUsers.removeAll { it.id == user.id }
+                                                                    syncSocket.broadcastMemberAction(user.id, "KICK")
+                                                                    selectedUserForPermissions = null
+                                                                    Toast.makeText(context, "تم طرد ${user.name} من الغرفة", Toast.LENGTH_SHORT).show()
+                                                                }
+                                                            )
+                                                        }
+                                                    } else if (isMe) {
+                                                        InlinePermissionChip(
+                                                            label = "مغادرة الغرفة 🚪",
+                                                            icon = Icons.Default.Logout,
+                                                            color = Color(0xFFEF4444),
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            onClick = { isExitConfirmDialogOpen = true }
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // ----------------------------------------------------
+                        // 3F. SETTINGS SUB-VIEW
+                        // ----------------------------------------------------
+                        TvRoomSubTab.SETTINGS -> {
                             Column(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .verticalScroll(rememberScrollState()),
                                 verticalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Card(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(14.dp),
-                                    colors = CardDefaults.cardColors(containerColor = Color.White)
+                                // 1. Room Name & Identity Card
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = if (isDark) DarkSurface else Color.White,
+                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
+                                    modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(14.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                                    ) {
-                                        Text(
-                                            text = "إعدادات جهاز اللاسلكي الفضائي",
-                                            fontFamily = TajawalFontFamily,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 13.sp,
-                                            color = Color(0xFF0F172A)
-                                        )
-                                        Text(
-                                            text = "نظام اتصال صوتي فوري يعتمد على بروتوكول Zego Cloud فائق السرعة، مصمم لسهرات مشاهدة المباريات والقنوات الحية مع الأصدقاء.",
-                                            fontFamily = TajawalFontFamily,
-                                            fontSize = 11.sp,
-                                            color = Color(0xFF64748B),
-                                            lineHeight = 16.sp
-                                        )
-
+                                    Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.SpaceBetween,
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
-                                            Text(
-                                                text = "مكبر الصوت الخارجي (Loudspeaker)",
-                                                fontFamily = TajawalFontFamily,
-                                                fontSize = 12.sp,
-                                                color = Color(0xFF0F172A)
-                                            )
-                                            Switch(
-                                                checked = isSpeakerEnabled,
-                                                onCheckedChange = {
-                                                    isSpeakerEnabled = it
-                                                    ZegoCallManager.setSpeakerEnabled(context, it)
-                                                }
-                                            )
+                                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                                Icon(
+                                                    imageVector = Icons.Default.LiveTv,
+                                                    contentDescription = null,
+                                                    tint = Color(0xFF0284C7),
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                                Text(
+                                                    text = roomTitle,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isDark) DarkTextPrimary else Color(0xFF0F172A)
+                                                )
+                                            }
+                                            Surface(
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = if (isHost) (if (isDark) Color(0xFF0C4A6E) else Color(0xFFE0F2FE)) else (if (isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9))
+                                            ) {
+                                                Text(
+                                                    text = if (isHost) "مضيف الغرفة 👑" else "مشاهد متصل 👤",
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isHost) Color(0xFF0284C7) else (if (isDark) DarkTextSecondary else Color(0xFF64748B)),
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                                )
+                                            }
                                         }
+                                        Text(
+                                            text = "معرّف الغرفة: $roomId • كود الانضمام: $roomCode",
+                                            fontSize = 10.sp,
+                                            color = if (isDark) DarkTextSecondary else Color(0xFF64748B)
+                                        )
                                     }
                                 }
-                            }
-                        }
 
-                        TvRoomSubTab.SETTINGS -> {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .verticalScroll(rememberScrollState()),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Card(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    shape = RoundedCornerShape(14.dp),
-                                    colors = CardDefaults.cardColors(containerColor = Color.White)
+                                // 2. Walkie-Talkie Audio Settings Card
+                                Surface(
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = if (isDark) DarkSurface else Color.White,
+                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
+                                    modifier = Modifier.fillMaxWidth()
                                 ) {
                                     Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(14.dp),
-                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                        modifier = Modifier.padding(14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
-                                        Text(
-                                            text = "معلومات الغرفة الفضائية",
-                                            fontFamily = TajawalFontFamily,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 13.sp,
-                                            color = Color(0xFF0F172A)
-                                        )
-                                        Text(
-                                            text = "عنوان الغرفة: $roomTitle",
-                                            fontFamily = TajawalFontFamily,
-                                            fontSize = 11.sp,
-                                            color = Color(0xFF475569)
-                                        )
-                                        Text(
-                                            text = "رمز المشاركة: $roomCode",
-                                            fontFamily = TajawalFontFamily,
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 12.sp,
-                                            color = Color(0xFF0284C7)
-                                        )
-                                        Text(
-                                            text = "القناة الحالية: ${currentChannel.title}",
-                                            fontFamily = TajawalFontFamily,
-                                            fontSize = 11.sp,
-                                            color = Color(0xFF64748B)
+                                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                            Icon(
+                                                imageVector = Icons.Default.RecordVoiceOver,
+                                                contentDescription = null,
+                                                tint = Color(0xFF10B981),
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Text(
+                                                text = "إعدادات صوت الهوكي توكي 🎙️",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isDark) DarkTextPrimary else Color(0xFF0F172A)
+                                            )
+                                        }
+
+                                        SettingsSwitchRow(
+                                            title = "إلغاء الضوضاء الذكي (AI Noise Suppression)",
+                                            subtitle = "تصفية صوت التشويش المحيط بالميكروفون",
+                                            checked = isNoiseSuppressionEnabled,
+                                            isDark = isDark,
+                                            onCheckedChange = {
+                                                isNoiseSuppressionEnabled = it
+                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            }
                                         )
 
-                                        Button(
-                                            onClick = {
-                                                val cb = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                                cb.setPrimaryClip(ClipData.newPlainText("TV Room Code", roomCode))
-                                                Toast.makeText(context, "تم نسخ رمز الغرفة بنجاح 📋", Toast.LENGTH_SHORT).show()
-                                            },
-                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
-                                            shape = RoundedCornerShape(10.dp),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text("مشاركة رمز الغرفة مع الأصدقاء", fontFamily = TajawalFontFamily, fontSize = 11.sp)
-                                        }
+                                        SettingsSwitchRow(
+                                            title = "مانع الصدى الصوتي (Echo Cancellation)",
+                                            subtitle = "منع ارتداد صوت القناة داخل الميكروفون",
+                                            checked = isEchoCancellationEnabled,
+                                            isDark = isDark,
+                                            onCheckedChange = {
+                                                isEchoCancellationEnabled = it
+                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            }
+                                        )
+
+                                        SettingsSwitchRow(
+                                            title = "إخراج الصوت عبر مكبر الصوت الخارجي",
+                                            subtitle = "صوت الهوكي توكي يخرج من مكبر الصوت الرئيسي",
+                                            checked = isIntercomLoudspeaker,
+                                            isDark = isDark,
+                                            onCheckedChange = {
+                                                isIntercomLoudspeaker = it
+                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                ZegoCallManager.setSpeakerEnabled(context, it)
+                                                RealVoipEngine.setSpeaker(context, it)
+                                            }
+                                        )
                                     }
                                 }
-                            }
-                        }
 
-                        TvRoomSubTab.CAMERAS -> {
-                            Box(
-                                modifier = Modifier.fillMaxSize(),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "ميزة الكاميرات الحية التفاعلية متاحة في جلسات المشاهدة الجماعية",
-                                    fontFamily = TajawalFontFamily,
-                                    fontSize = 12.sp,
-                                    color = Color(0xFF64748B),
-                                    textAlign = TextAlign.Center
-                                )
+                                // 3. Exit Room Button
+                                Button(
+                                    onClick = { isExitConfirmDialogOpen = true },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(44.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFFDC2626),
+                                        contentColor = Color.White
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Logout,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "مغادرة الغرفة",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // 6. CUSTOM STREAM URL DIALOG
-            if (isCustomStreamDialogOpen) {
-                Dialog(onDismissRequest = { isCustomStreamDialogOpen = false }) {
-                    Card(
+            // ====================================================
+            // EXIT ROOM CONFIRMATION DIALOG (100% Matching Movies Room)
+            // ====================================================
+            if (isExitConfirmDialogOpen) {
+                Dialog(
+                    onDismissRequest = { isExitConfirmDialogOpen = false },
+                    properties = DialogProperties(usePlatformDefaultWidth = false)
+                ) {
+                    Surface(
                         modifier = Modifier
-                            .fillMaxWidth(0.92f)
-                            .wrapContentHeight(),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color.White)
+                            .fillMaxWidth(0.85f)
+                            .clip(RoundedCornerShape(22.dp)),
+                        shape = RoundedCornerShape(22.dp),
+                        color = Color.White,
+                        border = BorderStroke(1.dp, Color(0xFFE2E8F0)),
+                        shadowElevation = 10.dp
                     ) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                                .padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(50.dp)
+                                    .background(Color(0xFFFEF2F2), CircleShape)
+                                    .border(1.dp, Color(0xFFFECACA), CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Logout,
+                                    contentDescription = null,
+                                    tint = Color(0xFFDC2626),
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+
                             Text(
-                                text = "إضافة رابط قناة فضائية خاصة",
-                                fontFamily = TajawalFontFamily,
+                                text = if (isHost) "هل تريد الخروج وإنهاء الغرفة؟" else "هل تود الخروج من الغرفة؟",
+                                fontSize = 15.sp,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                color = Color(0xFF0F172A)
+                                color = Color(0xFF0F172A),
+                                textAlign = TextAlign.Center
                             )
-                            OutlinedTextField(
-                                value = customChannelTitleInput,
-                                onValueChange = { customChannelTitleInput = it },
-                                label = { Text("اسم القناة", fontSize = 11.sp) },
-                                placeholder = { Text("مثال: قناة الرياضية 1", fontSize = 11.sp) },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(10.dp),
-                                singleLine = true
+
+                            Text(
+                                text = if (isHost)
+                                    "سيتم إغلاق الغرفة للجميع وإنهاء البث المتزامن."
+                                else
+                                    "يمكنك العودة للانضمام إلى الغرفة لاحقاً.",
+                                fontSize = 11.sp,
+                                color = Color(0xFF64748B),
+                                textAlign = TextAlign.Center
                             )
-                            OutlinedTextField(
-                                value = customStreamInput,
-                                onValueChange = { customStreamInput = it },
-                                label = { Text("رابط البث (m3u8 / IPTV / HLS)", fontSize = 11.sp) },
-                                placeholder = { Text("https://example.com/live.m3u8", fontSize = 11.sp) },
-                                modifier = Modifier.fillMaxWidth(),
-                                shape = RoundedCornerShape(10.dp),
-                                singleLine = true
-                            )
+
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
                                 Button(
-                                    onClick = {
-                                        val url = customStreamInput.trim()
-                                        if (url.isNotEmpty()) {
-                                            val title = customChannelTitleInput.trim().ifBlank { "قناة مخصصة" }
-                                            val customCh = TvChannelItem(
-                                                id = "custom_${System.currentTimeMillis()}",
-                                                title = title,
-                                                name = title,
-                                                logo = TvChannelsRoomManager.DEFAULT_TV_CHANNELS[0].logo,
-                                                streamUrl = url,
-                                                category = "قنوات مخصصة"
-                                            )
-                                            switchChannel(customCh)
-                                            isCustomStreamDialogOpen = false
-                                        }
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF0284C7)),
-                                    modifier = Modifier.weight(1f),
-                                    shape = RoundedCornerShape(10.dp)
+                                    onClick = { isExitConfirmDialogOpen = false },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(40.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFFF1F5F9),
+                                        contentColor = Color(0xFF334155)
+                                    ),
+                                    border = BorderStroke(1.dp, Color(0xFFCBD5E1))
                                 ) {
-                                    Text("تشغيل القناة", fontFamily = TajawalFontFamily, fontSize = 12.sp)
+                                    Text(
+                                        text = "لا",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
-                                OutlinedButton(
-                                    onClick = { isCustomStreamDialogOpen = false },
-                                    shape = RoundedCornerShape(10.dp)
+
+                                Button(
+                                    onClick = {
+                                        isExitConfirmDialogOpen = false
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        syncSocket.disconnect()
+                                        ZegoCallManager.endCall(context, zegoAudioRoomId)
+                                        onBack()
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(40.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFFDC2626),
+                                        contentColor = Color.White
+                                    )
                                 ) {
-                                    Text("إلغاء", fontFamily = TajawalFontFamily, fontSize = 12.sp)
+                                    Text(
+                                        text = "نعم",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
                                 }
                             }
                         }

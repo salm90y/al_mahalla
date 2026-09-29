@@ -812,11 +812,16 @@ fun MoviesRoomScreen(
                         }
                     },
                     update = { webView ->
-                        if (webView is WebView) {
+                        if (webView is WebView && webViewRef == null) {
                             webViewRef = webView
                         }
                     },
-                        modifier = Modifier.fillMaxSize()
+                    onRelease = { view ->
+                        try {
+                            (view as? WebView)?.destroy()
+                        } catch (_: Throwable) {}
+                    },
+                    modifier = Modifier.fillMaxSize()
                     )
                 }
 
