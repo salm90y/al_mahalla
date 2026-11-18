@@ -1332,7 +1332,7 @@ fun ChatDetailScreen(
             onAccept = {
                 val roomId = incCall.callRoomId
                 dismissedCallIds = dismissedCallIds + roomId
-                CallSignalingManager.dismissedCallIds.add(roomId)
+                CallSignalingManager.dismissedCallIds = CallSignalingManager.dismissedCallIds + roomId
                 activeIncomingCall = null
                 CallActivity.stopAllRingtones(context)
 
@@ -1348,7 +1348,7 @@ fun ChatDetailScreen(
             },
             onDecline = {
                 dismissedCallIds = dismissedCallIds + incCall.callRoomId
-                CallSignalingManager.dismissedCallIds.add(incCall.callRoomId)
+                CallSignalingManager.dismissedCallIds = CallSignalingManager.dismissedCallIds + incCall.callRoomId
                 CallSignalingManager.declineIncomingCall(context, incCall.callerId, incCall.callRoomId, incCall.isVideo)
                 activeIncomingCall = null
                 CallActivity.stopAllRingtones(context)
