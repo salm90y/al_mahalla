@@ -6,6 +6,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.drawable.BitmapDrawable
+import android.media.MediaPlayer
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -81,7 +82,13 @@ enum class MessageStatus {
 sealed class MessageContent {
     data class Text(val text: String) : MessageContent()
     data class Photo(val urls: List<String>) : MessageContent()
-    data class Document(val name: String, val size: String, val type: String) : MessageContent()
+    data class Document(
+        val name: String,
+        val size: String,
+        val type: String,
+        val mediaUrl: String = "",
+        val durationSec: Int = 0
+    ) : MessageContent()
     data class Location(val address: String, val city: String, val country: String) : MessageContent()
     data class Snap(val timer: Int) : MessageContent()
     data class Call(val callId: String, val isVideo: Boolean, val statusText: String) : MessageContent()
@@ -437,7 +444,13 @@ fun ChatDetailScreen(
                     "image" -> MessageContent.Photo(listOf(localPath))
                     "call", "audio_call" -> MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = false, statusText = m.content.ifBlank { "مكالمة صوتية" })
                     "video_call" -> MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = true, statusText = m.content.ifBlank { "مكالمة فيديو" })
-                    "file", "audio", "video" -> MessageContent.Document(m.fileName.ifEmpty { m.content }, "ملف", m.type)
+                    "file", "audio", "video" -> MessageContent.Document(
+                        name = m.fileName.ifEmpty { m.content.ifBlank { if (m.type == "audio") "رسالة صوتية" else "ملف" } },
+                        size = if (m.type == "audio") (if (m.duration > 0) "${m.duration} ثانية" else "رسالة صوتية") else "ملف",
+                        type = m.type,
+                        mediaUrl = localPath.ifBlank { m.mediaUrl },
+                        durationSec = m.duration
+                    )
                     else -> MessageContent.Text(m.content)
                 }
                 val time = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(m.createdAt))
@@ -466,6 +479,114 @@ fun ChatDetailScreen(
     var activeIncomingCall by remember { mutableStateOf<IncomingCallData?>(null) }
     var dismissedCallIds by remember { mutableStateOf(setOf<String>()) }
     var isTargetOnline by remember { mutableStateOf(isOnline) }
+    var isRemoteTyping by remember { mutableStateOf(false) }
+
+    // Auto-clear remote typing indicator after 4s if no follow-up event arrives
+    LaunchedEffect(isRemoteTyping) {
+        if (isRemoteTyping) {
+            delay(4000)
+            isRemoteTyping = false
+        }
+    }
+
+    // Real-time WebSocket connection for instant messages, typing, and presence
+    DisposableEffect(convId, targetUserId) {
+        if (targetUserId.isNotEmpty()) {
+            CloudflareClient.connectWebSocket(
+                context,
+                convId,
+                object : CloudflareClient.WebSocketMessageListener {
+                    override fun onMessageReceived(message: com.almahala.netplay.model.ChatMessage) {
+                        isRemoteTyping = false
+                        val timeStr = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(message.createdAt))
+                        val isCallType = message.type in listOf("audio_call", "video_call", "call", "call_init")
+                        if (isCallType && !message.isMe && !CallActivity.isCallActive &&
+                            (System.currentTimeMillis() - message.createdAt < 45000) &&
+                            !dismissedCallIds.contains(message.id) &&
+                            !dismissedCallIds.contains(message.mediaUrl) &&
+                            !CallSignalingManager.dismissedCallIds.contains(message.id) &&
+                            !CallSignalingManager.dismissedCallIds.contains(message.mediaUrl)
+                        ) {
+                            val isVid = message.type == "video_call" || message.content.contains("فيديو")
+                            val callRoom = message.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }
+                            if (activeIncomingCall == null) {
+                                activeIncomingCall = IncomingCallData(
+                                    callerId = targetUserId,
+                                    callerName = userName,
+                                    callerAvatar = avatarUrl,
+                                    callRoomId = callRoom,
+                                    isVideo = isVid,
+                                    timestamp = message.createdAt
+                                )
+                                CallSignalingManager.sendRingingAck(context, targetUserId, callRoom, isVid)
+                            }
+                        }
+
+                        val content = when (message.type) {
+                            "image" -> MessageContent.Photo(listOf(message.mediaUrl.ifBlank { message.content }))
+                            "call", "audio_call" -> MessageContent.Call(
+                                message.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" },
+                                isVideo = false,
+                                statusText = message.content.ifBlank { "مكالمة صوتية" }
+                            )
+                            "video_call" -> MessageContent.Call(
+                                message.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" },
+                                isVideo = true,
+                                statusText = message.content.ifBlank { "مكالمة فيديو" }
+                            )
+                            "call_init" -> {
+                                val isVid = message.content.contains("فيديو")
+                                MessageContent.Call(
+                                    message.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" },
+                                    isVideo = isVid,
+                                    statusText = message.content.ifBlank { if (isVid) "مكالمة فيديو" else "مكالمة صوتية" }
+                                )
+                            }
+                            "file", "audio", "video" -> MessageContent.Document(
+                                name = message.fileName.ifEmpty { message.content.ifBlank { if (message.type == "audio") "رسالة صوتية" else "ملف" } },
+                                size = if (message.type == "audio") (if (message.duration > 0) "${message.duration} ثانية" else "رسالة صوتية") else "ملف",
+                                type = message.type,
+                                mediaUrl = message.mediaUrl,
+                                durationSec = message.duration
+                            )
+                            else -> MessageContent.Text(message.content)
+                        }
+                        if (message.type == "image" && message.mediaUrl.isNotBlank()) {
+                            ensureMediaCachedLocally(context, message.mediaUrl, message.id)
+                        }
+                        val uiMsg = Message(
+                            id = message.id,
+                            content = content,
+                            timestamp = timeStr,
+                            isOutgoing = message.isMe,
+                            status = MessageStatus.DELIVERED,
+                            timestampMs = message.createdAt,
+                            clientMessageId = message.id
+                        )
+                        val exists = messages.any { it.id == uiMsg.id || it.clientMessageId == uiMsg.clientMessageId }
+                        if (!exists) {
+                            messages = (messages + uiMsg).sortedBy { it.timestampMs }
+                        }
+                    }
+
+                    override fun onTypingReceived(username: String, isTyping: Boolean) {
+                        if (!username.equals(myUsername, ignoreCase = true)) {
+                            isRemoteTyping = isTyping
+                        }
+                    }
+
+                    override fun onPresenceReceived(userId: String, username: String, status: String) {
+                        if (userId == targetUserId || username.equals(userName, ignoreCase = true)) {
+                            isTargetOnline = status == "online"
+                        }
+                    }
+                }
+            )
+        }
+        onDispose {
+            CloudflareClient.disconnectWebSocket()
+        }
+    }
 
     // Live presence polling for real online/offline status
     LaunchedEffect(targetUserId) {
@@ -474,7 +595,7 @@ fun ChatDetailScreen(
                 CloudflareClient.checkUserOnline(context, targetUserId) { online ->
                     isTargetOnline = online
                 }
-                delay(2500)
+                delay(4000)
             }
         }
     }
@@ -498,7 +619,9 @@ fun ChatDetailScreen(
                                 !m.senderId.startsWith("user_me") &&
                                 (System.currentTimeMillis() - m.createdAt < 45000) &&
                                 !dismissedCallIds.contains(m.id) &&
-                                !dismissedCallIds.contains(m.mediaUrl)
+                                !dismissedCallIds.contains(m.mediaUrl) &&
+                                !CallSignalingManager.dismissedCallIds.contains(m.id) &&
+                                !CallSignalingManager.dismissedCallIds.contains(m.mediaUrl)
                             }
                             if (incomingCallMsg != null && activeIncomingCall == null) {
                                 val isVid = incomingCallMsg.type == "video_call" || incomingCallMsg.content.contains("فيديو")
@@ -545,7 +668,13 @@ fun ChatDetailScreen(
                                     val isVid = m.content.contains("فيديو")
                                     MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = isVid, statusText = m.content.ifBlank { if (isVid) "مكالمة فيديو" else "مكالمة صوتية" })
                                 }
-                                "file", "audio", "video" -> MessageContent.Document(m.fileName.ifEmpty { m.content }, "ملف", m.type)
+                                "file", "audio", "video" -> MessageContent.Document(
+                                    name = m.fileName.ifEmpty { m.content.ifBlank { if (m.type == "audio") "رسالة صوتية" else "ملف" } },
+                                    size = if (m.type == "audio") (if (m.duration > 0) "${m.duration} ثانية" else "رسالة صوتية") else "ملف",
+                                    type = m.type,
+                                    mediaUrl = localPath.ifBlank { m.mediaUrl },
+                                    durationSec = m.duration
+                                )
                                 else -> MessageContent.Text(m.content)
                             }
                             val time = timeFormatter.format(Date(m.createdAt))
@@ -678,7 +807,7 @@ fun ChatDetailScreen(
             targetUserId = targetUserId,
             userName = userName,
             isOnline = isTargetOnline,
-            isTyping = isTyping,
+            isTyping = isTyping || isRemoteTyping,
             avatarUrl = avatarUrl,
             onAvatarClick = {
                 val story = StoryManager.getStoryForUser(context, targetUserId, userName)
@@ -783,6 +912,7 @@ fun ChatDetailScreen(
         }
 
         // 3. UNIFIED INPUT BAR WITH REAL-TIME CLOUDFLARE/R2 SYNC
+        var lastTypingSentAt by remember { mutableLongStateOf(0L) }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1104,7 +1234,93 @@ fun ChatDetailScreen(
                         ) { _, _ -> }
                     }
                 },
-                onTyping = {}
+                onTyping = {
+                    val now = System.currentTimeMillis()
+                    if (now - lastTypingSentAt > 1500L && targetUserId.isNotEmpty()) {
+                        lastTypingSentAt = now
+                        CloudflareClient.sendTyping(true)
+                    }
+                },
+                onSendVoiceNote = { audioUri, durationSec ->
+                    val hasNet = isNetworkAvailable(context)
+                    val now = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
+                    val nowMs = System.currentTimeMillis()
+                    val msgId = "msg_${nowMs}_${(100..999).random()}"
+                    val displayName = "voice_${durationSec}s_${nowMs}.m4a"
+                    val localPath = audioUri.path ?: audioUri.toString()
+                    val durLabel = String.format("%02d:%02d", durationSec / 60, durationSec % 60)
+
+                    val localMsg = Message(
+                        id = msgId,
+                        content = MessageContent.Document(
+                            name = "رسالة صوتية",
+                            size = durLabel,
+                            type = "audio",
+                            mediaUrl = localPath,
+                            durationSec = durationSec
+                        ),
+                        timestamp = now,
+                        isOutgoing = true,
+                        status = if (hasNet) MessageStatus.SENDING else MessageStatus.FAILED,
+                        timestampMs = nowMs,
+                        clientMessageId = msgId
+                    )
+                    messages = (messages + localMsg).sortedBy { it.timestampMs }
+
+                    if (!hasNet) {
+                        Toast.makeText(context, "تعذر إرسال الصوت: لا يوجد اتصال بالإنترنت", Toast.LENGTH_SHORT).show()
+                    } else if (targetUserId.isNotEmpty()) {
+                        coroutineScope.launch(Dispatchers.IO) {
+                            try {
+                                val bytes = context.contentResolver.openInputStream(audioUri)?.use { it.readBytes() }
+                                if (bytes != null && bytes.isNotEmpty()) {
+                                    val mediaDir = File(context.filesDir, "chat_media").apply { mkdirs() }
+                                    val cachedAudio = File(mediaDir, displayName)
+                                    cachedAudio.writeBytes(bytes)
+                                    ChatMediaCache.register(context, msgId, cachedAudio.absolutePath)
+                                    ChatMediaCache.register(context, displayName, cachedAudio.absolutePath)
+
+                                    CloudflareClient.uploadMediaFile(context, bytes, displayName, "audio/mp4") { uploadOk, r2Url ->
+                                        if (uploadOk && !r2Url.isNullOrEmpty()) {
+                                            ChatMediaCache.register(context, r2Url, cachedAudio.absolutePath)
+                                            CloudflareClient.updateLocalConversation(context, targetUserId, userName, avatarUrl, "🎤 رسالة صوتية ($durLabel)", nowMs)
+                                            CloudflareClient.sendCloudflareMessage(
+                                                context = context,
+                                                receiverId = targetUserId,
+                                                text = "رسالة صوتية ($durLabel)",
+                                                type = "audio",
+                                                mediaUrl = r2Url,
+                                                fileName = displayName,
+                                                messageId = msgId,
+                                                duration = durationSec
+                                            ) { sendOk, _ ->
+                                                messages = messages.map { m ->
+                                                    if (m.id == msgId) m.copy(status = if (sendOk) MessageStatus.DELIVERED else MessageStatus.FAILED) else m
+                                                }
+                                            }
+                                        } else {
+                                            messages = messages.map { m ->
+                                                if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    messages = messages.map { m ->
+                                        if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                    }
+                                }
+                            } catch (_: Exception) {
+                                messages = messages.map { m ->
+                                    if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                }
+                            }
+                        }
+                    } else {
+                        messages = messages.map { m ->
+                            if (m.id == msgId) m.copy(status = MessageStatus.DELIVERED) else m
+                        }
+                    }
+                }
             )
         }
     }
@@ -1116,6 +1332,7 @@ fun ChatDetailScreen(
             onAccept = {
                 val roomId = incCall.callRoomId
                 dismissedCallIds = dismissedCallIds + roomId
+                CallSignalingManager.dismissedCallIds.add(roomId)
                 activeIncomingCall = null
                 CallActivity.stopAllRingtones(context)
 
@@ -1131,6 +1348,7 @@ fun ChatDetailScreen(
             },
             onDecline = {
                 dismissedCallIds = dismissedCallIds + incCall.callRoomId
+                CallSignalingManager.dismissedCallIds.add(incCall.callRoomId)
                 CallSignalingManager.declineIncomingCall(context, incCall.callerId, incCall.callRoomId, incCall.isVideo)
                 activeIncomingCall = null
                 CallActivity.stopAllRingtones(context)
@@ -1269,8 +1487,12 @@ fun ChatTopBar(
         // 1. Audio Call Button - Free Icon
         IconButton(
             onClick = {
-                val myUserId = UserManager.getCurrentUser(context)?.username ?: "user_me"
-                val callRoomId = "call_" + listOf(myUserId, targetUserId.ifBlank { "partner" }).sorted().joinToString("_") + "_" + System.currentTimeMillis()
+                if (targetUserId.isBlank()) {
+                    Toast.makeText(context, "تعذر بدء المكالمة: معرف المستخدم غير متاح", Toast.LENGTH_SHORT).show()
+                    return@IconButton
+                }
+                val myUserId = CloudflareClient.getCurrentUserId(context)
+                val callRoomId = "call_" + listOf(myUserId, targetUserId).sorted().joinToString("_") + "_" + System.currentTimeMillis()
 
                 val intent = Intent(context, CallActivity::class.java).apply {
                     putExtra("callID", callRoomId)
@@ -1297,8 +1519,12 @@ fun ChatTopBar(
         // 2. Video Call Button - Free Icon
         IconButton(
             onClick = {
-                val myUserId = UserManager.getCurrentUser(context)?.username ?: "user_me"
-                val callRoomId = "call_" + listOf(myUserId, targetUserId.ifBlank { "partner" }).sorted().joinToString("_") + "_" + System.currentTimeMillis()
+                if (targetUserId.isBlank()) {
+                    Toast.makeText(context, "تعذر بدء المكالمة: معرف المستخدم غير متاح", Toast.LENGTH_SHORT).show()
+                    return@IconButton
+                }
+                val myUserId = CloudflareClient.getCurrentUserId(context)
+                val callRoomId = "call_" + listOf(myUserId, targetUserId).sorted().joinToString("_") + "_" + System.currentTimeMillis()
 
                 val intent = Intent(context, CallActivity::class.java).apply {
                     putExtra("callID", callRoomId)
@@ -2221,6 +2447,72 @@ fun DocumentBubble(
     status: MessageStatus = MessageStatus.DELIVERED
 ) {
     val context = LocalContext.current
+    val isAudio = content.type == "audio"
+    var isAudioPlaying by remember { mutableStateOf(false) }
+    var mediaPlayerRef by remember { mutableStateOf<MediaPlayer?>(null) }
+
+    DisposableEffect(content.mediaUrl, content.name) {
+        onDispose {
+            try { mediaPlayerRef?.stop() } catch (_: Exception) {}
+            try { mediaPlayerRef?.release() } catch (_: Exception) {}
+            mediaPlayerRef = null
+            isAudioPlaying = false
+        }
+    }
+
+    fun toggleAudioPlayback() {
+        val existing = mediaPlayerRef
+        if (existing != null) {
+            try {
+                if (existing.isPlaying) {
+                    existing.pause()
+                    isAudioPlaying = false
+                } else {
+                    existing.start()
+                    isAudioPlaying = true
+                }
+                return
+            } catch (_: Exception) {
+                try { existing.release() } catch (_: Exception) {}
+                mediaPlayerRef = null
+                isAudioPlaying = false
+            }
+        }
+        val rawSrc = content.mediaUrl.ifBlank { content.name }
+        val resolved = resolveMediaUrl(context, rawSrc)
+        val dataSource = when (resolved) {
+            is File -> resolved.absolutePath
+            is Uri -> resolved.toString()
+            else -> resolved.toString()
+        }
+        if (dataSource.isBlank()) {
+            Toast.makeText(context, "الملف الصوتي غير متوفر", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val mp = MediaPlayer().apply {
+                setDataSource(dataSource)
+                setOnPreparedListener { player ->
+                    player.start()
+                    isAudioPlaying = true
+                }
+                setOnCompletionListener {
+                    isAudioPlaying = false
+                }
+                setOnErrorListener { _, _, _ ->
+                    isAudioPlaying = false
+                    Toast.makeText(context, "تعذر تشغيل المقطع الصوتي", Toast.LENGTH_SHORT).show()
+                    true
+                }
+                prepareAsync()
+            }
+            mediaPlayerRef = mp
+        } catch (_: Exception) {
+            isAudioPlaying = false
+            Toast.makeText(context, "تعذر تشغيل المقطع الصوتي", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isOutgoing) Arrangement.End else Arrangement.Start
@@ -2234,7 +2526,11 @@ fun DocumentBubble(
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
                     .clickable {
-                        Toast.makeText(context, "الملف: ${content.name}", Toast.LENGTH_SHORT).show()
+                        if (isAudio) {
+                            toggleAudioPlayback()
+                        } else {
+                            Toast.makeText(context, "الملف: ${content.name}", Toast.LENGTH_SHORT).show()
+                        }
                     }
                     .background(
                         if (isOutgoing) {
@@ -2272,6 +2568,13 @@ fun DocumentBubble(
                             tint = Color.White,
                             modifier = Modifier.size(22.dp)
                         )
+                    } else if (isAudio) {
+                        Icon(
+                            imageVector = if (isAudioPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                            contentDescription = if (isAudioPlaying) "إيقاف مؤقت" else "تشغيل",
+                            tint = if (isOutgoing) Color.White else Color(0xFF2563EB),
+                            modifier = Modifier.size(24.dp)
+                        )
                     } else {
                         Icon(
                             imageVector = Icons.Default.InsertDriveFile,
@@ -2284,7 +2587,7 @@ fun DocumentBubble(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = content.name,
+                        text = if (isAudio) "رسالة صوتية" else content.name,
                         color = if (isOutgoing) Color.White else Color(0xFF0F172A),
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.5.sp,
@@ -2293,7 +2596,7 @@ fun DocumentBubble(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "${content.size} • $timestamp",
+                        text = if (isAudio) "${if (isAudioPlaying) "جاري التشغيل • " else ""}${content.size} • $timestamp" else "${content.size} • $timestamp",
                         color = if (isOutgoing) Color(0xFFDBEAFE) else Color(0xFF64748B),
                         fontSize = 11.sp,
                         fontFamily = TajawalFontFamily

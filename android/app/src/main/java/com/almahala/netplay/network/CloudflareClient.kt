@@ -41,6 +41,11 @@ private val httpClient = OkHttpClient.Builder()
         .build()
 private var activeWebSocket: WebSocket? = null
     private var webSocketListener: WebSocketMessageListener? = null
+    private var wsManuallyClosed: Boolean = false
+    private var wsActiveConvId: String = ""
+    private var wsReconnectAttempt: Int = 0
+    private val wsClientToken: String = UUID.randomUUID().toString()
+    private val wsPendingQueue = java.util.concurrent.ConcurrentLinkedQueue<String>()
     interface WebSocketMessageListener {
         fun onMessageReceived(message: ChatMessage)
 fun onTypingReceived(username: String, isTyping: Boolean)
@@ -893,43 +898,75 @@ val request = Request.Builder().url(url).post(body).apply {
     // ----------------- Real-time WebSocket -----------------
     fun connectWebSocket(context: Context, conversationId: String, listener: WebSocketMessageListener) {
         disconnectWebSocket()
+        wsManuallyClosed = false
+        wsActiveConvId = conversationId
+        wsReconnectAttempt = 0
         this.webSocketListener = listener
-        val user = UserManager.getCurrentUser(context)
-val userId = user?.id ?: "user_${System.currentTimeMillis()}"
-        val username = user?.username ?: "Player"
-        val wsUrl = getBaseUrl(context).replace("http://", "ws://").replace("https://", "wss://") +
-                "/ws/$conversationId?userId=$userId&username=$username"
+        openChatWebSocket(context.applicationContext, conversationId)
+    }
+
+    private fun openChatWebSocket(appContext: Context, conversationId: String) {
+        if (wsManuallyClosed || wsActiveConvId != conversationId) return
+        val userId = getCurrentUserId(appContext)
+        val username = getCurrentUsername(appContext)
+        val encodedConv = Uri.encode(conversationId)
+        val encodedUid = Uri.encode(userId)
+        val encodedName = Uri.encode(username)
+        val wsUrl = getBaseUrl(appContext).replace("http://", "ws://").replace("https://", "wss://") +
+                "/ws/$encodedConv?userId=$encodedUid&username=$encodedName"
         val request = Request.Builder().url(wsUrl).build()
         activeWebSocket = httpClient.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                wsReconnectAttempt = 0
                 Log.d(TAG, "WebSocket connected for $conversationId")
+                while (true) {
+                    val queued = wsPendingQueue.poll() ?: break
+                    webSocket.send(queued)
+                }
             }
-override fun onMessage(webSocket: WebSocket, text: String) {
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val json = JSONObject(text)
+                    val incomingToken = json.optString("clientToken", "")
+                    if (incomingToken.isNotEmpty() && incomingToken == wsClientToken) return
+
                     when (json.optString("type")) {
                         "typing" -> {
                             val isTyping = json.optBoolean("isTyping", false)
-val from = json.optString("senderName", "")
+                            val from = json.optString("senderName", "")
                             mainHandler.post { webSocketListener?.onTypingReceived(from, isTyping) }
                         }
                         "presence" -> {
                             val uid = json.optString("userId")
-val uname = json.optString("username")
-val status = json.optString("status")
+                            val uname = json.optString("username")
+                            val status = json.optString("status")
                             mainHandler.post { webSocketListener?.onPresenceReceived(uid, uname, status) }
                         }
                         else -> {
+                            val rawContent = json.optString("content")
+                            val decryptedContent = if (rawContent.startsWith("ENC::")) {
+                                ChatCryptoHelper.decrypt(rawContent, conversationId)
+                            } else {
+                                rawContent
+                            }
+                            val mediaUrl = json.optString("mediaUrl").ifEmpty { json.optString("media_url", "") }
+                            val fileName = json.optString("fileName").ifEmpty { json.optString("file_name", "") }
+                            val senderId = json.optString("senderId").ifEmpty { json.optString("sender_id", "") }
+                            val receiverId = json.optString("receiverId").ifEmpty { json.optString("receiver_id", "") }
+                            val createdAt = json.optLong("createdAt", json.optLong("created_at", System.currentTimeMillis()))
                             val msg = ChatMessage(
                                 id = json.optString("id", UUID.randomUUID().toString()),
                                 conversationId = conversationId,
-                                senderId = json.optString("senderId"),
-                                receiverId = json.optString("receiverId"),
+                                senderId = senderId,
+                                receiverId = receiverId,
                                 type = json.optString("type", "text"),
-                                content = json.optString("content"),
-                                mediaUrl = json.optString("mediaUrl"),
+                                content = decryptedContent,
+                                mediaUrl = mediaUrl,
                                 duration = json.optInt("duration", 0),
-                                isMe = json.optString("senderId") == userId
+                                fileName = fileName,
+                                createdAt = createdAt,
+                                isMe = senderId.equals(userId, ignoreCase = true) || senderId.equals(username, ignoreCase = true)
                             )
                             mainHandler.post { webSocketListener?.onMessageReceived(msg) }
                         }
@@ -938,34 +975,68 @@ val status = json.optString("status")
                     Log.e(TAG, "WS parse error: ${e.message}")
                 }
             }
-override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.d(TAG, "WebSocket closed: $reason")
+                scheduleChatWsReconnect(appContext, conversationId)
             }
-override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "WebSocket failure: ${t.message}")
+                scheduleChatWsReconnect(appContext, conversationId)
             }
         })
     }
-fun sendWebSocketMessage(message: ChatMessage) {
+
+    private fun scheduleChatWsReconnect(appContext: Context, conversationId: String) {
+        if (wsManuallyClosed || wsActiveConvId != conversationId) return
+        val delayMs = (1500L * (1 shl wsReconnectAttempt.coerceAtMost(3))).coerceAtMost(8000L)
+        wsReconnectAttempt++
+        mainHandler.postDelayed({
+            if (!wsManuallyClosed && wsActiveConvId == conversationId) {
+                openChatWebSocket(appContext, conversationId)
+            }
+        }, delayMs)
+    }
+
+    fun sendWebSocketMessage(message: ChatMessage) {
+        val encrypted = if (message.type == "text") ChatCryptoHelper.encrypt(message.content, message.conversationId) else message.content
         val json = JSONObject().apply {
             put("id", message.id)
             put("type", message.type)
-            put("content", message.content)
+            put("content", encrypted)
             put("mediaUrl", message.mediaUrl)
+            put("media_url", message.mediaUrl)
+            put("fileName", message.fileName)
+            put("file_name", message.fileName)
             put("duration", message.duration)
             put("receiverId", message.receiverId)
+            put("createdAt", message.createdAt)
+            put("clientToken", wsClientToken)
         }
-        activeWebSocket?.send(json.toString())
+        val payload = json.toString()
+        val sent = activeWebSocket?.send(payload) ?: false
+        if (!sent) {
+            wsPendingQueue.offer(payload)
+        }
     }
-fun sendTyping(isTyping: Boolean) {
+
+    fun sendTyping(isTyping: Boolean) {
         val json = JSONObject().apply {
             put("type", "typing")
             put("isTyping", isTyping)
+            put("clientToken", wsClientToken)
         }
         activeWebSocket?.send(json.toString())
     }
-fun disconnectWebSocket() {
-        activeWebSocket?.close(1000, "User left")
+
+    fun disconnectWebSocket() {
+        wsManuallyClosed = true
+        wsActiveConvId = ""
+        wsPendingQueue.clear()
+        try {
+            activeWebSocket?.close(1000, "User left")
+        } catch (_: Exception) {}
         activeWebSocket = null
         webSocketListener = null
     }
@@ -1313,7 +1384,8 @@ override fun onResponse(call: Call, response: Response) {
         val mediaUrl: String,
         val fileName: String,
         val createdAt: Long,
-        val isOutgoing: Boolean
+        val isOutgoing: Boolean,
+        val duration: Int = 0
     )
 
     data class StoredConversation(
@@ -1478,7 +1550,8 @@ override fun onResponse(call: Call, response: Response) {
                         mediaUrl = obj.optString("media_url"),
                         fileName = obj.optString("file_name"),
                         createdAt = obj.optLong("created_at", System.currentTimeMillis()),
-                        isOutgoing = isOut
+                        isOutgoing = isOut,
+                        duration = obj.optInt("duration", 0)
                     )
                 )
             }
@@ -1500,6 +1573,7 @@ override fun onResponse(call: Call, response: Response) {
                 put("file_name", m.fileName)
                 put("created_at", m.createdAt)
                 put("is_outgoing", m.isOutgoing)
+                put("duration", m.duration)
             }
             arr.put(obj)
         }
@@ -1577,7 +1651,8 @@ override fun onResponse(call: Call, response: Response) {
                                         mediaUrl = m.optString("media_url", ""),
                                         fileName = m.optString("file_name", ""),
                                         createdAt = m.optLong("created_at", System.currentTimeMillis()),
-                                        isOutgoing = isOut
+                                        isOutgoing = isOut,
+                                        duration = m.optInt("duration", 0)
                                     )
                                 )
                             }
@@ -1611,6 +1686,7 @@ override fun onResponse(call: Call, response: Response) {
         mediaUrl: String = "",
         fileName: String = "",
         messageId: String = "msg_${System.currentTimeMillis()}_${(100..999).random()}",
+        duration: Int = 0,
         callback: (Boolean, ChatMessageItem?) -> Unit
     ) {
         val myId = getCurrentUserId(context)
@@ -1633,7 +1709,8 @@ override fun onResponse(call: Call, response: Response) {
             mediaUrl = mediaUrl,
             fileName = fileName,
             createdAt = now,
-            isOutgoing = true
+            isOutgoing = true,
+            duration = duration
         )
         // Immediately save locally for zero latency
         saveLocalChatMessage(context, convId, localMsg)
@@ -1650,6 +1727,7 @@ override fun onResponse(call: Call, response: Response) {
             put("content", encryptedContent)
             put("media_url", mediaUrl)
             put("file_name", fileName)
+            put("duration", duration)
             put("created_at", now)
         }
 
@@ -1663,10 +1741,30 @@ override fun onResponse(call: Call, response: Response) {
             reqBuilder.addHeader("Authorization", "Bearer $token")
         }
 
+        // Also push via active WebSocket if connected to this conversation for <50ms instant delivery
+        if (wsActiveConvId.equals(convId, ignoreCase = true)) {
+            try {
+                sendWebSocketMessage(
+                    ChatMessage(
+                        id = msgId,
+                        conversationId = convId,
+                        senderId = myId,
+                        receiverId = receiverId,
+                        type = type,
+                        content = text,
+                        mediaUrl = mediaUrl,
+                        duration = duration,
+                        fileName = fileName,
+                        createdAt = now,
+                        isMe = true
+                    )
+                )
+            } catch (_: Exception) {}
+        }
+
         httpClient.newCall(reqBuilder.build()).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                // Local copy is already saved
-                mainHandler.post { callback(true, localMsg) }
+                mainHandler.post { callback(false, localMsg) }
             }
 
             override fun onResponse(call: Call, response: Response) {

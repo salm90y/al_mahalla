@@ -2,6 +2,7 @@ package com.almahala.netplay.ui.compose
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
@@ -14,6 +15,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.util.UUID
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
@@ -214,8 +217,15 @@ object YouTubeRoomManager {
                                     privacyMode = privacyMode,
                                     createdAt = rObj.optLong("createdAt", System.currentTimeMillis())
                                 )
+                                val existingList = loadRoomsLocally(context).toMutableList()
+                                existingList.removeAll { it.roomId == room.roomId || it.roomCode == room.roomCode }
+                                saveRoomsListLocally(context, existingList)
                                 saveRoomLocally(context, serverRoom)
-                                mainHandler.post { onComplete(Result.success(serverRoom)) }
+                                mainHandler.post {
+                                    activeRealRooms.removeAll { it.roomId == room.roomId || it.roomId == serverRoom.roomId }
+                                    activeRealRooms.add(0, serverRoom)
+                                    onComplete(Result.success(serverRoom))
+                                }
                                 return
                             }
                         }
@@ -456,12 +466,8 @@ object YouTubeRoomManager {
         })
     }
 
-    private fun saveRoomLocally(context: Context, room: PublicYouTubeRoom) {
+    private fun saveRoomsListLocally(context: Context, list: List<PublicYouTubeRoom>) {
         try {
-            val list = loadRoomsLocally(context).toMutableList()
-            list.removeAll { it.roomId == room.roomId || it.roomCode == room.roomCode }
-            list.add(0, room)
-
             val arr = JSONArray()
             list.take(30).forEach { r ->
                 val o = JSONObject().apply {
@@ -480,6 +486,15 @@ object YouTubeRoomManager {
                 arr.put(o)
             }
             getPrefs(context).edit().putString(KEY_LOCAL_ROOMS, arr.toString()).apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun saveRoomLocally(context: Context, room: PublicYouTubeRoom) {
+        try {
+            val list = loadRoomsLocally(context).toMutableList()
+            list.removeAll { it.roomId == room.roomId || it.roomCode == room.roomCode }
+            list.add(0, room)
+            saveRoomsListLocally(context, list)
         } catch (_: Exception) {}
     }
 
@@ -578,29 +593,54 @@ class YouTubeSyncWebSocket(
     private val onVideoChangeRequestRejected: (() -> Unit)? = null,
     private val onMemberActionReceived: ((targetUserId: String, actionType: String) -> Unit)? = null,
     private val onVoiceStateReceived: ((userId: String, username: String, isTalking: Boolean) -> Unit)? = null,
-    private val onCameraStateReceived: ((userId: String, username: String, isCameraActive: Boolean, isFront: Boolean) -> Unit)? = null
+    private val onCameraStateReceived: ((userId: String, username: String, isCameraActive: Boolean, isFront: Boolean) -> Unit)? = null,
+    private val onPresenceReceived: ((userId: String, username: String, status: String) -> Unit)? = null,
+    private val onMemberHelloReceived: ((userId: String, username: String, role: String, hasCameraActive: Boolean, isFrontCamera: Boolean, isTalking: Boolean) -> Unit)? = null,
+    private val onConnectionStateChanged: ((isConnected: Boolean) -> Unit)? = null
 ) {
     private var webSocket: WebSocket? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val clientToken: String = UUID.randomUUID().toString()
+    private val outgoingQueue = ConcurrentLinkedQueue<String>()
+    private var isManuallyClosed: Boolean = false
+    private var isSocketOpen: Boolean = false
+    private var reconnectAttempt: Int = 0
     private val client = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
         .build()
 
     fun connect() {
+        isManuallyClosed = false
+        reconnectAttempt = 0
+        openSocket()
+    }
+
+    private fun openSocket() {
+        if (isManuallyClosed) return
         val baseUrl = CloudflareClient.getBaseUrl(context)
         val wsBase = baseUrl.replace("https://", "wss://").replace("http://", "ws://")
-        val userId = if (isStealthMode) "stealth_${System.currentTimeMillis()}" else CloudflareClient.getCurrentUserId(context)
+        val rawUid = CloudflareClient.getCurrentUserId(context)
+        val userId = if (isStealthMode) "stealth_${System.currentTimeMillis()}" else rawUid
         val username = if (isStealthMode) "مجهول" else CloudflareClient.getCurrentUsername(context)
         val cleanRoomId = roomId.ifBlank { "global_yt_lobby" }
 
-        val wsUrl = "$wsBase/ws/$cleanRoomId?userId=$userId&username=$username&stealth=$isStealthMode"
+        val wsUrl = "$wsBase/ws/${Uri.encode(cleanRoomId)}?userId=${Uri.encode(userId)}&username=${Uri.encode(username)}&stealth=$isStealthMode"
 
         val request = Request.Builder().url(wsUrl).build()
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                isSocketOpen = true
+                reconnectAttempt = 0
                 Log.i("YTSync", "Connected to watch-party room: $cleanRoomId (Stealth: $isStealthMode)")
+                mainHandler.post { onConnectionStateChanged?.invoke(true) }
+
+                while (true) {
+                    val queued = outgoingQueue.poll() ?: break
+                    webSocket.send(queued)
+                }
+
                 if (!isStealthMode) {
-                    // Request current playing state from host immediately upon joining
                     requestCurrentState()
                 }
             }
@@ -608,11 +648,37 @@ class YouTubeSyncWebSocket(
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val obj = JSONObject(text)
+                    val incomingToken = obj.optString("clientToken", "")
+                    if (incomingToken.isNotEmpty() && incomingToken == clientToken) return
+
                     val senderId = obj.optString("senderId", "")
                     val myId = CloudflareClient.getCurrentUserId(context)
-                    if (senderId == myId) return // Ignore self-echo
+                    if (incomingToken.isEmpty() && senderId != "server" && senderId == myId && myId.isNotBlank() && myId != "user_me") {
+                        return
+                    }
 
                     when (obj.optString("type")) {
+                        "presence" -> {
+                            val uId = obj.optString("userId", "")
+                            val uName = obj.optString("username", "")
+                            val status = obj.optString("status", "online")
+                            if (uId.isNotEmpty() && uId != myId) {
+                                mainHandler.post { onPresenceReceived?.invoke(uId, uName, status) }
+                            }
+                        }
+                        "yt_member_hello" -> {
+                            val uId = obj.optString("userId", senderId)
+                            val uName = obj.optString("username", obj.optString("senderName", "مشاهد"))
+                            val role = obj.optString("role", "مشاهد")
+                            val hasCam = obj.optBoolean("hasCameraActive", false)
+                            val isFront = obj.optBoolean("isFrontCamera", true)
+                            val isTalking = obj.optBoolean("isTalking", false)
+                            if (uId.isNotEmpty() && uId != myId) {
+                                mainHandler.post {
+                                    onMemberHelloReceived?.invoke(uId, uName, role, hasCam, isFront, isTalking)
+                                }
+                            }
+                        }
                         "yt_video_change" -> {
                             val vId = obj.optString("videoId")
                             val vTitle = obj.optString("videoTitle")
@@ -621,9 +687,16 @@ class YouTubeSyncWebSocket(
                             }
                         }
                         "yt_playback_state" -> {
+                            val vId = obj.optString("videoId", "")
+                            val vTitle = obj.optString("videoTitle", "")
                             val isPlaying = obj.optBoolean("isPlaying", true)
                             val pos = obj.optDouble("positionSec", 0.0).toFloat()
-                            mainHandler.post { onPlaybackStateReceived(isPlaying, pos) }
+                            mainHandler.post {
+                                if (vId.isNotEmpty()) {
+                                    onVideoChangeReceived(vId, vTitle)
+                                }
+                                onPlaybackStateReceived(isPlaying, pos)
+                            }
                         }
                         "yt_chat_message" -> {
                             val msgText = obj.optString("text", "")
@@ -640,11 +713,16 @@ class YouTubeSyncWebSocket(
                             mainHandler.post { onChatMessageReceived(msg) }
                         }
                         "yt_request_state" -> {
-                            // A newcomer asks for the currently playing video
-                            mainHandler.post { onStateRequested?.invoke(this@YouTubeSyncWebSocket) }
+                            val reqId = obj.optString("requesterId", senderId)
+                            val reqName = obj.optString("requesterName", obj.optString("senderName", "مشاهد"))
+                            mainHandler.post {
+                                if (reqId.isNotEmpty() && reqId != myId) {
+                                    onPresenceReceived?.invoke(reqId, reqName, "online")
+                                }
+                                onStateRequested?.invoke(this@YouTubeSyncWebSocket)
+                            }
                         }
                         "yt_video_request" -> {
-                            // Member asks host permission to change video
                             val reqId = obj.optString("requesterId")
                             val reqName = obj.optString("requesterName")
                             val reqVideoId = obj.optString("videoId")
@@ -683,18 +761,73 @@ class YouTubeSyncWebSocket(
                 }
             }
 
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                isSocketOpen = false
+                mainHandler.post { onConnectionStateChanged?.invoke(false) }
+                scheduleReconnect()
+            }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                isSocketOpen = false
                 Log.w("YTSync", "WebSocket error: ${t.message}")
+                mainHandler.post { onConnectionStateChanged?.invoke(false) }
+                scheduleReconnect()
             }
         })
+    }
+
+    private fun scheduleReconnect() {
+        if (isManuallyClosed) return
+        val delayMs = (1500L * (1 shl reconnectAttempt.coerceAtMost(3))).coerceAtMost(8000L)
+        reconnectAttempt++
+        mainHandler.postDelayed({
+            if (!isManuallyClosed) {
+                openSocket()
+            }
+        }, delayMs)
+    }
+
+    private fun safeSend(payload: JSONObject) {
+        try {
+            payload.put("clientToken", clientToken)
+            if (!payload.has("senderId")) {
+                payload.put("senderId", CloudflareClient.getCurrentUserId(context))
+            }
+            val msgStr = payload.toString()
+            val sent = if (isSocketOpen) (webSocket?.send(msgStr) == true) else false
+            if (!sent) {
+                if (outgoingQueue.size > 40) outgoingQueue.poll()
+                outgoingQueue.offer(msgStr)
+            }
+        } catch (_: Exception) {}
     }
 
     fun requestCurrentState() {
         val payload = JSONObject().apply {
             put("type", "yt_request_state")
             put("requesterId", CloudflareClient.getCurrentUserId(context))
+            put("requesterName", CloudflareClient.getCurrentUsername(context))
         }
-        webSocket?.send(payload.toString())
+        safeSend(payload)
+    }
+
+    fun broadcastMemberHello(
+        role: String,
+        hasCameraActive: Boolean,
+        isFrontCamera: Boolean,
+        isTalking: Boolean
+    ) {
+        if (isStealthMode) return
+        val payload = JSONObject().apply {
+            put("type", "yt_member_hello")
+            put("userId", CloudflareClient.getCurrentUserId(context))
+            put("username", CloudflareClient.getCurrentUsername(context))
+            put("role", role)
+            put("hasCameraActive", hasCameraActive)
+            put("isFrontCamera", isFrontCamera)
+            put("isTalking", isTalking)
+        }
+        safeSend(payload)
     }
 
     fun broadcastVideoChange(videoId: String, videoTitle: String) {
@@ -702,9 +835,8 @@ class YouTubeSyncWebSocket(
             put("type", "yt_video_change")
             put("videoId", videoId)
             put("videoTitle", videoTitle)
-            put("senderId", CloudflareClient.getCurrentUserId(context))
         }
-        webSocket?.send(payload.toString())
+        safeSend(payload)
     }
 
     fun broadcastPlaybackState(isPlaying: Boolean, positionSec: Float) {
@@ -712,20 +844,19 @@ class YouTubeSyncWebSocket(
             put("type", "yt_playback_state")
             put("isPlaying", isPlaying)
             put("positionSec", positionSec.toDouble())
-            put("senderId", CloudflareClient.getCurrentUserId(context))
         }
-        webSocket?.send(payload.toString())
+        safeSend(payload)
     }
 
     fun broadcastChatMessage(text: String) {
         val payload = JSONObject().apply {
             put("type", "yt_chat_message")
+            put("id", "${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}")
             put("text", text)
             put("senderName", CloudflareClient.getCurrentUsername(context))
-            put("senderId", CloudflareClient.getCurrentUserId(context))
             put("time", "الآن")
         }
-        webSocket?.send(payload.toString())
+        safeSend(payload)
     }
 
     fun requestVideoChange(videoId: String, videoTitle: String) {
@@ -736,7 +867,7 @@ class YouTubeSyncWebSocket(
             put("requesterId", CloudflareClient.getCurrentUserId(context))
             put("requesterName", CloudflareClient.getCurrentUsername(context))
         }
-        webSocket?.send(payload.toString())
+        safeSend(payload)
     }
 
     fun rejectVideoChange(requesterId: String) {
@@ -744,7 +875,7 @@ class YouTubeSyncWebSocket(
             put("type", "yt_video_reject")
             put("targetUserId", requesterId)
         }
-        webSocket?.send(payload.toString())
+        safeSend(payload)
     }
 
     fun broadcastMemberAction(targetUserId: String, actionType: String) {
@@ -753,7 +884,7 @@ class YouTubeSyncWebSocket(
             put("targetUserId", targetUserId)
             put("actionType", actionType)
         }
-        webSocket?.send(payload.toString())
+        safeSend(payload)
     }
 
     fun broadcastVoiceState(isTalking: Boolean) {
@@ -763,7 +894,7 @@ class YouTubeSyncWebSocket(
             put("userId", CloudflareClient.getCurrentUserId(context))
             put("username", CloudflareClient.getCurrentUsername(context))
         }
-        webSocket?.send(payload.toString())
+        safeSend(payload)
     }
 
     fun broadcastCameraState(isCameraActive: Boolean, isFront: Boolean) {
@@ -774,10 +905,13 @@ class YouTubeSyncWebSocket(
             put("userId", CloudflareClient.getCurrentUserId(context))
             put("username", CloudflareClient.getCurrentUsername(context))
         }
-        webSocket?.send(payload.toString())
+        safeSend(payload)
     }
 
     fun disconnect() {
+        isManuallyClosed = true
+        isSocketOpen = false
+        outgoingQueue.clear()
         try {
             webSocket?.close(1000, "User Left Room")
             webSocket = null

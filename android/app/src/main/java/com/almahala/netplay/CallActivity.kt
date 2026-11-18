@@ -192,6 +192,13 @@ class CallActivity : AppCompatActivity() {
             if (audioIdx != -1 && grantResults.getOrNull(audioIdx) == PackageManager.PERMISSION_GRANTED) {
                 Log.d("CallActivity", "Audio permission granted, ensuring VoIP capture starts")
                 RealVoipEngine.ensureAudioCaptureStarted(this)
+                val myUserId = com.almahala.netplay.network.CloudflareClient.getCurrentUserId(this)
+                ZegoCallManager.ensureAudioPublishingAfterPermission(
+                    context = this,
+                    roomId = callID,
+                    userId = myUserId,
+                    muted = CallSignalingManager.isMuted
+                )
             }
         }
     }

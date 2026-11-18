@@ -1,10 +1,19 @@
 package com.almahala.netplay.ui.compose
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.media.MediaRecorder
 import android.net.Uri
+import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,6 +29,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
@@ -32,7 +42,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,11 +55,109 @@ fun ChatInputBar(
     onTyping: () -> Unit = {},
     onSendFile: (Uri, String) -> Unit = { _, _ -> },
     onSendEditedPhoto: (Uri, String, Boolean) -> Unit = { _, _, _ -> },
-    onSendLocation: (Double, Double, String, String, Int) -> Unit = { _, _, _, _, _ -> }
+    onSendLocation: (Double, Double, String, String, Int) -> Unit = { _, _, _, _, _ -> },
+    onSendVoiceNote: (Uri, Int) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     var text by remember { mutableStateOf("") }
     var showAttachments by remember { mutableStateOf(false) }
+
+    // Voice Note Recording State
+    var isRecording by remember { mutableStateOf(false) }
+    var recordingSeconds by remember { mutableIntStateOf(0) }
+    var mediaRecorderRef by remember { mutableStateOf<MediaRecorder?>(null) }
+    var recordedFileRef by remember { mutableStateOf<File?>(null) }
+
+    fun stopAndReleaseRecorder(saveAndSend: Boolean) {
+        val rec = mediaRecorderRef
+        val outFile = recordedFileRef
+        val dur = recordingSeconds.coerceAtLeast(1)
+        mediaRecorderRef = null
+        isRecording = false
+        recordingSeconds = 0
+        try {
+            rec?.stop()
+        } catch (_: Exception) {}
+        try {
+            rec?.reset()
+            rec?.release()
+        } catch (_: Exception) {}
+
+        if (saveAndSend && outFile != null && outFile.exists() && outFile.length() > 512L) {
+            onSendVoiceNote(Uri.fromFile(outFile), dur)
+        } else {
+            try { outFile?.delete() } catch (_: Exception) {}
+            if (saveAndSend) {
+                Toast.makeText(context, "التسجيل الصوتي قصير جداً", Toast.LENGTH_SHORT).show()
+            }
+        }
+        recordedFileRef = null
+    }
+
+    fun startVoiceRecording() {
+        if (isRecording) return
+        try {
+            val dir = File(context.cacheDir, "voice_notes").apply { mkdirs() }
+            val outFile = File(dir, "voice_${System.currentTimeMillis()}.m4a")
+            @Suppress("DEPRECATION")
+            val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                MediaRecorder(context)
+            } else {
+                MediaRecorder()
+            }
+            recorder.apply {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                setAudioEncodingBitRate(96000)
+                setAudioSamplingRate(44100)
+                setOutputFile(outFile.absolutePath)
+                prepare()
+                start()
+            }
+            mediaRecorderRef = recorder
+            recordedFileRef = outFile
+            recordingSeconds = 0
+            isRecording = true
+        } catch (e: Exception) {
+            try { mediaRecorderRef?.release() } catch (_: Exception) {}
+            mediaRecorderRef = null
+            recordedFileRef = null
+            isRecording = false
+            Toast.makeText(context, "تعذر تشغيل الميكروفون للتسجيل", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    val recordAudioPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            startVoiceRecording()
+        } else {
+            Toast.makeText(context, "يرجى منح إذن الميكروفون للتسجيل الصوتي", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    LaunchedEffect(isRecording) {
+        if (isRecording) {
+            while (isRecording) {
+                delay(1000L)
+                if (isRecording) recordingSeconds++
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                mediaRecorderRef?.stop()
+            } catch (_: Exception) {}
+            try {
+                mediaRecorderRef?.release()
+            } catch (_: Exception) {}
+            mediaRecorderRef = null
+        }
+    }
 
     // Image editing dialog state
     var selectedImageForEditing by remember { mutableStateOf<Uri?>(null) }
@@ -112,122 +223,95 @@ fun ChatInputBar(
             .padding(horizontal = 12.dp, vertical = 8.dp),
         contentAlignment = Alignment.BottomCenter
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            // 1. Attachment (+) Button
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(Color.White, CircleShape)
-                    .border(1.dp, Color(0xFFE2E8F0), CircleShape)
-                    .clickable {
-                        coroutineScope.launch {
-                            if (showAttachments) {
-                                sheetState.hide()
-                                showAttachments = false
-                            } else {
-                                showAttachments = true
-                            }
-                        }
-                    },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Add,
-                    contentDescription = "مرفقات",
-                    tint = Color(0xFF2563EB),
-                    modifier = Modifier
-                        .size(22.dp)
-                        .rotate(rotation)
-                )
-            }
+        if (isRecording) {
+            val pulseTransition = rememberInfiniteTransition(label = "rec_pulse")
+            val dotAlpha by pulseTransition.animateFloat(
+                initialValue = 0.25f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(600, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "rec_alpha"
+            )
+            val mins = recordingSeconds / 60
+            val secs = recordingSeconds % 60
+            val timeStr = String.format("%02d:%02d", mins, secs)
 
-            // 2. Center Text Field & Actions
             Row(
                 modifier = Modifier
-                    .weight(1f)
+                    .fillMaxWidth()
                     .heightIn(min = 44.dp)
                     .clip(RoundedCornerShape(24.dp))
-                    .background(Color.White, RoundedCornerShape(24.dp))
-                    .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(24.dp))
-                    .padding(horizontal = 14.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .background(Color(0xFFFEF2F2), RoundedCornerShape(24.dp))
+                    .border(1.dp, Color(0xFFFECACA), RoundedCornerShape(24.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                BasicTextField(
-                    value = text,
-                    onValueChange = {
-                        text = it
-                        onTyping()
-                    },
-                    modifier = Modifier.weight(1f),
-                    textStyle = TextStyle(
-                        fontSize = 15.sp,
-                        fontFamily = TajawalFontFamily,
-                        color = Color(0xFF0F172A)
-                    ),
-                    cursorBrush = SolidColor(Color(0xFF2563EB)),
-                    decorationBox = { innerTextField ->
-                        if (text.isEmpty()) {
-                            Text(
-                                text = "اكتب رسالة...",
-                                color = Color(0xFF94A3B8),
-                                fontSize = 14.sp,
-                                fontFamily = TajawalFontFamily
-                            )
-                        }
-                        innerTextField()
-                    }
-                )
-
-                Spacer(modifier = Modifier.width(6.dp))
-
-                // Quick photo / camera action with built-in Editor
-                IconButton(
-                    onClick = { photoPickerLauncher.launch("image/*") },
-                    modifier = Modifier.size(30.dp)
+                // Cancel button
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(Color.White, CircleShape)
+                        .border(1.dp, Color(0xFFFECACA), CircleShape)
+                        .clickable { stopAndReleaseRecorder(saveAndSend = false) },
+                    contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.CameraAlt,
-                        contentDescription = "التقاط صورة",
-                        tint = Color(0xFF64748B),
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = "إلغاء التسجيل",
+                        tint = Color(0xFFDC2626),
                         modifier = Modifier.size(19.dp)
                     )
                 }
-            }
 
-            // 3. Send or Mic Button
-            var lastSendTimestamp by remember { mutableLongStateOf(0L) }
-            if (text.isNotBlank()) {
+                // Pulsing red indicator & duration
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .alpha(dotAlpha)
+                            .background(Color(0xFFEF4444), CircleShape)
+                    )
+                    Text(
+                        text = "جاري التسجيل الصوتي • $timeStr",
+                        fontFamily = TajawalFontFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp,
+                        color = Color(0xFF991B1B)
+                    )
+                }
+
+                // Send Voice Note button
                 Box(
                     modifier = Modifier
-                        .size(42.dp)
+                        .size(38.dp)
                         .clip(CircleShape)
                         .background(Color(0xFF2563EB), CircleShape)
-                        .clickable {
-                            val now = System.currentTimeMillis()
-                            if (now - lastSendTimestamp > 350L) {
-                                lastSendTimestamp = now
-                                val trimmed = text.trim()
-                                if (trimmed.isNotEmpty()) {
-                                    onSendText(trimmed)
-                                    text = ""
-                                }
-                            }
-                        },
+                        .clickable { stopAndReleaseRecorder(saveAndSend = true) },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = Icons.Default.Send,
-                        contentDescription = "إرسال",
+                        contentDescription = "إرسال التسجيل",
                         tint = Color.White,
-                        modifier = Modifier.size(19.dp)
+                        modifier = Modifier.size(18.dp)
                     )
                 }
-            } else {
+            }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // 1. Attachment (+) Button
                 Box(
                     modifier = Modifier
                         .size(42.dp)
@@ -235,16 +319,135 @@ fun ChatInputBar(
                         .background(Color.White, CircleShape)
                         .border(1.dp, Color(0xFFE2E8F0), CircleShape)
                         .clickable {
-                            Toast.makeText(context, "اضغط مطولاً للتسجيل الصوتي", Toast.LENGTH_SHORT).show()
+                            coroutineScope.launch {
+                                if (showAttachments) {
+                                    sheetState.hide()
+                                    showAttachments = false
+                                } else {
+                                    showAttachments = true
+                                }
+                            }
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Mic,
-                        contentDescription = "تسجيل صوتي",
-                        tint = Color(0xFF64748B),
-                        modifier = Modifier.size(20.dp)
+                        imageVector = Icons.Default.Add,
+                        contentDescription = "مرفقات",
+                        tint = Color(0xFF2563EB),
+                        modifier = Modifier
+                            .size(22.dp)
+                            .rotate(rotation)
                     )
+                }
+
+                // 2. Center Text Field & Actions
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 44.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color.White, RoundedCornerShape(24.dp))
+                        .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(24.dp))
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    BasicTextField(
+                        value = text,
+                        onValueChange = {
+                            text = it
+                            onTyping()
+                        },
+                        modifier = Modifier.weight(1f),
+                        textStyle = TextStyle(
+                            fontSize = 15.sp,
+                            fontFamily = TajawalFontFamily,
+                            color = Color(0xFF0F172A)
+                        ),
+                        cursorBrush = SolidColor(Color(0xFF2563EB)),
+                        decorationBox = { innerTextField ->
+                            if (text.isEmpty()) {
+                                Text(
+                                    text = "اكتب رسالة...",
+                                    color = Color(0xFF94A3B8),
+                                    fontSize = 14.sp,
+                                    fontFamily = TajawalFontFamily
+                                )
+                            }
+                            innerTextField()
+                        }
+                    )
+
+                    Spacer(modifier = Modifier.width(6.dp))
+
+                    // Quick photo / camera action with built-in Editor
+                    IconButton(
+                        onClick = { photoPickerLauncher.launch("image/*") },
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CameraAlt,
+                            contentDescription = "التقاط صورة",
+                            tint = Color(0xFF64748B),
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                }
+
+                // 3. Send or Mic Button
+                var lastSendTimestamp by remember { mutableLongStateOf(0L) }
+                if (text.isNotBlank()) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF2563EB), CircleShape)
+                            .clickable {
+                                val now = System.currentTimeMillis()
+                                if (now - lastSendTimestamp > 350L) {
+                                    lastSendTimestamp = now
+                                    val trimmed = text.trim()
+                                    if (trimmed.isNotEmpty()) {
+                                        onSendText(trimmed)
+                                        text = ""
+                                    }
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = "إرسال",
+                            tint = Color.White,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(Color.White, CircleShape)
+                            .border(1.dp, Color(0xFFE2E8F0), CircleShape)
+                            .clickable {
+                                val hasPerm = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (hasPerm) {
+                                    startVoiceRecording()
+                                } else {
+                                    recordAudioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Mic,
+                            contentDescription = "تسجيل صوتي",
+                            tint = Color(0xFF2563EB),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
         }

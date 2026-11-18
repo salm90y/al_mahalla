@@ -188,8 +188,8 @@ object CallSignalingManager {
         startCallerRingbackTone()
 
         val myUser = UserManager.getCurrentUser(context)
-        val myId = myUser?.username ?: CloudflareClient.getCurrentUserId(context)
-        val myName = myUser?.fullName?.ifEmpty { myId } ?: myId
+        val myId = CloudflareClient.getCurrentUserId(context)
+        val myName = myUser?.fullName?.ifEmpty { myUser.username } ?: CloudflareClient.getCurrentUsername(context)
         val myAvatar = myUser?.avatarUrl ?: ""
 
         // Send real-time call signal
@@ -208,7 +208,7 @@ object CallSignalingManager {
         startSignalingPoller(context, roomId, targetUserId, isOutgoing = true)
 
         // Start Zego Audio & Video Call Engine
-        ZegoCallManager.onRemoteUserJoined = { remoteUserId ->
+        ZegoCallManager.onRemoteUserJoined = { _ ->
             scope.launch(Dispatchers.Main) {
                 if (callState != CallState.CONNECTED) {
                     stopAllSounds(context)
@@ -232,7 +232,9 @@ object CallSignalingManager {
             isVideo = isVideo,
             isOutgoing = true,
             onConnected = {
-                // Room joined locally, keep state OUTGOING/RINGING until recipient responds
+                // Room joined locally, ensure mic & audio state match CallSignalingManager
+                ZegoCallManager.setMicrophoneMute(isMuted)
+                ZegoCallManager.setSpeakerEnabled(context, isSpeakerOn)
             }
         )
 
@@ -283,7 +285,7 @@ object CallSignalingManager {
 
         // Start Zego Call Session immediately
         val myUserId = CloudflareClient.getCurrentUserId(context)
-        val myUserName = UserManager.getCurrentUser(context)?.username ?: "user"
+        val myUserName = UserManager.getCurrentUser(context)?.username ?: CloudflareClient.getCurrentUsername(context)
         ZegoCallManager.startCall(
             context = context,
             roomId = roomId,
@@ -293,6 +295,8 @@ object CallSignalingManager {
             isOutgoing = false,
             onConnected = {
                 callState = CallState.CONNECTED
+                ZegoCallManager.setMicrophoneMute(isMuted)
+                ZegoCallManager.setSpeakerEnabled(context, isSpeakerOn)
             }
         )
 
@@ -493,7 +497,7 @@ object CallSignalingManager {
         ringbackJob = scope.launch(Dispatchers.IO) {
             try {
                 toneGenerator = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 75)
-                while (isActive && (callState == CallState.CONNECTING || callState == CallState.RINGING)) {
+                while (isActive && (callState == CallState.OUTGOING || callState == CallState.CONNECTING || callState == CallState.RINGING)) {
                     // Standard telephone ringback tone: 1.5s tone, 3s silence
                     toneGenerator?.startTone(ToneGenerator.TONE_SUP_RINGTONE, 1500)
                     delay(4500)
