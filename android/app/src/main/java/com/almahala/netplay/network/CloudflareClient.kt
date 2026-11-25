@@ -613,7 +613,8 @@ override fun onResponse(call: Call, response: Response) {
                     if (response.isSuccessful) {
                         try {
                             val json = JSONObject(response.body?.string() ?: "{}")
-val array = json.optJSONArray("friends") ?: JSONArray()
+                            val array = json.optJSONArray("friends") ?: JSONArray()
+                            val list = mutableListOf<FriendItem>()
                             for (i in 0 until array.length()) {
                                 val item = array.getJSONObject(i)
                                 val parsed = parseFriend(item)
