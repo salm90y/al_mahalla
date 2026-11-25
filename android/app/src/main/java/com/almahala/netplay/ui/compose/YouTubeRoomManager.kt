@@ -17,6 +17,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
 
@@ -83,8 +84,8 @@ object YouTubeRoomManager {
         .connectTimeout(12, TimeUnit.SECONDS)
         .build()
 
-    // In-memory list of genuine real active rooms (NO fake mock rooms)
-    val activeRealRooms = mutableListOf<PublicYouTubeRoom>()
+    // In-memory list of genuine real active rooms (Thread-safe for UI & background updates)
+    val activeRealRooms = CopyOnWriteArrayList<PublicYouTubeRoom>()
 
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -109,20 +110,22 @@ object YouTubeRoomManager {
     fun updateRoomVideo(context: Context, roomId: String, videoId: String, videoTitle: String) {
         val thumb = "https://img.youtube.com/vi/$videoId/hqdefault.jpg"
 
-        // 1. In-memory update
-        val inMemIndex = activeRealRooms.indexOfFirst { it.roomId == roomId }
-        if (inMemIndex >= 0) {
-            val r = activeRealRooms[inMemIndex]
-            val updated = r.copy(videoId = videoId, currentVideoTitle = videoTitle, thumbnailUrl = thumb)
-            activeRealRooms[inMemIndex] = updated
-            saveRoomLocally(context, updated)
-        } else {
-            // Check local storage
-            val localList = loadRoomsLocally(context).toMutableList()
-            val loc = localList.find { it.roomId == roomId }
-            if (loc != null) {
-                val updated = loc.copy(videoId = videoId, currentVideoTitle = videoTitle, thumbnailUrl = thumb)
+        // 1. In-memory thread-safe update
+        synchronized(activeRealRooms) {
+            val inMemIndex = activeRealRooms.indexOfFirst { it.roomId == roomId }
+            if (inMemIndex >= 0) {
+                val r = activeRealRooms[inMemIndex]
+                val updated = r.copy(videoId = videoId, currentVideoTitle = videoTitle, thumbnailUrl = thumb)
+                activeRealRooms[inMemIndex] = updated
                 saveRoomLocally(context, updated)
+            } else {
+                // Check local storage
+                val localList = loadRoomsLocally(context).toMutableList()
+                val loc = localList.find { it.roomId == roomId }
+                if (loc != null) {
+                    val updated = loc.copy(videoId = videoId, currentVideoTitle = videoTitle, thumbnailUrl = thumb)
+                    saveRoomLocally(context, updated)
+                }
             }
         }
 

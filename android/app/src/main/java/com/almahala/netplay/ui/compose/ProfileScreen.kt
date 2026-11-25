@@ -29,6 +29,7 @@ import coil.compose.AsyncImage
 import com.almahala.netplay.AuthActivity
 import com.almahala.netplay.SettingsActivity
 import com.almahala.netplay.UserManager
+import com.almahala.netplay.network.AppInfoHelper
 
 @Composable
 fun ProfileScreen(
@@ -41,6 +42,10 @@ fun ProfileScreen(
     val displayName = currentUser?.fullName?.ifEmpty { username } ?: "Ashah Mahan"
     val phoneOrStatus = if (!currentUser?.email.isNullOrEmpty()) currentUser?.email!! else "+964 770 123 4567"
     val roleBadge = currentUser?.role ?: "VIP Pro Player"
+    val appName = remember { AppInfoHelper.getAppName(context) }
+    val appVersionName = remember { AppInfoHelper.getVersionName(context) }
+    val appVersionCode = remember { AppInfoHelper.getVersionCode(context) }
+    var showAppInfoDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -244,6 +249,14 @@ fun ProfileScreen(
                         )
                         HorizontalDivider(color = Color(0xFF283256), thickness = 0.8.dp)
                         ProfileActionRow(
+                            icon = Icons.Default.Info,
+                            badgeColor = Color(0xFF00D2D3),
+                            title = "معلومات التطبيق",
+                            subtitle = "$appName • الإصدار v$appVersionName ($appVersionCode)",
+                            onClick = { showAppInfoDialog = true }
+                        )
+                        HorizontalDivider(color = Color(0xFF283256), thickness = 0.8.dp)
+                        ProfileActionRow(
                             icon = Icons.Default.Logout,
                             badgeColor = Color(0xFFFF4757),
                             title = "Logout",
@@ -261,6 +274,52 @@ fun ProfileScreen(
                 }
             }
         }
+    }
+
+    if (showAppInfoDialog) {
+        AlertDialog(
+            onDismissRequest = { showAppInfoDialog = false },
+            containerColor = Color(0xFF161C33),
+            shape = RoundedCornerShape(20.dp),
+            title = {
+                Text(
+                    text = "معلومات التطبيق",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AlMahallaHeroLogo(size = 80.dp)
+                    Text(
+                        text = "$appName (المحلة)",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "الإصدار: v$appVersionName (رقم البناء $appVersionCode)",
+                        color = Color(0xFF00D2D3),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "الحزمة: ${context.packageName}",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 12.sp
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showAppInfoDialog = false }) {
+                    Text("إغلاق", color = Color(0xFF00D2D3), fontWeight = FontWeight.Bold)
+                }
+            }
+        )
     }
 }
 

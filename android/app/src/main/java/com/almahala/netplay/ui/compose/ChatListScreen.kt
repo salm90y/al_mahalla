@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.SubcomposeAsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
 import com.almahala.netplay.SettingsActivity
 import com.almahala.netplay.UserManager
 import com.almahala.netplay.network.CloudflareClient
@@ -88,11 +90,35 @@ fun ChatListScreen(
     }
     var conversations by remember { mutableStateOf<List<ChatConversation>>(initialConversations) }
     var friendAvatarMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    val attemptedAvatarLookups = remember { mutableStateMapOf<String, Boolean>() }
     var showAdminDialog by remember { mutableStateOf(false) }
 
     val currentUser = remember { UserManager.getCurrentUser(context) }
     val isAdmin = remember(currentUser) {
         currentUser != null && (currentUser.isAdmin || currentUser.role == "مشرف" || currentUser.role == "مدير" || currentUser.username.equals("ahmed", ignoreCase = true))
+    }
+
+    // Proactively resolve any missing contact avatars from /users/status so avatars show in the list immediately
+    LaunchedEffect(conversations) {
+        conversations.forEach { conv ->
+            val lookupKey = conv.id.ifBlank { conv.name }.lowercase()
+            if (conv.avatar.isBlank() && lookupKey.isNotBlank() && attemptedAvatarLookups[lookupKey] != true) {
+                attemptedAvatarLookups[lookupKey] = true
+                CloudflareClient.fetchUserAvatarAndStatus(context, conv.id, conv.name) { fetchedAvatar, online ->
+                    if (fetchedAvatar.isNotBlank()) {
+                        friendAvatarMap = friendAvatarMap + buildMap {
+                            if (conv.id.isNotBlank()) put(conv.id, fetchedAvatar)
+                            if (conv.name.isNotBlank()) put(conv.name.lowercase(), fetchedAvatar)
+                        }
+                        conversations = conversations.map { item ->
+                            if (item.id.equals(conv.id, ignoreCase = true) || item.name.equals(conv.name, ignoreCase = true)) {
+                                item.copy(avatar = fetchedAvatar, isOnline = online || item.isOnline)
+                            } else item
+                        }
+                    }
+                }
+            }
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -107,7 +133,7 @@ fun ChatListScreen(
                     }
                 }
                 if (map.isNotEmpty()) {
-                    friendAvatarMap = map
+                    friendAvatarMap = friendAvatarMap + map
                     conversations = conversations.map { conv ->
                         if (conv.avatar.isBlank()) {
                             val fromFriend = map[conv.id] ?: map[conv.name.lowercase()] ?: ""
@@ -444,7 +470,7 @@ fun ChatListScreen(
                     .fillMaxWidth()
                     .weight(1f)
             ) {
-                items(filteredConversations) { conv ->
+                items(filteredConversations, key = { it.id.ifBlank { it.name } }) { conv ->
                     val encodedName = try { java.net.URLEncoder.encode(conv.name, "UTF-8") } catch (_: Exception) { conv.name }
                     Column(
                         modifier = Modifier
@@ -478,15 +504,25 @@ fun ChatListScreen(
                                             .background(Color(0xFFEEF4FB)),
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        val displayAvatar = conv.avatar.ifBlank {
+                                        val rawAvatar = conv.avatar.ifBlank {
                                             friendAvatarMap[conv.id]
                                                 ?: friendAvatarMap[conv.name.lowercase()]
                                                 ?: CloudflareClient.getCachedUserAvatar(context, conv.id, conv.name)
                                         }
+                                        val displayAvatar = CloudflareClient.normalizeAvatarUrl(context, rawAvatar)
                                         val initialChar = conv.name.take(1).uppercase().ifEmpty { "ص" }
                                         if (displayAvatar.isNotBlank()) {
+                                            val avatarRequest = remember(displayAvatar) {
+                                                ImageRequest.Builder(context)
+                                                    .data(displayAvatar)
+                                                    .crossfade(true)
+                                                    .diskCachePolicy(CachePolicy.ENABLED)
+                                                    .memoryCachePolicy(CachePolicy.ENABLED)
+                                                    .networkCachePolicy(CachePolicy.ENABLED)
+                                                    .build()
+                                            }
                                             SubcomposeAsyncImage(
-                                                model = displayAvatar,
+                                                model = avatarRequest,
                                                 contentDescription = conv.name,
                                                 modifier = Modifier
                                                     .fillMaxSize()

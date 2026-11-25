@@ -369,12 +369,13 @@ val userObj = json.optJSONObject("user")
         pass: String,
         email: String? = null,
         avatarUrl: String? = null,
+        phone: String? = null,
         callback: (Boolean, String?, com.almahala.netplay.UserProfile?) -> Unit
     ) {
         val currentBase = getBaseUrl(context)
-        performRegister(context, currentBase, username, pass, email, avatarUrl) { success, errorMsg, user ->
+        performRegister(context, currentBase, username, pass, email, avatarUrl, phone) { success, errorMsg, user ->
             if (!success && currentBase == DEFAULT_BASE_URL && (errorMsg?.contains("404") == true || errorMsg?.contains("المسار غير موجود") == true || errorMsg?.contains("تعذر الاتصال") == true)) {
-                performRegister(context, FALLBACK_BASE_URL, username, pass, email, avatarUrl) { fSuccess, fError, fUser ->
+                performRegister(context, FALLBACK_BASE_URL, username, pass, email, avatarUrl, phone) { fSuccess, fError, fUser ->
                     if (fSuccess) {
                         setBaseUrl(context, FALLBACK_BASE_URL)
                     }
@@ -392,6 +393,7 @@ private fun performRegister(
         pass: String,
         email: String? = null,
         avatarUrl: String? = null,
+        phone: String? = null,
         callback: (Boolean, String?, com.almahala.netplay.UserProfile?) -> Unit
     ) {
         val url = "$baseUrl/auth/register"
@@ -400,6 +402,7 @@ private fun performRegister(
             put("password", pass.trim())
             if (!email.isNullOrEmpty()) put("email", email.trim())
             if (!avatarUrl.isNullOrEmpty()) put("avatar_url", avatarUrl)
+            if (!phone.isNullOrEmpty()) put("phone", phone.trim())
         }
 val requestBody = bodyObj.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
 val request = Request.Builder()
@@ -427,7 +430,7 @@ val profile = com.almahala.netplay.UserProfile(
                                     createdAt = userObj.optLong("created_at", System.currentTimeMillis()),
                                     fullName = userObj.optString("username"),
                                     role = if (userObj.optString("username").lowercase() == "ahmed") "مشرف" else "عضو",
-                                    avatar = userObj.optString("avatar_url", ""),
+                                    avatar = normalizeAvatarUrl(context, userObj.optString("avatar_url", "")),
                                     email = userObj.optString("email", "")
                                 )
                                 UserManager.saveAuthenticatedSession(context, profile, token)
@@ -448,6 +451,171 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
                 }
             }
         })
+    }
+
+    private fun deriveSocialSecret(prefix: String, identifier: String): String {
+        val raw = "$prefix:${identifier.trim().lowercase()}"
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(raw.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }.take(32)
+    }
+
+    fun loginOrRegisterWithGoogle(
+        context: Context,
+        googleEmail: String,
+        displayName: String? = null,
+        callback: (Boolean, String?, com.almahala.netplay.UserProfile?) -> Unit
+    ) {
+        val emailLower = googleEmail.trim().lowercase()
+        if (!emailLower.contains("@") || emailLower.length < 5) {
+            mainHandler.post { callback(false, "بريد جوجل غير صالح", null) }
+            return
+        }
+
+        val prefs = getPrefs(context)
+        val mappingKey = "google_user_$emailLower"
+        val emailHashFull = deriveSocialSecret("AlMahallaGoogleAuthV1", emailLower)
+        val rawPrefix = emailLower.substringBefore("@")
+            .replace(Regex("[^a-z0-9_]"), "_")
+            .trim('_')
+            .ifEmpty { "user" }
+            .take(14)
+        val baseUsername = if (rawPrefix.length >= 3) rawPrefix else "${rawPrefix}_${emailHashFull.take(4)}"
+        val resolvedUsername = prefs.getString(mappingKey, null)?.takeIf { it.length >= 3 } ?: baseUsername
+        val secretPass = emailHashFull
+        val friendlyName = displayName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: emailLower.substringBefore("@")
+
+        fun applyFriendlyProfile(profile: com.almahala.netplay.UserProfile, activeUsername: String) {
+            prefs.edit().putString(mappingKey, activeUsername).apply()
+            val updated = profile.copy(
+                fullName = friendlyName,
+                email = profile.email.ifEmpty { emailLower }
+            )
+            val token = getAuthToken(context).orEmpty()
+            if (token.isNotEmpty()) {
+                UserManager.saveAuthenticatedSession(context, updated, token)
+            }
+            com.almahala.netplay.AppSettingsManager.setUserName(context, friendlyName)
+            callback(true, null, updated)
+        }
+
+        login(context, resolvedUsername, secretPass) { loginOk, _, loginUser ->
+            if (loginOk && loginUser != null) {
+                applyFriendlyProfile(loginUser, resolvedUsername)
+            } else {
+                register(
+                    context = context,
+                    username = resolvedUsername,
+                    pass = secretPass,
+                    email = emailLower
+                ) { regOk, regErr, regUser ->
+                    if (regOk && regUser != null) {
+                        applyFriendlyProfile(regUser, resolvedUsername)
+                    } else if (regErr?.contains("البريد الإلكتروني مسجل مسبقاً") == true) {
+                        callback(
+                            false,
+                            "هذا البريد مسجل مسبقاً بكلمة مرور، يرجى تسجيل الدخول باسم المستخدم.",
+                            null
+                        )
+                    } else if (regErr?.contains("اسم المستخدم مسجل مسبقاً") == true) {
+                        val altUsername = "${baseUsername.take(10)}_${emailHashFull.take(5)}"
+                        login(context, altUsername, secretPass) { altLoginOk, _, altLoginUser ->
+                            if (altLoginOk && altLoginUser != null) {
+                                applyFriendlyProfile(altLoginUser, altUsername)
+                            } else {
+                                register(
+                                    context = context,
+                                    username = altUsername,
+                                    pass = secretPass,
+                                    email = emailLower
+                                ) { altRegOk, altRegErr, altRegUser ->
+                                    if (altRegOk && altRegUser != null) {
+                                        applyFriendlyProfile(altRegUser, altUsername)
+                                    } else {
+                                        callback(false, altRegErr ?: "تعذر التسجيل بحساب جوجل", null)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        callback(false, regErr ?: "تعذر تسجيل الدخول بحساب جوجل", null)
+                    }
+                }
+            }
+        }
+    }
+
+    fun loginOrRegisterWithWhatsApp(
+        context: Context,
+        cleanPhone: String,
+        displayName: String? = null,
+        callback: (Boolean, String?, com.almahala.netplay.UserProfile?) -> Unit
+    ) {
+        val digits = WhatsAppOtpManager.normalizePhoneDigits(cleanPhone)
+        if (digits.length < 8) {
+            mainHandler.post { callback(false, "رقم الواتساب غير صالح", null) }
+            return
+        }
+
+        val prefs = getPrefs(context)
+        val mappingKey = "wa_user_$digits"
+        val waHash = deriveSocialSecret("AlMahallaWhatsAppAuthV1", digits)
+        val defaultUsername = "wa_${digits.takeLast(10)}"
+        val resolvedUsername = prefs.getString(mappingKey, null)?.takeIf { it.length >= 3 } ?: defaultUsername
+        val formattedPhone = "+$digits"
+        val friendlyName = displayName?.trim()?.takeIf { it.isNotEmpty() } ?: formattedPhone
+
+        fun applyWhatsAppProfile(profile: com.almahala.netplay.UserProfile, activeUsername: String) {
+            prefs.edit().putString(mappingKey, activeUsername).apply()
+            val updated = profile.copy(fullName = friendlyName)
+            val token = getAuthToken(context).orEmpty()
+            if (token.isNotEmpty()) {
+                UserManager.saveAuthenticatedSession(context, updated, token)
+            }
+            com.almahala.netplay.AppSettingsManager.setUserName(context, friendlyName)
+            com.almahala.netplay.AppSettingsManager.setUserPhone(context, formattedPhone)
+            callback(true, null, updated)
+        }
+
+        login(context, resolvedUsername, waHash) { loginOk, _, loginUser ->
+            if (loginOk && loginUser != null) {
+                applyWhatsAppProfile(loginUser, resolvedUsername)
+            } else {
+                register(
+                    context = context,
+                    username = resolvedUsername,
+                    pass = waHash,
+                    phone = formattedPhone
+                ) { regOk, regErr, regUser ->
+                    if (regOk && regUser != null) {
+                        applyWhatsAppProfile(regUser, resolvedUsername)
+                    } else if (regErr?.contains("اسم المستخدم مسجل مسبقاً") == true) {
+                        val altUsername = "wa_${digits.takeLast(6)}_${waHash.take(4)}"
+                        login(context, altUsername, waHash) { altOk, _, altUser ->
+                            if (altOk && altUser != null) {
+                                applyWhatsAppProfile(altUser, altUsername)
+                            } else {
+                                register(
+                                    context = context,
+                                    username = altUsername,
+                                    pass = waHash,
+                                    phone = formattedPhone
+                                ) { altRegOk, altRegErr, altRegUser ->
+                                    if (altRegOk && altRegUser != null) {
+                                        applyWhatsAppProfile(altRegUser, altUsername)
+                                    } else {
+                                        callback(false, altRegErr ?: "تعذر التسجيل برقم الواتساب", null)
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        callback(false, regErr ?: "تعذر تسجيل الدخول عبر واتساب", null)
+                    }
+                }
+            }
+        }
     }
     /**
      * Validates JWT token with GET /auth/me
@@ -1943,6 +2111,108 @@ override fun onResponse(call: Call, response: Response) {
         enqueueAttempt(0)
     }
 
+    private fun updateLocalConversationAvatarAndStatus(
+        context: Context,
+        otherUserId: String,
+        otherUsername: String,
+        avatarUrl: String,
+        status: String,
+        lastSeen: Long
+    ) {
+        if (otherUserId.isBlank() && otherUsername.isBlank()) return
+        val current = getLocalConversationsRaw(context).toMutableList()
+        val idx = current.indexOfFirst {
+            (otherUserId.isNotBlank() && it.otherUserId.equals(otherUserId, ignoreCase = true)) ||
+                (otherUsername.isNotBlank() && it.otherUsername.equals(otherUsername, ignoreCase = true))
+        }
+        if (idx < 0) return
+        val existing = current[idx]
+        val normAvatar = normalizeAvatarUrl(context, avatarUrl)
+        if (normAvatar.isNotBlank()) {
+            cacheUserAvatar(context, existing.otherUserId, existing.otherUsername, normAvatar)
+        }
+        val finalAvatar = normAvatar.ifBlank { existing.otherAvatar }
+        val finalName = if (existing.otherUsername.isBlank() || existing.otherUsername == existing.otherUserId) {
+            otherUsername.ifBlank { existing.otherUsername }
+        } else existing.otherUsername
+        current[idx] = existing.copy(
+            otherUsername = finalName,
+            otherAvatar = finalAvatar,
+            otherStatus = status.ifBlank { existing.otherStatus },
+            otherLastSeen = if (lastSeen > 0L) lastSeen else existing.otherLastSeen
+        )
+        val arr = JSONArray()
+        current.forEach { c ->
+            arr.put(JSONObject().apply {
+                put("other_user_id", c.otherUserId)
+                put("other_username", c.otherUsername)
+                put("other_avatar", c.otherAvatar)
+                put("last_message_text", c.lastMessageText)
+                put("last_message_at", c.lastMessageAt)
+                put("unread_count", c.unreadCount)
+                put("other_status", c.otherStatus)
+                put("other_last_seen", c.otherLastSeen)
+            })
+        }
+        getPrefs(context).edit().putString("local_conversations_list", arr.toString()).apply()
+    }
+
+    /**
+     * Fetch user avatar & real-time online status from /users/status and cache locally
+     */
+    fun fetchUserAvatarAndStatus(
+        context: Context,
+        userId: String,
+        username: String = "",
+        callback: (avatarUrl: String, isOnline: Boolean) -> Unit
+    ) {
+        val queryKey = userId.trim().ifBlank { username.trim() }
+        if (queryKey.isBlank()) {
+            mainHandler.post { callback("", false) }
+            return
+        }
+        val token = getAuthToken(context)
+        val encodedId = Uri.encode(queryKey)
+        val url = "${getBaseUrl(context)}/users/status?userId=$encodedId"
+        val reqBuilder = Request.Builder().url(url)
+        if (!token.isNullOrEmpty()) {
+            reqBuilder.addHeader("Authorization", "Bearer $token")
+        }
+
+        httpClient.newCall(reqBuilder.build()).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                val cached = getCachedUserAvatar(context, userId, username)
+                mainHandler.post { callback(cached, false) }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    if (resp.isSuccessful) {
+                        try {
+                            val json = JSONObject(resp.body?.string() ?: "{}")
+                            val respId = json.optString("user_id", userId)
+                            val respName = json.optString("username", username)
+                            val normAvatar = normalizeAvatarUrl(context, json.optString("avatar_url"))
+                            val isOnline = json.optBoolean("is_online", false)
+                            val statusStr = json.optString("status", if (isOnline) "online" else "offline")
+                            val lastSeen = json.optLong("last_seen", 0L)
+                            if (normAvatar.isNotBlank()) {
+                                cacheUserAvatar(context, respId, respName, normAvatar)
+                                if (userId.isNotBlank()) cacheUserAvatar(context, userId, username, normAvatar)
+                            }
+                            updateLocalConversationAvatarAndStatus(context, respId.ifBlank { userId }, respName.ifBlank { username }, normAvatar, statusStr, lastSeen)
+                            val finalAvatar = normAvatar.ifBlank { getCachedUserAvatar(context, userId, username) }
+                            mainHandler.post { callback(finalAvatar, isOnline) }
+                            return
+                        } catch (_: Exception) {}
+                    }
+                    val cached = getCachedUserAvatar(context, userId, username)
+                    mainHandler.post { callback(cached, false) }
+                }
+            }
+        })
+    }
+
     /**
      * Check if a specific user is currently online (Real-time Presence)
      */
@@ -1970,6 +2240,13 @@ override fun onResponse(call: Call, response: Response) {
                     if (resp.isSuccessful) {
                         try {
                             val json = JSONObject(resp.body?.string() ?: "{}")
+                            val normAvatar = normalizeAvatarUrl(context, json.optString("avatar_url"))
+                            if (normAvatar.isNotBlank()) {
+                                val respId = json.optString("user_id", userId)
+                                val respName = json.optString("username", "")
+                                cacheUserAvatar(context, respId, respName, normAvatar)
+                                cacheUserAvatar(context, userId, respName, normAvatar)
+                            }
                             if (json.has("is_online")) {
                                 val isOnline = json.optBoolean("is_online", false)
                                 mainHandler.post { callback(isOnline) }

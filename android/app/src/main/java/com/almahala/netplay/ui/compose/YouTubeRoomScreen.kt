@@ -233,7 +233,7 @@ fun YouTubeRoomScreen(
     val currentUserName = remember { CloudflareClient.getCurrentUsername(context).ifBlank { "أحمد" } }
     val isAppOwner = remember { YouTubeRoomManager.isAppOwner(context) }
     val isHost = remember(roomId, currentUserId, currentUserName) {
-        val inMemoryMatch = YouTubeRoomManager.activeRealRooms.find { it.roomId == roomId }?.let {
+        val inMemoryMatch = YouTubeRoomManager.activeRealRooms.toList().find { it.roomId == roomId }?.let {
             it.hostId == currentUserId || it.hostName == currentUserName
         } == true
         val localMatch = YouTubeRoomManager.loadRoomsLocally(context).find { it.roomId == roomId }?.let {
@@ -395,11 +395,11 @@ fun YouTubeRoomScreen(
         isFront: Boolean? = null,
         isTalking: Boolean? = null
     ) {
-        if (uId.isBlank() || uId == currentUserId || uId == "server" || uId.startsWith("stealth_")) return
+        if (uId.isBlank() || uId.equals(currentUserId, ignoreCase = true) || uId == "server" || uId.startsWith("stealth_")) return
         val safeName = uName.ifBlank { "مشاهد" }
-        val idx = roomUsers.indexOfFirst { it.id == uId }
+        val idx = roomUsers.indexOfFirst { it.id.equals(uId, ignoreCase = true) }
         val palette = listOf(Color(0xFF2563EB), Color(0xFF7C3AED), Color(0xFF059669), Color(0xFFD97706), Color(0xFFDB2777))
-        val avatarColor = palette[kotlin.math.abs(uId.hashCode()) % palette.size]
+        val avatarColor = palette[kotlin.math.abs(uId.lowercase().hashCode()) % palette.size]
         if (idx >= 0) {
             val prev = roomUsers[idx]
             roomUsers[idx] = prev.copy(
@@ -473,11 +473,14 @@ fun YouTubeRoomScreen(
                 }
             },
             onChatMessageReceived = { newMsg ->
+                val uniqueId = if (chatMessages.any { it.id == newMsg.id }) {
+                    "${newMsg.id}_${java.util.UUID.randomUUID().toString().take(6)}"
+                } else newMsg.id
                 if (newMsg.text.startsWith("[IMAGE]:")) {
                     val imgUri = newMsg.text.removePrefix("[IMAGE]:")
-                    chatMessages.add(newMsg.copy(text = "📷 صورة", imageUrl = imgUri))
+                    chatMessages.add(newMsg.copy(id = uniqueId, text = "📷 صورة", imageUrl = imgUri))
                 } else {
-                    chatMessages.add(newMsg)
+                    chatMessages.add(newMsg.copy(id = uniqueId))
                 }
                 if (activeSubTab != YouTubeRoomSubTab.CHAT) {
                     unreadChatCount++
@@ -615,7 +618,7 @@ fun YouTubeRoomScreen(
                             if (ok && !r2Url.isNullOrBlank()) {
                                 chatMessages.add(
                                     YouTubeChatMessage(
-                                        id = System.currentTimeMillis().toString(),
+                                        id = "ytm_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
                                         sender = currentUserName,
                                         text = "📷 صورة",
                                         time = "الآن",
@@ -752,17 +755,7 @@ fun YouTubeRoomScreen(
                 ZegoCallManager.endCall(context.applicationContext, zegoAudioRoomId)
                 RealVoipEngine.stopVoipSession(context.applicationContext)
             } catch (_: Throwable) {}
-            try {
-                webViewRef?.let { wv ->
-                    wv.stopLoading()
-                    wv.onPause()
-                    wv.loadUrl("about:blank")
-                    (wv.parent as? ViewGroup)?.removeView(wv)
-                    wv.removeAllViews()
-                    wv.destroy()
-                }
-                webViewRef = null
-            } catch (_: Throwable) {}
+            webViewRef = null
         }
     }
 
@@ -1140,7 +1133,6 @@ fun YouTubeRoomScreen(
                                     },
                                     "AndroidBridge"
                                 )
-                                webViewRef = this
 
                                 val initialId = currentVideo.id.ifBlank { "dQw4w9WgXcQ" }
                                 val initialVolPercent = (videoVolume * 100).toInt()
@@ -1438,13 +1430,23 @@ fun YouTubeRoomScreen(
                         }
                     },
                     update = { webView ->
-                        if (webView is WebView && webViewRef == null) {
+                        if (webView is WebView && webViewRef !== webView) {
                             webViewRef = webView
                         }
                     },
                     onRelease = { view ->
                         try {
-                            (view as? WebView)?.destroy()
+                            (view as? WebView)?.let { wv ->
+                                wv.stopLoading()
+                                wv.onPause()
+                                wv.loadUrl("about:blank")
+                                (wv.parent as? ViewGroup)?.removeView(wv)
+                                wv.removeAllViews()
+                                wv.destroy()
+                            }
+                            if (webViewRef === view) {
+                                webViewRef = null
+                            }
                         } catch (_: Throwable) {}
                     },
                     modifier = Modifier.fillMaxSize()
@@ -1917,7 +1919,7 @@ fun YouTubeRoomScreen(
                                         .fillMaxWidth(),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    items(chatMessages, key = { it.id }) { msg ->
+                                    items(chatMessages.distinctBy { it.id }, key = { it.id }) { msg ->
                                         if (msg.sender == "النظام") {
                                             Box(
                                                 modifier = Modifier
@@ -2049,7 +2051,7 @@ fun YouTubeRoomScreen(
                                                 if (!isChatMuted) {
                                                     chatMessages.add(
                                                         YouTubeChatMessage(
-                                                            id = System.currentTimeMillis().toString(),
+                                                            id = "ytm_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
                                                             sender = currentUserName,
                                                             text = emoji,
                                                             time = "الآن",
@@ -2164,7 +2166,7 @@ fun YouTubeRoomScreen(
                                                     if (text.isNotEmpty() && !isChatMuted) {
                                                         chatMessages.add(
                                                             YouTubeChatMessage(
-                                                                id = System.currentTimeMillis().toString(),
+                                                                id = "ytm_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
                                                                 sender = currentUserName,
                                                                 text = text,
                                                                 time = "الآن",
@@ -2187,7 +2189,7 @@ fun YouTubeRoomScreen(
                                                     if (text.isNotEmpty() && !isChatMuted) {
                                                         chatMessages.add(
                                                             YouTubeChatMessage(
-                                                                id = System.currentTimeMillis().toString(),
+                                                                id = "ytm_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
                                                                 sender = currentUserName,
                                                                 text = text,
                                                                 time = "الآن",
@@ -2374,7 +2376,10 @@ fun YouTubeRoomScreen(
                                     }
 
                                     // 2. All Other Room Participants' Cameras Side-by-Side (Free Row)
-                                    items(roomUsers.filter { it.id != currentUserId }) { participant ->
+                                    items(
+                                        roomUsers.filter { !it.id.equals(currentUserId, ignoreCase = true) }.distinctBy { it.id.lowercase() },
+                                        key = { it.id.lowercase() }
+                                    ) { participant ->
                                         Box(
                                             modifier = Modifier
                                                 .size(cameraBoxSize.sizeDp)
@@ -2671,7 +2676,7 @@ fun YouTubeRoomScreen(
                                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                                         contentPadding = PaddingValues(horizontal = 8.dp)
                                     ) {
-                                        items(activeSpeakers, key = { it.id }) { speaker ->
+                                        items(activeSpeakers.distinctBy { it.id.lowercase() }, key = { it.id.lowercase() }) { speaker ->
                                             Surface(
                                                 shape = RoundedCornerShape(16.dp),
                                                 color = if (isDark) Color(0xFF052E16) else Color(0xFFECFDF5),
@@ -2720,7 +2725,7 @@ fun YouTubeRoomScreen(
                                     .padding(vertical = 4.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                items(roomUsers, key = { it.id }) { user ->
+                                items(roomUsers.distinctBy { it.id.lowercase() }, key = { it.id.lowercase() }) { user ->
                                     val isSelected = selectedUserForPermissions?.id == user.id
                                     val isMe = user.id == currentUserId
                                     val canManage = (isHost || isAppOwner) && !isMe
@@ -2917,7 +2922,7 @@ fun YouTubeRoomScreen(
                                                         modifier = Modifier.fillMaxWidth(),
                                                         onClick = {
                                                             val text = "مرحباً يا ${user.name}! 👋"
-                                                            chatMessages.add(YouTubeChatMessage(System.currentTimeMillis().toString(), currentUserName, text, "الآن", true))
+                                                            chatMessages.add(YouTubeChatMessage("ytm_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}", currentUserName, text, "الآن", true))
                                                             syncSocket.broadcastChatMessage(text)
                                                             selectedUserForPermissions = null
                                                             Toast.makeText(context, "تم إرسال التحية بنجاح", Toast.LENGTH_SHORT).show()

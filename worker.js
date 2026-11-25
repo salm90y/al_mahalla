@@ -800,7 +800,7 @@ var index_default = {
               env.DB.prepare(
                 `INSERT INTO private_messages 
                  (id, conversation_id, sender_id, receiver_id, type, content, media_url, file_name, file_size, duration, location_lat, location_lng, created_at, is_read, is_delivered)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1]`
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)`
               ).bind(
                 messageId,
                 canonicalConvId,
@@ -818,7 +818,7 @@ var index_default = {
               ),
               env.DB.prepare(
                 `INSERT INTO conversations (id, user1_id, user2_id, last_message_id, last_message_text, last_message_at, unread_count_user1, unread_count_user2)
-                 VALUES (?, ?, ?, ?, ?, ?, 0, 1]
+                 VALUES (?, ?, ?, ?, ?, ?, 0, 1)
                  ON CONFLICT(id) DO UPDATE SET
                    last_message_id = excluded.last_message_id,
                    last_message_text = excluded.last_message_text,
@@ -1056,7 +1056,7 @@ var index_default = {
             const callMsgContent = signalType === "call_init" ? isVideo ? "\u0645\u0643\u0627\u0644\u0645\u0629 \u0641\u064A\u062F\u064A\u0648 \u0648\u0627\u0631\u062F\u0629" : "\u0645\u0643\u0627\u0644\u0645\u0629 \u0635\u0648\u062A\u064A\u0629 \u0648\u0627\u0631\u062F\u0629" : signalType;
             await env.DB.prepare(
               `INSERT INTO private_messages (id, conversation_id, sender_id, receiver_id, type, content, media_url, file_name, created_at, is_read, is_delivered)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1]`
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)`
             ).bind(crypto.randomUUID(), convId, senderId, receiverId, callMsgType, callMsgContent, roomId, extra || senderName, now).run();
           } catch (callErr) {
             console.error("Call signaling error:", callErr);
@@ -1187,7 +1187,7 @@ var index_default = {
                   COALESCE(u.username, CASE WHEN LOWER(c.user1_id) IN (${placeholders}) THEN c.user2_id ELSE c.user1_id END) as other_username,
                   COALESCE(u.avatar_url, '') as other_avatar,
                   COALESCE(u.status, 'offline') as other_status,
-                  COALESCE(u.last_seen, 0] as other_last_seen
+                  COALESCE(u.last_seen, 0) as other_last_seen
            FROM conversations c
            LEFT JOIN users u ON (LOWER(u.id) = LOWER(CASE WHEN LOWER(c.user1_id) IN (${placeholders}) THEN c.user2_id ELSE c.user1_id END)
                                  OR LOWER(u.username) = LOWER(CASE WHEN LOWER(c.user1_id) IN (${placeholders}) THEN c.user2_id ELSE c.user1_id END))

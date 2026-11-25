@@ -637,8 +637,18 @@ fun ChatDetailScreen(
         }
     }
 
-    // Enrich contact avatar from friends list if still blank
+    // Enrich contact avatar from /users/status & friends list if still blank
     LaunchedEffect(targetUserId, userName) {
+        if (targetUserId.isNotBlank() || userName.isNotBlank()) {
+            CloudflareClient.fetchUserAvatarAndStatus(context, targetUserId, userName) { fetchedAvatar, online ->
+                if (fetchedAvatar.isNotBlank()) {
+                    resolvedAvatar = fetchedAvatar
+                }
+                if (online) {
+                    isTargetOnline = true
+                }
+            }
+        }
         if (resolvedAvatar.isBlank() && (targetUserId.isNotBlank() || userName.isNotBlank())) {
             CloudflareClient.getFriendsList(context) { friends ->
                 val match = friends.firstOrNull {
@@ -835,7 +845,7 @@ fun ChatDetailScreen(
                         showNoStoryNotice = false
                         onOpenProfile(targetUserId, userName)
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Text("عرض الحساب", fontFamily = TajawalFontFamily, color = Color.White)
@@ -843,7 +853,7 @@ fun ChatDetailScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showNoStoryNotice = false }) {
-                    Text("إغلاق", fontFamily = TajawalFontFamily, color = Color(0xFF94A3B8))
+                    Text("إغلاق", fontFamily = TajawalFontFamily, color = Color(0xFF64748B))
                 }
             },
             title = {
@@ -851,18 +861,18 @@ fun ChatDetailScreen(
                     text = "الحالة اليومية",
                     fontFamily = TajawalFontFamily,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFFF8FAFC)
+                    color = Color(0xFF0F172A)
                 )
             },
             text = {
                 Text(
                     text = "المستخدم $userName لم يقم بنشر أي حالة جديدة خلال الـ 24 ساعة الماضية.",
                     fontFamily = TajawalFontFamily,
-                    color = Color(0xFF94A3B8),
+                    color = Color(0xFF64748B),
                     fontSize = 14.sp
                 )
             },
-            containerColor = Color(0xFF11192C),
+            containerColor = Color.White,
             shape = RoundedCornerShape(20.dp)
         )
     }
@@ -922,17 +932,9 @@ fun ChatDetailScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF080D1A),
-                        Color(0xFF0B1121),
-                        Color(0xFF0F172A)
-                    )
-                )
-            )
+            .background(getAppScreenBackground())
     ) {
-        // 1. TOP BAR (Deep Navy + Indigo)
+        // 1. TOP BAR (Clean White Matching App Theme)
         ChatTopBar(
             targetUserId = targetUserId,
             userName = userName,
@@ -1465,7 +1467,7 @@ fun ChatTopBar(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF11192C))
+            .background(Color.White)
     ) {
         Row(
             modifier = Modifier
@@ -1482,14 +1484,14 @@ fun ChatTopBar(
                 Icon(
                     imageVector = Icons.Default.ArrowBack,
                     contentDescription = "رجوع",
-                    tint = Color(0xFFE2E8F0),
+                    tint = Color(0xFF0F172A),
                     modifier = Modifier.size(20.dp)
                 )
             }
 
             Spacer(modifier = Modifier.width(4.dp))
 
-            // Avatar (With Indigo/Cyan story ring if story exists, and initial fallback if no avatar)
+            // Avatar (With Blue story ring if story exists, and initial fallback if no avatar)
             Box(
                 modifier = Modifier
                     .size(44.dp)
@@ -1497,7 +1499,7 @@ fun ChatTopBar(
                     .clickable { onAvatarClick() }
                     .padding(if (hasStory) 2.dp else 0.dp)
                     .background(
-                        if (hasStory) Brush.sweepGradient(listOf(Color(0xFF4F46E5), Color(0xFF818CF8), Color(0xFF38BDF8), Color(0xFF4F46E5)))
+                        if (hasStory) Brush.sweepGradient(listOf(Color(0xFF2563EB), Color(0xFF3B82F6), Color(0xFF60A5FA), Color(0xFF2563EB)))
                         else Brush.linearGradient(listOf(Color.Transparent, Color.Transparent)),
                         CircleShape
                     )
@@ -1508,8 +1510,8 @@ fun ChatTopBar(
                     modifier = Modifier
                         .fillMaxSize()
                         .clip(CircleShape)
-                        .background(Color(0xFF1E293B))
-                        .border(1.dp, Color(0xFF28395E), CircleShape),
+                        .background(Color(0xFFEEF4FB))
+                        .border(1.dp, Color(0xFFE2EAFD), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
                     if (avatarUrl.isNotBlank()) {
@@ -1524,7 +1526,7 @@ fun ChatTopBar(
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     Text(
                                         text = initialChar,
-                                        color = Color(0xFF818CF8),
+                                        color = Color(0xFF2563EB),
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 16.sp,
                                         fontFamily = TajawalFontFamily
@@ -1535,7 +1537,7 @@ fun ChatTopBar(
                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                     Text(
                                         text = initialChar,
-                                        color = Color(0xFF818CF8),
+                                        color = Color(0xFF2563EB),
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 16.sp,
                                         fontFamily = TajawalFontFamily
@@ -1546,7 +1548,7 @@ fun ChatTopBar(
                     } else {
                         Text(
                             text = initialChar,
-                            color = Color(0xFF818CF8),
+                            color = Color(0xFF2563EB),
                             fontWeight = FontWeight.Bold,
                             fontSize = 16.sp,
                             fontFamily = TajawalFontFamily
@@ -1559,7 +1561,7 @@ fun ChatTopBar(
                         .size(11.dp)
                         .align(Alignment.BottomEnd)
                         .background(if (isOnline) Color(0xFF10B981) else Color(0xFFEF4444), CircleShape)
-                        .border(2.dp, Color(0xFF11192C), CircleShape)
+                        .border(2.dp, Color.White, CircleShape)
                 )
             }
 
@@ -1576,7 +1578,7 @@ fun ChatTopBar(
             ) {
                 Text(
                     text = userName,
-                    color = Color(0xFFF8FAFC),
+                    color = Color(0xFF0F172A),
                     fontWeight = FontWeight.Bold,
                     fontSize = 15.5.sp,
                     fontFamily = TajawalFontFamily,
@@ -1586,7 +1588,7 @@ fun ChatTopBar(
                 if (isTyping) {
                     Text(
                         text = "يكتب الآن...",
-                        color = Color(0xFF818CF8),
+                        color = Color(0xFF2563EB),
                         fontSize = 11.5.sp,
                         fontFamily = TajawalFontFamily,
                         maxLines = 1
@@ -1594,7 +1596,7 @@ fun ChatTopBar(
                 } else if (isOnline) {
                     Text(
                         text = "متصل الآن",
-                        color = Color(0xFF34D399),
+                        color = Color(0xFF10B981),
                         fontSize = 11.5.sp,
                         fontFamily = TajawalFontFamily,
                         maxLines = 1
@@ -1602,7 +1604,7 @@ fun ChatTopBar(
                 } else {
                     Text(
                         text = "غير متصل",
-                        color = Color(0xFF94A3B8),
+                        color = Color(0xFF64748B),
                         fontSize = 11.5.sp,
                         fontFamily = TajawalFontFamily,
                         maxLines = 1
@@ -1615,8 +1617,8 @@ fun ChatTopBar(
                 modifier = Modifier
                     .size(38.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF18233E))
-                    .border(1.dp, Color(0xFF28395E), CircleShape)
+                    .background(Color(0xFFF1F5F9))
+                    .border(1.dp, Color(0xFFE2E8F0), CircleShape)
                     .clickable {
                         if (targetUserId.isBlank()) {
                             Toast.makeText(context, "تعذر بدء المكالمة: معرف المستخدم غير متاح", Toast.LENGTH_SHORT).show()
@@ -1640,7 +1642,7 @@ fun ChatTopBar(
                 Icon(
                     imageVector = Icons.Default.Call,
                     contentDescription = "اتصال صوتي",
-                    tint = Color(0xFF818CF8),
+                    tint = Color(0xFF2563EB),
                     modifier = Modifier.size(19.dp)
                 )
             }
@@ -1652,8 +1654,8 @@ fun ChatTopBar(
                 modifier = Modifier
                     .size(38.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF18233E))
-                    .border(1.dp, Color(0xFF28395E), CircleShape)
+                    .background(Color(0xFFF1F5F9))
+                    .border(1.dp, Color(0xFFE2E8F0), CircleShape)
                     .clickable {
                         if (targetUserId.isBlank()) {
                             Toast.makeText(context, "تعذر بدء المكالمة: معرف المستخدم غير متاح", Toast.LENGTH_SHORT).show()
@@ -1677,12 +1679,12 @@ fun ChatTopBar(
                 Icon(
                     imageVector = Icons.Default.Videocam,
                     contentDescription = "اتصال فيديو",
-                    tint = Color(0xFF818CF8),
+                    tint = Color(0xFF2563EB),
                     modifier = Modifier.size(21.dp)
                 )
             }
         }
-        HorizontalDivider(thickness = 1.dp, color = Color(0xFF1F2E4D))
+        HorizontalDivider(thickness = 1.dp, color = Color(0xFFE2E8F0))
     }
 }
 
@@ -1947,11 +1949,11 @@ fun TextBubble(
         if (status == MessageStatus.FAILED) {
             Brush.linearGradient(listOf(Color(0xFFDC2626), Color(0xFFEF4444)))
         } else {
-            Brush.linearGradient(listOf(Color(0xFF4F46E5), Color(0xFF6366F1)))
+            Brush.linearGradient(listOf(Color(0xFF2563EB), Color(0xFF1D4ED8)))
         }
     }
     val incomingBrush = remember {
-        Brush.linearGradient(listOf(Color(0xFF17223B), Color(0xFF17223B)))
+        Brush.linearGradient(listOf(Color.White, Color.White))
     }
     val bubbleShape = RoundedCornerShape(
         topStart = 18.dp,
@@ -1974,7 +1976,7 @@ fun TextBubble(
                     .background(if (isOutgoing) outgoingBrush else incomingBrush)
                     .border(
                         width = 1.dp,
-                        color = if (isOutgoing) Color(0x28FFFFFF) else Color(0xFF263659),
+                        color = if (isOutgoing) Color.Transparent else Color(0xFFE2E8F0),
                         shape = bubbleShape
                     )
                     .let { base ->
@@ -1986,7 +1988,7 @@ fun TextBubble(
             ) {
                 Text(
                     text = text,
-                    color = if (isOutgoing) Color.White else Color(0xFFF1F5F9),
+                    color = if (isOutgoing) Color.White else Color(0xFF0F172A),
                     fontFamily = TajawalFontFamily,
                     fontSize = 14.5.sp,
                     lineHeight = 20.sp
@@ -2018,7 +2020,7 @@ fun TextBubble(
                             else -> {
                                 Text(
                                     text = "✓✓",
-                                    color = Color(0xFFE0E7FF),
+                                    color = Color(0xFFDBEAFE),
                                     fontFamily = TajawalFontFamily,
                                     fontSize = 10.sp
                                 )
@@ -2027,7 +2029,7 @@ fun TextBubble(
                     }
                     Text(
                         text = timestamp,
-                        color = if (isOutgoing) Color(0xFFE0E7FF) else Color(0xFF94A3B8),
+                        color = if (isOutgoing) Color(0xFFDBEAFE) else Color(0xFF64748B),
                         fontFamily = TajawalFontFamily,
                         fontSize = 10.sp
                     )
@@ -2037,7 +2039,7 @@ fun TextBubble(
             if (isOutgoing && status == MessageStatus.FAILED) {
                 Text(
                     text = if (onRetry != null) "تعذر الإرسال • اضغط لإعادة المحاولة" else "تعذر الإرسال (تحقق من الإنترنت)",
-                    color = Color(0xFFFCA5A5),
+                    color = Color(0xFFDC2626),
                     fontFamily = TajawalFontFamily,
                     fontSize = 10.5.sp,
                     modifier = Modifier
@@ -2086,10 +2088,10 @@ fun SinglePhotoBubble(
                     .fillMaxWidth()
                     .height(220.dp)
                     .clip(RoundedCornerShape(18.dp))
-                    .background(Color(0xFF17223B))
+                    .background(Color.White)
                     .border(
                         1.5.dp,
-                        if (isOutgoing && status == MessageStatus.FAILED) Color(0xFFEF4444) else Color(0xFF263659),
+                        if (isOutgoing && status == MessageStatus.FAILED) Color(0xFFEF4444) else Color(0xFFE2E8F0),
                         RoundedCornerShape(18.dp)
                     )
                     .clickable { onPhotoClick(url) }
@@ -2207,10 +2209,10 @@ fun MultiPhotoBubble(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xFF17223B))
+                    .background(Color.White)
                     .border(
                         1.5.dp,
-                        if (isOutgoing && status == MessageStatus.FAILED) Color(0xFFEF4444) else Color(0xFF263659),
+                        if (isOutgoing && status == MessageStatus.FAILED) Color(0xFFEF4444) else Color(0xFFE2E8F0),
                         RoundedCornerShape(16.dp)
                     )
             ) {
@@ -2231,7 +2233,7 @@ fun MultiPhotoBubble(
                                 modifier = Modifier
                                     .weight(1f)
                                     .fillMaxHeight()
-                                    .background(Color(0xFF1E293B))
+                                    .background(Color(0xFFF1F5F9))
                                     .clickable { onPhotoClick(itemUrl) }
                             ) {
                                 AsyncImage(
@@ -2249,7 +2251,7 @@ fun MultiPhotoBubble(
             if (isOutgoing && status == MessageStatus.FAILED) {
                 Text(
                     text = "تعذر إرسال الصور (لا يوجد اتصال بالإنترنت)",
-                    color = Color(0xFFFCA5A5),
+                    color = Color(0xFFDC2626),
                     fontFamily = TajawalFontFamily,
                     fontSize = 10.5.sp,
                     modifier = Modifier.padding(top = 3.dp, end = 4.dp)
@@ -2537,14 +2539,14 @@ fun FullscreenPhotoViewerDialog(
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
-            containerColor = Color(0xFF11192C),
+            containerColor = Color.White,
             shape = RoundedCornerShape(20.dp),
             title = {
                 Text(
                     text = "حذف الصورة",
                     fontFamily = TajawalFontFamily,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFFF8FAFC),
+                    color = Color(0xFF0F172A),
                     fontSize = 17.sp
                 )
             },
@@ -2552,7 +2554,7 @@ fun FullscreenPhotoViewerDialog(
                 Text(
                     text = "هل أنت متأكد من حذف هذه الصورة من سجل المحادثة؟",
                     fontFamily = TajawalFontFamily,
-                    color = Color(0xFF94A3B8),
+                    color = Color(0xFF64748B),
                     fontSize = 14.sp
                 )
             },
@@ -2578,7 +2580,7 @@ fun FullscreenPhotoViewerDialog(
                     Text(
                         text = "إلغاء",
                         fontFamily = TajawalFontFamily,
-                        color = Color(0xFF94A3B8)
+                        color = Color(0xFF64748B)
                     )
                 }
             }
@@ -2664,11 +2666,11 @@ fun DocumentBubble(
         if (status == MessageStatus.FAILED) {
             Brush.linearGradient(listOf(Color(0xFFDC2626), Color(0xFFEF4444)))
         } else {
-            Brush.linearGradient(listOf(Color(0xFF4F46E5), Color(0xFF6366F1)))
+            Brush.linearGradient(listOf(Color(0xFF2563EB), Color(0xFF1D4ED8)))
         }
     }
     val docIncomingBrush = remember {
-        Brush.linearGradient(listOf(Color(0xFF17223B), Color(0xFF17223B)))
+        Brush.linearGradient(listOf(Color.White, Color.White))
     }
 
     Row(
@@ -2693,7 +2695,7 @@ fun DocumentBubble(
                     .background(if (isOutgoing) docOutgoingBrush else docIncomingBrush, RoundedCornerShape(16.dp))
                     .border(
                         1.dp,
-                        if (isOutgoing) Color(0x28FFFFFF) else Color(0xFF263659),
+                        if (isOutgoing) Color.Transparent else Color(0xFFE2E8F0),
                         RoundedCornerShape(16.dp)
                     )
                     .padding(12.dp),
@@ -2703,7 +2705,7 @@ fun DocumentBubble(
                     modifier = Modifier
                         .size(42.dp)
                         .background(
-                            if (isOutgoing) Color.White.copy(alpha = 0.2f) else Color(0xFF1E293B),
+                            if (isOutgoing) Color.White.copy(alpha = 0.2f) else Color(0xFFEFF6FF),
                             RoundedCornerShape(12.dp)
                         ),
                     contentAlignment = Alignment.Center
@@ -2725,14 +2727,14 @@ fun DocumentBubble(
                         Icon(
                             imageVector = if (isAudioPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                             contentDescription = if (isAudioPlaying) "إيقاف مؤقت" else "تشغيل",
-                            tint = if (isOutgoing) Color.White else Color(0xFF818CF8),
+                            tint = if (isOutgoing) Color.White else Color(0xFF2563EB),
                             modifier = Modifier.size(24.dp)
                         )
                     } else {
                         Icon(
                             imageVector = Icons.Default.InsertDriveFile,
                             contentDescription = null,
-                            tint = if (isOutgoing) Color.White else Color(0xFF818CF8),
+                            tint = if (isOutgoing) Color.White else Color(0xFF2563EB),
                             modifier = Modifier.size(22.dp)
                         )
                     }
@@ -2741,7 +2743,7 @@ fun DocumentBubble(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = if (isAudio) "رسالة صوتية" else content.name,
-                        color = if (isOutgoing) Color.White else Color(0xFFF1F5F9),
+                        color = if (isOutgoing) Color.White else Color(0xFF0F172A),
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.5.sp,
                         fontFamily = TajawalFontFamily,
@@ -2750,7 +2752,7 @@ fun DocumentBubble(
                     )
                     Text(
                         text = if (isAudio) "${if (isAudioPlaying) "جاري التشغيل • " else ""}${content.size} • $timestamp" else "${content.size} • $timestamp",
-                        color = if (isOutgoing) Color(0xFFE0E7FF) else Color(0xFF94A3B8),
+                        color = if (isOutgoing) Color(0xFFDBEAFE) else Color(0xFF64748B),
                         fontSize = 11.sp,
                         fontFamily = TajawalFontFamily
                     )
@@ -2760,7 +2762,7 @@ fun DocumentBubble(
             if (isOutgoing && status == MessageStatus.FAILED) {
                 Text(
                     text = "تعذر إرسال الملف (لا يوجد اتصال بالإنترنت)",
-                    color = Color(0xFFFCA5A5),
+                    color = Color(0xFFDC2626),
                     fontFamily = TajawalFontFamily,
                     fontSize = 10.5.sp,
                     modifier = Modifier.padding(top = 3.dp, end = 4.dp)
@@ -2780,14 +2782,14 @@ fun MapCardBubble(content: MessageContent.Location, timestamp: String, isOutgoin
             modifier = Modifier
                 .fillMaxWidth(0.82f)
                 .clip(RoundedCornerShape(16.dp))
-                .background(Color(0xFF17223B))
-                .border(1.dp, Color(0xFF263659), RoundedCornerShape(16.dp))
+                .background(Color.White)
+                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(16.dp))
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(130.dp)
-                    .background(Color(0xFF1E293B))
+                    .background(Color(0xFFF1F5F9))
             ) {
                 AsyncImage(
                     model = "https://images.unsplash.com/photo-1524661135-423995f22d0b?q=80&w=400&h=300&fit=crop",
@@ -2802,13 +2804,13 @@ fun MapCardBubble(content: MessageContent.Location, timestamp: String, isOutgoin
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp,
                     fontFamily = TajawalFontFamily,
-                    color = Color(0xFFF1F5F9)
+                    color = Color(0xFF0F172A)
                 )
                 Text(
                     text = "${content.city} • $timestamp",
                     fontSize = 11.sp,
                     fontFamily = TajawalFontFamily,
-                    color = Color(0xFF94A3B8)
+                    color = Color(0xFF64748B)
                 )
             }
         }
@@ -2824,8 +2826,8 @@ fun CallBubble(
     onJoinCall: () -> Unit
 ) {
     val isVideo = content.isVideo
-    val accentColor = if (isVideo) Color(0xFF6366F1) else Color(0xFF10B981)
-    val bgTint = if (isVideo) Color(0xFF1E1B4B) else Color(0xFF064E3B)
+    val accentColor = if (isVideo) Color(0xFF2563EB) else Color(0xFF10B981)
+    val bgTint = if (isVideo) Color(0xFFEFF6FF) else Color(0xFFECFDF5)
     val callTitle = if (isVideo) "مكالمة فيديو" else "مكالمة صوتية"
     val callIcon = if (isVideo) Icons.Default.Videocam else Icons.Default.Call
 
@@ -2837,8 +2839,8 @@ fun CallBubble(
             modifier = Modifier
                 .widthIn(min = 230.dp, max = 290.dp)
                 .clip(RoundedCornerShape(16.dp))
-                .background(Color(0xFF17223B))
-                .border(1.dp, Color(0xFF263659), RoundedCornerShape(16.dp))
+                .background(Color.White)
+                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(16.dp))
                 .padding(12.dp)
         ) {
             Row(
@@ -2855,7 +2857,7 @@ fun CallBubble(
                     Icon(
                         imageVector = callIcon,
                         contentDescription = callTitle,
-                        tint = if (isVideo) Color(0xFF818CF8) else Color(0xFF34D399),
+                        tint = if (isVideo) Color(0xFF2563EB) else Color(0xFF10B981),
                         modifier = Modifier.size(24.dp)
                     )
                 }
@@ -2866,13 +2868,13 @@ fun CallBubble(
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
                         fontFamily = TajawalFontFamily,
-                        color = Color(0xFFF1F5F9)
+                        color = Color(0xFF0F172A)
                     )
                     Text(
                         text = if (isOutgoing) "مكالمة صادرة • $timestamp" else "مكالمة واردة • $timestamp",
                         fontSize = 11.5.sp,
                         fontFamily = TajawalFontFamily,
-                        color = Color(0xFF94A3B8)
+                        color = Color(0xFF64748B)
                     )
                 }
             }
@@ -2916,15 +2918,15 @@ fun SnapMediaBubble(content: MessageContent.Snap, timestamp: String, isOutgoing:
         Row(
             modifier = Modifier
                 .widthIn(min = 160.dp, max = 220.dp)
-                .background(Color(0xFF17223B), RoundedCornerShape(16.dp))
-                .border(1.dp, Color(0xFF263659), RoundedCornerShape(16.dp))
+                .background(Color.White, RoundedCornerShape(16.dp))
+                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(16.dp))
                 .padding(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
                 imageVector = Icons.Default.LocalFireDepartment,
                 contentDescription = "Snap",
-                tint = Color(0xFFFBBF24),
+                tint = Color(0xFFD97706),
                 modifier = Modifier.size(24.dp)
             )
             Spacer(modifier = Modifier.width(8.dp))
@@ -2934,11 +2936,11 @@ fun SnapMediaBubble(content: MessageContent.Snap, timestamp: String, isOutgoing:
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp,
                     fontFamily = TajawalFontFamily,
-                    color = Color(0xFFF1F5F9)
+                    color = Color(0xFF0F172A)
                 )
                 Text(
                     text = "${content.timer} ثواني • $timestamp",
-                    color = Color(0xFF94A3B8),
+                    color = Color(0xFF64748B),
                     fontSize = 11.sp,
                     fontFamily = TajawalFontFamily
                 )

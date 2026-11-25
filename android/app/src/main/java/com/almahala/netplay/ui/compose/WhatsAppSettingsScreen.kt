@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.almahala.netplay.AppSettingsManager
 import com.almahala.netplay.UserManager
+import com.almahala.netplay.network.AppInfoHelper
 import com.almahala.netplay.network.CloudflareClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -137,7 +138,11 @@ fun WhatsAppSettingsScreen(
     var showTwoStepDialog by remember { mutableStateOf(false) }
     var showChangePhoneDialog by remember { mutableStateOf(false) }
     var showDeleteAccountDialog by remember { mutableStateOf(false) }
+    var showAppAboutDialog by remember { mutableStateOf(false) }
     var twoStepPin by remember { mutableStateOf(AppSettingsManager.getTwoStepPin(context)) }
+    val appName = remember { AppInfoHelper.getAppName(context) }
+    val appVersionName = remember { AppInfoHelper.getVersionName(context) }
+    val appVersionCode = remember { AppInfoHelper.getVersionCode(context) }
 
     // Expanded accordion item ids
     var expandedItems by remember { mutableStateOf(setOf<String>()) }
@@ -803,6 +808,69 @@ fun WhatsAppSettingsScreen(
                         }
                     }
                 }
+
+                // 10. معلومات التطبيق (App Info)
+                item {
+                    val isExpanded = expandedItems.contains("about") || searchQuery.isNotEmpty()
+                    SettingsAccordionCard(
+                        id = "about",
+                        title = "معلومات التطبيق",
+                        icon = Icons.Default.Info,
+                        isExpanded = isExpanded,
+                        onToggle = { toggleExpand("about") }
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            SettingsSubItem(
+                                title = "اسم التطبيق",
+                                subtitle = "$appName (المحلة)",
+                                onClick = { showAppAboutDialog = true }
+                            )
+
+                            SettingsSubItem(
+                                title = "إصدار التطبيق",
+                                subtitle = "الإصدار v$appVersionName (رقم البناء $appVersionCode)",
+                                onClick = { showAppAboutDialog = true }
+                            )
+
+                            SettingsSubItem(
+                                title = "معرّف الحزمة (Package ID)",
+                                subtitle = context.packageName,
+                                onClick = { showAppAboutDialog = true }
+                            )
+
+                            SettingsSubItem(
+                                title = "حول التطبيق والتفاصيل",
+                                subtitle = "عرض بطاقة الهوية والإصدار الرسمي",
+                                onClick = { showAppAboutDialog = true }
+                            )
+                        }
+                    }
+                }
+
+                // Subtle App Version Footer
+                item {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "تطبيق $appName • الإصدار v$appVersionName",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            fontFamily = TajawalFontFamily,
+                            color = Color(0xFF64748B)
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "رقم البناء: $appVersionCode",
+                            fontSize = 11.sp,
+                            fontFamily = TajawalFontFamily,
+                            color = Color(0xFF94A3B8)
+                        )
+                    }
+                }
             }
         }
     }
@@ -1317,6 +1385,91 @@ fun WhatsAppSettingsScreen(
                     Text("• الميكروفون: للملاحظات الصوتية والمكالمات", fontFamily = TajawalFontFamily, fontSize = 13.sp)
                     Text("• الإشعارات: لتلقي تنبيهات الرسائل والمكالمات", fontFamily = TajawalFontFamily, fontSize = 13.sp)
                     Text("• جهات الاتصال: للمزامنة مع أصدقائك", fontFamily = TajawalFontFamily, fontSize = 13.sp)
+                }
+            },
+            containerColor = Color.White,
+            shape = RoundedCornerShape(20.dp)
+        )
+    }
+
+    // App About & Version Info Dialog
+    if (showAppAboutDialog) {
+        AlertDialog(
+            onDismissRequest = { showAppAboutDialog = false },
+            confirmButton = {
+                Button(
+                    onClick = { showAppAboutDialog = false },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("إغلاق", fontFamily = TajawalFontFamily, color = Color.White)
+                }
+            },
+            title = {
+                Text(
+                    "معلومات التطبيق",
+                    fontFamily = TajawalFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF0F172A)
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    AlMahallaHeroLogo(size = 86.dp)
+                    Text(
+                        text = "$appName (المحلة)",
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        fontFamily = TajawalFontFamily,
+                        color = Color(0xFF0F172A)
+                    )
+                    Surface(
+                        color = Color(0xFFEFF6FF),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "اسم التطبيق: $appName",
+                                fontFamily = TajawalFontFamily,
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF1E293B)
+                            )
+                            Text(
+                                text = "رقم الإصدار: v$appVersionName",
+                                fontFamily = TajawalFontFamily,
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF2563EB)
+                            )
+                            Text(
+                                text = "رقم البناء: $appVersionCode",
+                                fontFamily = TajawalFontFamily,
+                                fontSize = 13.sp,
+                                color = Color(0xFF475569)
+                            )
+                            Text(
+                                text = "الحزمة: ${context.packageName}",
+                                fontSize = 12.sp,
+                                color = Color(0xFF64748B)
+                            )
+                        }
+                    }
+                    Text(
+                        text = "منصة التواصل واللعب الجماعي ومشاهدة القنوات واليوتيوب المتزامن.",
+                        fontFamily = TajawalFontFamily,
+                        fontSize = 12.5.sp,
+                        color = Color(0xFF64748B),
+                        textAlign = TextAlign.Center
+                    )
                 }
             },
             containerColor = Color.White,

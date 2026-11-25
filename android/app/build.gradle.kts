@@ -23,8 +23,8 @@ android {
         applicationId = "com.almahala.netplay"
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "1.3.0"
+        versionCode = 15
+        versionName = "1.5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
@@ -41,7 +41,23 @@ android {
 
     signingConfigs {
         getByName("debug") {
-            // Standard debug signing config for release testing and GitHub artifacts
+            // Fallback debug signing config when release keystore is not supplied
+        }
+        create("release") {
+            val ksPath = System.getenv("KEYSTORE_FILE")
+                ?: (project.findProperty("KEYSTORE_FILE") as? String)
+            if (!ksPath.isNullOrBlank()) {
+                val ksFile = file(ksPath)
+                if (ksFile.exists()) {
+                    storeFile = ksFile
+                    storePassword = System.getenv("KEYSTORE_PASSWORD")
+                        ?: (project.findProperty("KEYSTORE_PASSWORD") as? String) ?: ""
+                    keyAlias = System.getenv("KEY_ALIAS")
+                        ?: (project.findProperty("KEY_ALIAS") as? String) ?: ""
+                    keyPassword = System.getenv("KEY_PASSWORD")
+                        ?: (project.findProperty("KEY_PASSWORD") as? String) ?: ""
+                }
+            }
         }
     }
 
@@ -49,7 +65,12 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("debug")
+            val releaseSigning = signingConfigs.findByName("release")
+            signingConfig = if (releaseSigning?.storeFile?.exists() == true) {
+                releaseSigning
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

@@ -4,6 +4,8 @@ import android.Manifest
 import android.app.Application
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.almahala.netplay.UserManager
@@ -31,6 +33,7 @@ object ZegoCallManager {
     private const val DEFAULT_APP_SIGN = "29c005b621138958b88eea14c91bd62b2189095171ce962ffe3680974493b41d"
 
     private var zegoEngine: ZegoExpressEngine? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val isInitialized = AtomicBoolean(false)
     private val isInitializing = AtomicBoolean(false)
     private val initLock = Any()
@@ -41,6 +44,14 @@ object ZegoCallManager {
     private val isSpeakerOn = AtomicBoolean(false)
     private val isCameraOn = AtomicBoolean(false)
     private val isFrontCamera = AtomicBoolean(true)
+
+    private fun runOnMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+        } else {
+            mainHandler.post(block)
+        }
+    }
 
     var onCallConnected: (() -> Unit)? = null
     var onCallDisconnected: ((String) -> Unit)? = null
@@ -94,68 +105,76 @@ object ZegoCallManager {
             val finalAppId = if (appId > 0L) appId else DEFAULT_APP_ID
             val finalAppSign = if (appSign.isNotEmpty()) appSign else DEFAULT_APP_SIGN
 
-            try {
-                if (isInitialized.get() && zegoEngine != null) {
-                    dispatchInitCallbacks(true)
-                    return@getZegoConfig
-                }
-                val app = appCtx as Application
-                val profile = ZegoEngineProfile().apply {
-                    this.appID = finalAppId
-                    this.appSign = finalAppSign
-                    this.scenario = ZegoScenario.DEFAULT
-                    this.application = app
-                }
-
-                zegoEngine = ZegoExpressEngine.createEngine(profile, object : IZegoEventHandler() {
-                    override fun onRoomStateChanged(
-                        roomID: String?,
-                        reason: ZegoRoomStateChangedReason?,
-                        errorCode: Int,
-                        extendedData: JSONObject?
-                    ) {
-                        Log.d(TAG, "Zego room state changed: room=$roomID, reason=$reason, code=$errorCode")
-                        if (errorCode == 0 && reason == ZegoRoomStateChangedReason.LOGINED) {
-                            onCallConnected?.invoke()
-                        } else if (reason == ZegoRoomStateChangedReason.LOGOUT) {
-                            onCallDisconnected?.invoke("تم إنهاء جلسة Zego")
-                        } else if (errorCode != 0) {
-                            Log.w(TAG, "Zego room error: $errorCode")
-                        }
+            runOnMain {
+                try {
+                    if (isInitialized.get() && zegoEngine != null) {
+                        dispatchInitCallbacks(true)
+                        return@runOnMain
+                    }
+                    val app = (appCtx as? Application) ?: (context as? Application)
+                    if (app == null) {
+                        Log.w(TAG, "Application context unavailable for Zego init")
+                        isInitialized.set(false)
+                        dispatchInitCallbacks(false)
+                        return@runOnMain
+                    }
+                    val profile = ZegoEngineProfile().apply {
+                        this.appID = finalAppId
+                        this.appSign = finalAppSign
+                        this.scenario = ZegoScenario.DEFAULT
+                        this.application = app
                     }
 
-                    override fun onRoomStreamUpdate(
-                        roomID: String?,
-                        updateType: ZegoUpdateType?,
-                        streamList: ArrayList<ZegoStream>?,
-                        extendedData: JSONObject?
-                    ) {
-                        if (streamList == null) return
-                        for (stream in streamList) {
-                            if (updateType == ZegoUpdateType.ADD) {
-                                Log.d(TAG, "Remote Zego stream added: ${stream.streamID}")
-                                try {
-                                    zegoEngine?.startPlayingStream(stream.streamID)
-                                } catch (_: Throwable) {}
-                                onRemoteUserJoined?.invoke(stream.user.userID)
-                            } else if (updateType == ZegoUpdateType.DELETE) {
-                                Log.d(TAG, "Remote Zego stream removed: ${stream.streamID}")
-                                try {
-                                    zegoEngine?.stopPlayingStream(stream.streamID)
-                                } catch (_: Throwable) {}
-                                onRemoteUserLeft?.invoke(stream.user.userID)
+                    zegoEngine = ZegoExpressEngine.createEngine(profile, object : IZegoEventHandler() {
+                        override fun onRoomStateChanged(
+                            roomID: String?,
+                            reason: ZegoRoomStateChangedReason?,
+                            errorCode: Int,
+                            extendedData: JSONObject?
+                        ) {
+                            Log.d(TAG, "Zego room state changed: room=$roomID, reason=$reason, code=$errorCode")
+                            if (errorCode == 0 && reason == ZegoRoomStateChangedReason.LOGINED) {
+                                onCallConnected?.invoke()
+                            } else if (reason == ZegoRoomStateChangedReason.LOGOUT) {
+                                onCallDisconnected?.invoke("تم إنهاء جلسة Zego")
+                            } else if (errorCode != 0) {
+                                Log.w(TAG, "Zego room error: $errorCode")
                             }
                         }
-                    }
-                })
 
-                isInitialized.set(zegoEngine != null)
-                Log.d(TAG, "ZegoExpressEngine initialized=${isInitialized.get()} appId=$finalAppId")
-                dispatchInitCallbacks(isInitialized.get())
-            } catch (e: Throwable) {
-                Log.e(TAG, "Failed to initialize Zego engine: ${e.message}", e)
-                isInitialized.set(false)
-                dispatchInitCallbacks(false)
+                        override fun onRoomStreamUpdate(
+                            roomID: String?,
+                            updateType: ZegoUpdateType?,
+                            streamList: ArrayList<ZegoStream>?,
+                            extendedData: JSONObject?
+                        ) {
+                            if (streamList == null) return
+                            for (stream in streamList) {
+                                if (updateType == ZegoUpdateType.ADD) {
+                                    Log.d(TAG, "Remote Zego stream added: ${stream.streamID}")
+                                    try {
+                                        zegoEngine?.startPlayingStream(stream.streamID)
+                                    } catch (_: Throwable) {}
+                                    onRemoteUserJoined?.invoke(stream.user.userID)
+                                } else if (updateType == ZegoUpdateType.DELETE) {
+                                    Log.d(TAG, "Remote Zego stream removed: ${stream.streamID}")
+                                    try {
+                                        zegoEngine?.stopPlayingStream(stream.streamID)
+                                    } catch (_: Throwable) {}
+                                    onRemoteUserLeft?.invoke(stream.user.userID)
+                                }
+                            }
+                        }
+                    })
+
+                    isInitialized.set(zegoEngine != null)
+                    Log.d(TAG, "ZegoExpressEngine initialized=${isInitialized.get()} appId=$finalAppId")
+                    dispatchInitCallbacks(isInitialized.get())
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Failed to initialize Zego engine: ${e.message}", e)
+                    isInitialized.set(false)
+                    dispatchInitCallbacks(false)
+                }
             }
         }
     }
@@ -180,46 +199,47 @@ object ZegoCallManager {
 
         initEngine(context) { success ->
             if (!success || zegoEngine == null) return@initEngine
-
-            try {
-                val engine = zegoEngine ?: return@initEngine
-                val safeUserId = sanitizeId(userId, "u")
-                val safeUserName = userName.ifBlank { safeUserId }
-
-                if (currentRoomId.isNotEmpty() && currentRoomId != safeRoomId) {
-                    try {
-                        if (isPublishing.get()) {
-                            engine.stopPublishingStream()
-                            isPublishing.set(false)
-                        }
-                        engine.logoutRoom(currentRoomId)
-                    } catch (_: Throwable) {}
-                }
-
-                val alreadyInRoom = currentRoomId == safeRoomId
-                currentRoomId = safeRoomId
-
-                val user = ZegoUser(safeUserId, safeUserName)
-                val roomConfig = ZegoRoomConfig().apply {
-                    isUserStatusNotify = true
-                }
-
-                // Audience Mode: mute mic, do not record or publish, keep video/audio playing cleanly
+            runOnMain {
                 try {
-                    engine.muteMicrophone(true)
-                    isMicMuted.set(true)
-                    engine.enableCamera(false)
-                    isCameraOn.set(false)
-                    engine.setAudioRouteToSpeaker(true)
-                    isSpeakerOn.set(true)
-                } catch (_: Throwable) {}
+                    val engine = zegoEngine ?: return@runOnMain
+                    val safeUserId = sanitizeId(userId, "u")
+                    val safeUserName = userName.ifBlank { safeUserId }
 
-                if (!alreadyInRoom) {
-                    engine.loginRoom(safeRoomId, user, roomConfig)
+                    if (currentRoomId.isNotEmpty() && currentRoomId != safeRoomId) {
+                        try {
+                            if (isPublishing.get()) {
+                                engine.stopPublishingStream()
+                                isPublishing.set(false)
+                            }
+                            engine.logoutRoom(currentRoomId)
+                        } catch (_: Throwable) {}
+                    }
+
+                    val alreadyInRoom = currentRoomId == safeRoomId
+                    currentRoomId = safeRoomId
+
+                    val user = ZegoUser(safeUserId, safeUserName)
+                    val roomConfig = ZegoRoomConfig().apply {
+                        isUserStatusNotify = true
+                    }
+
+                    // Audience Mode: mute mic, do not record or publish, keep video/audio playing cleanly
+                    try {
+                        engine.muteMicrophone(true)
+                        isMicMuted.set(true)
+                        engine.enableCamera(false)
+                        isCameraOn.set(false)
+                        engine.setAudioRouteToSpeaker(true)
+                        isSpeakerOn.set(true)
+                    } catch (_: Throwable) {}
+
+                    if (!alreadyInRoom) {
+                        engine.loginRoom(safeRoomId, user, roomConfig)
+                    }
+                    Log.d(TAG, "Zego watch party room joined in audience mode: safeRoomId=$safeRoomId")
+                } catch (e: Throwable) {
+                    Log.w(TAG, "joinWatchParty non-fatal warning: ${e.message}")
                 }
-                Log.d(TAG, "Zego watch party room joined in audience mode: safeRoomId=$safeRoomId")
-            } catch (e: Throwable) {
-                Log.w(TAG, "joinWatchParty non-fatal warning: ${e.message}")
             }
         }
     }
@@ -236,23 +256,25 @@ object ZegoCallManager {
         if (engine == null && context != null) {
             initEngine(context) { success ->
                 if (success && zegoEngine != null) {
-                    try {
-                        val eg = zegoEngine ?: return@initEngine
-                        if (currentRoomId != safeRoomId) {
-                            if (currentRoomId.isNotEmpty()) {
-                                try { eg.logoutRoom(currentRoomId) } catch (_: Throwable) {}
+                    runOnMain {
+                        try {
+                            val eg = zegoEngine ?: return@runOnMain
+                            if (currentRoomId != safeRoomId) {
+                                if (currentRoomId.isNotEmpty()) {
+                                    try { eg.logoutRoom(currentRoomId) } catch (_: Throwable) {}
+                                }
+                                val user = ZegoUser(safeUserId, safeUserId)
+                                val roomConfig = ZegoRoomConfig().apply { isUserStatusNotify = true }
+                                eg.loginRoom(safeRoomId, user, roomConfig)
+                                currentRoomId = safeRoomId
                             }
-                            val user = ZegoUser(safeUserId, safeUserId)
-                            val roomConfig = ZegoRoomConfig().apply { isUserStatusNotify = true }
-                            eg.loginRoom(safeRoomId, user, roomConfig)
-                            currentRoomId = safeRoomId
+                            eg.muteMicrophone(false)
+                            isMicMuted.set(false)
+                            eg.startPublishingStream(streamId)
+                            isPublishing.set(true)
+                        } catch (e: Throwable) {
+                            Log.w(TAG, "startPublishingAudio deferred error: ${e.message}")
                         }
-                        eg.muteMicrophone(false)
-                        isMicMuted.set(false)
-                        eg.startPublishingStream(streamId)
-                        isPublishing.set(true)
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "startPublishingAudio deferred error: ${e.message}")
                     }
                 }
             }
@@ -367,70 +389,72 @@ object ZegoCallManager {
                 return@initEngine
             }
 
-            try {
-                val engine = zegoEngine ?: return@initEngine
-                val safeUserId = sanitizeId(userId, "u")
-                val safeUserName = userName.ifBlank { safeUserId }
-
-                if (currentRoomId.isNotEmpty() && currentRoomId != safeRoomId) {
-                    try {
-                        if (isPublishing.get()) {
-                            engine.stopPublishingStream()
-                            isPublishing.set(false)
-                        }
-                        engine.logoutRoom(currentRoomId)
-                    } catch (_: Throwable) {}
-                }
-                val alreadyInRoom = currentRoomId == safeRoomId
-                currentRoomId = safeRoomId
-
-                val user = ZegoUser(safeUserId, safeUserName)
-                val roomConfig = ZegoRoomConfig().apply {
-                    isUserStatusNotify = true
-                }
-
-                val hasAudioPerm = ContextCompat.checkSelfPermission(
-                    appCtx, Manifest.permission.RECORD_AUDIO
-                ) == PackageManager.PERMISSION_GRANTED
-                val hasCameraPerm = ContextCompat.checkSelfPermission(
-                    appCtx, Manifest.permission.CAMERA
-                ) == PackageManager.PERMISSION_GRANTED
-
-                // 1. Audio routing
+            runOnMain {
                 try {
-                    engine.setAudioRouteToSpeaker(isVideo)
-                    isSpeakerOn.set(isVideo)
-                } catch (_: Throwable) {}
+                    val engine = zegoEngine ?: return@runOnMain
+                    val safeUserId = sanitizeId(userId, "u")
+                    val safeUserName = userName.ifBlank { safeUserId }
 
-                // 2. Microphone & Camera — ONLY activate hardware capture when permission is granted!
-                try {
-                    engine.muteMicrophone(!hasAudioPerm)
-                    isMicMuted.set(!hasAudioPerm)
-                    val enableCam = isVideo && hasCameraPerm
-                    engine.enableCamera(enableCam)
-                    isCameraOn.set(enableCam)
-                } catch (_: Throwable) {}
-
-                // 3. Log in to Zego Room safely
-                if (!alreadyInRoom) {
-                    engine.loginRoom(safeRoomId, user, roomConfig)
-                }
-
-                // 4. Start publishing stream only when RECORD_AUDIO is already granted (otherwise CallActivity starts it in onRequestPermissionsResult)
-                val streamId = "s_${safeRoomId}_${safeUserId}"
-                if (hasAudioPerm && !isPublishing.get()) {
-                    try {
-                        engine.startPublishingStream(streamId)
-                        isPublishing.set(true)
-                    } catch (pe: Throwable) {
-                        Log.w(TAG, "startPublishingStream non-fatal warning: ${pe.message}")
+                    if (currentRoomId.isNotEmpty() && currentRoomId != safeRoomId) {
+                        try {
+                            if (isPublishing.get()) {
+                                engine.stopPublishingStream()
+                                isPublishing.set(false)
+                            }
+                            engine.logoutRoom(currentRoomId)
+                        } catch (_: Throwable) {}
                     }
-                }
+                    val alreadyInRoom = currentRoomId == safeRoomId
+                    currentRoomId = safeRoomId
 
-                Log.d(TAG, "Zego call initiated: safeRoomId=$safeRoomId, hasAudio=$hasAudioPerm, isVideo=$isVideo, isOutgoing=$isOutgoing")
-            } catch (e: Throwable) {
-                Log.e(TAG, "Failed to start Zego room session: ${e.message}", e)
-                onError?.invoke(e.message ?: "خطأ في بدء جلسة Zego")
+                    val user = ZegoUser(safeUserId, safeUserName)
+                    val roomConfig = ZegoRoomConfig().apply {
+                        isUserStatusNotify = true
+                    }
+
+                    val hasAudioPerm = ContextCompat.checkSelfPermission(
+                        appCtx, Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                    val hasCameraPerm = ContextCompat.checkSelfPermission(
+                        appCtx, Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+
+                    // 1. Audio routing
+                    try {
+                        engine.setAudioRouteToSpeaker(isVideo)
+                        isSpeakerOn.set(isVideo)
+                    } catch (_: Throwable) {}
+
+                    // 2. Microphone & Camera — ONLY activate hardware capture when permission is granted!
+                    try {
+                        engine.muteMicrophone(!hasAudioPerm)
+                        isMicMuted.set(!hasAudioPerm)
+                        val enableCam = isVideo && hasCameraPerm
+                        engine.enableCamera(enableCam)
+                        isCameraOn.set(enableCam)
+                    } catch (_: Throwable) {}
+
+                    // 3. Log in to Zego Room safely
+                    if (!alreadyInRoom) {
+                        engine.loginRoom(safeRoomId, user, roomConfig)
+                    }
+
+                    // 4. Start publishing stream only when RECORD_AUDIO is already granted (otherwise CallActivity starts it in onRequestPermissionsResult)
+                    val streamId = "s_${safeRoomId}_${safeUserId}"
+                    if (hasAudioPerm && !isPublishing.get()) {
+                        try {
+                            engine.startPublishingStream(streamId)
+                            isPublishing.set(true)
+                        } catch (pe: Throwable) {
+                            Log.w(TAG, "startPublishingStream non-fatal warning: ${pe.message}")
+                        }
+                    }
+
+                    Log.d(TAG, "Zego call initiated: safeRoomId=$safeRoomId, hasAudio=$hasAudioPerm, isVideo=$isVideo, isOutgoing=$isOutgoing")
+                } catch (e: Throwable) {
+                    Log.e(TAG, "Failed to start Zego room session: ${e.message}", e)
+                    onError?.invoke(e.message ?: "خطأ في بدء جلسة Zego")
+                }
             }
         }
     }
