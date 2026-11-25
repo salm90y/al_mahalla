@@ -33,7 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
 import androidx.compose.ui.layout.ContentScale
-import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import com.almahala.netplay.SettingsActivity
 import com.almahala.netplay.UserManager
 import com.almahala.netplay.network.CloudflareClient
@@ -71,12 +71,14 @@ fun ChatListScreen(
                     else java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(java.util.Date(c.lastMessageAt))
                 } catch (_: Exception) { "الآن" }
             } else "الآن"
+            val resolvedAvatar = CloudflareClient.normalizeAvatarUrl(context, c.otherAvatar)
+                .ifBlank { CloudflareClient.getCachedUserAvatar(context, c.otherUserId, c.otherUsername) }
             ChatConversation(
                 id = c.otherUserId,
                 name = c.otherUsername.ifBlank { "مستخدم" },
                 lastMsg = c.lastMessageText.ifBlank { "محادثة جديدة" },
                 time = timeStr,
-                avatar = c.otherAvatar,
+                avatar = resolvedAvatar,
                 isOnline = c.isOnline,
                 unreadCount = c.unreadCount,
                 isRead = c.unreadCount == 0,
@@ -85,6 +87,7 @@ fun ChatListScreen(
         }
     }
     var conversations by remember { mutableStateOf<List<ChatConversation>>(initialConversations) }
+    var friendAvatarMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var showAdminDialog by remember { mutableStateOf(false) }
 
     val currentUser = remember { UserManager.getCurrentUser(context) }
@@ -93,31 +96,65 @@ fun ChatListScreen(
     }
 
     LaunchedEffect(Unit) {
-        while (isActive) {
-            CloudflareClient.fetchConversations(context) { list ->
-                if (list.isNotEmpty()) {
-                    val mapped = list.map { c ->
-                        val timeStr = if (c.lastMessageAt > 0) {
-                            try {
-                                val diff = System.currentTimeMillis() - c.lastMessageAt
-                                if (diff < 60_000) "الآن"
-                                else if (diff < 3600_000) "${diff / 60_000} د"
-                                else java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(java.util.Date(c.lastMessageAt))
-                            } catch (_: Exception) { "الآن" }
-                        } else "الآن"
-                        ChatConversation(
-                            id = c.otherUserId,
-                            name = c.otherUsername.ifBlank { "مستخدم" },
-                            lastMsg = c.lastMessageText.ifBlank { "محادثة جديدة" },
-                            time = timeStr,
-                            avatar = c.otherAvatar,
-                            isOnline = c.isOnline,
-                            unreadCount = c.unreadCount,
-                            isRead = c.unreadCount == 0,
-                            category = "All"
-                        )
+        CloudflareClient.getFriendsList(context) { friends ->
+            if (friends.isNotEmpty()) {
+                val map = mutableMapOf<String, String>()
+                friends.forEach { f ->
+                    val norm = CloudflareClient.normalizeAvatarUrl(context, f.avatarUrl)
+                    if (norm.isNotBlank()) {
+                        if (f.id.isNotBlank()) map[f.id] = norm
+                        if (f.username.isNotBlank()) map[f.username.lowercase()] = norm
                     }
-                    conversations = mapped
+                }
+                if (map.isNotEmpty()) {
+                    friendAvatarMap = map
+                    conversations = conversations.map { conv ->
+                        if (conv.avatar.isBlank()) {
+                            val fromFriend = map[conv.id] ?: map[conv.name.lowercase()] ?: ""
+                            if (fromFriend.isNotBlank()) conv.copy(avatar = fromFriend) else conv
+                        } else conv
+                    }
+                }
+            }
+        }
+
+        var inFlight = false
+        var lastAttemptMs = 0L
+        while (isActive) {
+            val nowMs = System.currentTimeMillis()
+            if (!inFlight || (nowMs - lastAttemptMs > 8000L)) {
+                inFlight = true
+                lastAttemptMs = nowMs
+                CloudflareClient.fetchConversations(context) { list ->
+                    inFlight = false
+                    if (list.isNotEmpty()) {
+                        val mapped = list.map { c ->
+                            val timeStr = if (c.lastMessageAt > 0) {
+                                try {
+                                    val diff = System.currentTimeMillis() - c.lastMessageAt
+                                    if (diff < 60_000) "الآن"
+                                    else if (diff < 3600_000) "${diff / 60_000} د"
+                                    else java.text.SimpleDateFormat("h:mm a", java.util.Locale.getDefault()).format(java.util.Date(c.lastMessageAt))
+                                } catch (_: Exception) { "الآن" }
+                            } else "الآن"
+                            val resolvedAvatar = CloudflareClient.normalizeAvatarUrl(context, c.otherAvatar)
+                                .ifBlank { friendAvatarMap[c.otherUserId].orEmpty() }
+                                .ifBlank { friendAvatarMap[c.otherUsername.lowercase()].orEmpty() }
+                                .ifBlank { CloudflareClient.getCachedUserAvatar(context, c.otherUserId, c.otherUsername) }
+                            ChatConversation(
+                                id = c.otherUserId,
+                                name = c.otherUsername.ifBlank { "مستخدم" },
+                                lastMsg = c.lastMessageText.ifBlank { "محادثة جديدة" },
+                                time = timeStr,
+                                avatar = resolvedAvatar,
+                                isOnline = c.isOnline,
+                                unreadCount = c.unreadCount,
+                                isRead = c.unreadCount == 0,
+                                category = "All"
+                            )
+                        }
+                        conversations = mapped
+                    }
                 }
             }
             delay(2500)
@@ -441,18 +478,46 @@ fun ChatListScreen(
                                             .background(Color(0xFFEEF4FB)),
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        if (conv.avatar.isNotBlank()) {
-                                            AsyncImage(
-                                                model = conv.avatar,
+                                        val displayAvatar = conv.avatar.ifBlank {
+                                            friendAvatarMap[conv.id]
+                                                ?: friendAvatarMap[conv.name.lowercase()]
+                                                ?: CloudflareClient.getCachedUserAvatar(context, conv.id, conv.name)
+                                        }
+                                        val initialChar = conv.name.take(1).uppercase().ifEmpty { "ص" }
+                                        if (displayAvatar.isNotBlank()) {
+                                            SubcomposeAsyncImage(
+                                                model = displayAvatar,
                                                 contentDescription = conv.name,
                                                 modifier = Modifier
                                                     .fillMaxSize()
                                                     .clip(CircleShape),
-                                                contentScale = ContentScale.Crop
+                                                contentScale = ContentScale.Crop,
+                                                loading = {
+                                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                        Text(
+                                                            text = initialChar,
+                                                            fontSize = 18.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = Color(0xFF2563EB),
+                                                            fontFamily = TajawalFontFamily
+                                                        )
+                                                    }
+                                                },
+                                                error = {
+                                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                        Text(
+                                                            text = initialChar,
+                                                            fontSize = 18.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = Color(0xFF2563EB),
+                                                            fontFamily = TajawalFontFamily
+                                                        )
+                                                    }
+                                                }
                                             )
                                         } else {
                                             Text(
-                                                text = conv.name.take(1).uppercase().ifEmpty { "ص" },
+                                                text = initialChar,
                                                 fontSize = 18.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = Color(0xFF2563EB),

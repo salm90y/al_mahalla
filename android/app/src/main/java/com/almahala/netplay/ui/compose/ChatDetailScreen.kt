@@ -66,6 +66,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -397,13 +398,59 @@ fun shareImageContent(context: Context, model: Any) {
     } catch (_: Exception) {}
 }
 
+private fun readAndPrepareMediaBytes(context: Context, uri: Uri, isImage: Boolean): ByteArray? {
+    return try {
+        val rawBytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+        if (!isImage || rawBytes.isEmpty()) return rawBytes
+
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+        val srcW = bounds.outWidth
+        val srcH = bounds.outHeight
+        if (srcW <= 0 || srcH <= 0) return rawBytes
+
+        if (srcW <= 1280 && srcH <= 1280 && rawBytes.size <= 350_000) {
+            return rawBytes
+        }
+
+        var sampleSize = 1
+        while (srcW / sampleSize > 1280 || srcH / sampleSize > 1280) {
+            sampleSize *= 2
+        }
+        val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        val decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts) ?: return rawBytes
+
+        val maxSide = maxOf(decoded.width, decoded.height)
+        val scaled = if (maxSide > 1280) {
+            val ratio = 1280f / maxSide.toFloat()
+            val targetW = (decoded.width * ratio).toInt().coerceAtLeast(1)
+            val targetH = (decoded.height * ratio).toInt().coerceAtLeast(1)
+            Bitmap.createScaledBitmap(decoded, targetW, targetH, true).also {
+                if (it != decoded) decoded.recycle()
+            }
+        } else {
+            decoded
+        }
+
+        val out = ByteArrayOutputStream()
+        scaled.compress(Bitmap.CompressFormat.JPEG, 82, out)
+        scaled.recycle()
+        val compressed = out.toByteArray()
+        if (compressed.isNotEmpty() && compressed.size < rawBytes.size) compressed else rawBytes
+    } catch (_: OutOfMemoryError) {
+        null
+    } catch (_: Exception) {
+        null
+    }
+}
+
 @Composable
 fun ChatDetailScreen(
     targetUserId: String = "",
     userName: String = "محادثة",
     isOnline: Boolean = true,
     isTyping: Boolean = false,
-    avatarUrl: String = "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=100&h=100&fit=crop",
+    avatarUrl: String = "",
     onNavigateBack: () -> Unit,
     onOpenProfile: (userId: String, userName: String) -> Unit = { _, _ -> },
     initialMessages: List<Message> = emptyList()
@@ -416,44 +463,34 @@ fun ChatDetailScreen(
         CloudflareClient.getConversationId(myId, targetUserId)
     }
 
-    // Load initial cached messages immediately without delay
+    var resolvedAvatar by remember(targetUserId, userName, avatarUrl) {
+        mutableStateOf(
+            CloudflareClient.normalizeAvatarUrl(context, avatarUrl)
+                .ifBlank { CloudflareClient.getCachedUserAvatar(context, targetUserId, userName) }
+        )
+    }
+
+    // Load initial cached messages quickly in memory without blocking main thread on disk scans
     val initialLocal = remember(convId) {
         val cached = CloudflareClient.getLocalChatMessages(context, convId)
-        val mediaDir = File(context.filesDir, "chat_media")
         if (cached.isNotEmpty()) {
+            val fmt = SimpleDateFormat("h:mm a", Locale.getDefault())
             cached.map { m ->
-                val cachedLocalPath = ChatMediaCache.get(context, m.id)
-                    ?: ChatMediaCache.get(context, m.mediaUrl)
-                    ?: ChatMediaCache.get(context, m.fileName)
-
-                val localFileCandidate = File(mediaDir, "img_${m.id}")
-                val localFileCandidate2 = if (m.fileName.isNotEmpty()) File(mediaDir, "img_${m.id}_${m.fileName}") else null
-                val localFileCandidate3 = if (m.fileName.isNotEmpty()) File(mediaDir, m.fileName) else null
-
-                val localPath = when {
-                    !cachedLocalPath.isNullOrEmpty() && File(cachedLocalPath).exists() -> cachedLocalPath
-                    localFileCandidate.exists() && localFileCandidate.length() > 0 -> localFileCandidate.absolutePath
-                    localFileCandidate2 != null && localFileCandidate2.exists() && localFileCandidate2.length() > 0 -> localFileCandidate2.absolutePath
-                    localFileCandidate3 != null && localFileCandidate3.exists() && localFileCandidate3.length() > 0 -> localFileCandidate3.absolutePath
-                    else -> m.mediaUrl.ifEmpty { m.content }
-                }
-                if (m.type == "image") {
-                    ensureMediaCachedLocally(context, localPath, m.id)
-                }
+                val rawMedia = m.mediaUrl.ifEmpty { m.content }
                 val content = when (m.type) {
-                    "image" -> MessageContent.Photo(listOf(localPath))
+                    "image" -> MessageContent.Photo(listOf(rawMedia))
                     "call", "audio_call" -> MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = false, statusText = m.content.ifBlank { "مكالمة صوتية" })
                     "video_call" -> MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = true, statusText = m.content.ifBlank { "مكالمة فيديو" })
                     "file", "audio", "video" -> MessageContent.Document(
                         name = m.fileName.ifEmpty { m.content.ifBlank { if (m.type == "audio") "رسالة صوتية" else "ملف" } },
                         size = if (m.type == "audio") (if (m.duration > 0) "${m.duration} ثانية" else "رسالة صوتية") else "ملف",
                         type = m.type,
-                        mediaUrl = localPath.ifBlank { m.mediaUrl },
+                        mediaUrl = m.mediaUrl.ifBlank { rawMedia },
                         durationSec = m.duration
                     )
                     else -> MessageContent.Text(m.content)
                 }
-                val time = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(m.createdAt))
+                val time = fmt.format(Date(m.createdAt))
                 Message(m.id, content, time, m.isOutgoing, timestampMs = m.createdAt, clientMessageId = m.id)
             }
         } else {
@@ -513,7 +550,7 @@ fun ChatDetailScreen(
                                 activeIncomingCall = IncomingCallData(
                                     callerId = targetUserId,
                                     callerName = userName,
-                                    callerAvatar = avatarUrl,
+                                    callerAvatar = resolvedAvatar,
                                     callRoomId = callRoom,
                                     isVideo = isVid,
                                     timestamp = message.createdAt
@@ -600,98 +637,131 @@ fun ChatDetailScreen(
         }
     }
 
-    // Live bidirectional sync loop from Cloudflare and R2
+    // Enrich contact avatar from friends list if still blank
+    LaunchedEffect(targetUserId, userName) {
+        if (resolvedAvatar.isBlank() && (targetUserId.isNotBlank() || userName.isNotBlank())) {
+            CloudflareClient.getFriendsList(context) { friends ->
+                val match = friends.firstOrNull {
+                    (targetUserId.isNotBlank() && it.id == targetUserId) ||
+                        (userName.isNotBlank() && it.username.equals(userName, ignoreCase = true))
+                }
+                val norm = CloudflareClient.normalizeAvatarUrl(context, match?.avatarUrl)
+                if (norm.isNotBlank()) {
+                    resolvedAvatar = norm
+                }
+            }
+        }
+    }
+
+    // Live bidirectional sync loop from Cloudflare and R2 (all disk lookups offloaded to IO)
     LaunchedEffect(targetUserId) {
         if (targetUserId.isNotEmpty()) {
             val mediaDir = File(context.filesDir, "chat_media")
             val timeFormatter = SimpleDateFormat("h:mm a", Locale.getDefault())
+            var isFetchingMessages = false
+            var lastFetchAttemptMs = 0L
 
             while (isActive) {
-                CloudflareClient.fetchCloudflareMessages(context, targetUserId) { loaded ->
-                    if (loaded.isNotEmpty()) {
-                        // Check for recent incoming call signals (last 45 seconds) & ensure not from self
-                        if (!CallActivity.isCallActive) {
-                            val incomingCallMsg = loaded.lastOrNull { m ->
-                                (m.type == "audio_call" || m.type == "video_call" || m.type == "call" || m.type == "call_init") &&
-                                !m.isOutgoing &&
-                                m.senderId != myId &&
-                                m.senderId != myUsername &&
-                                !m.senderId.startsWith("user_me") &&
-                                (System.currentTimeMillis() - m.createdAt < 45000) &&
-                                !dismissedCallIds.contains(m.id) &&
-                                !dismissedCallIds.contains(m.mediaUrl) &&
-                                !CallSignalingManager.dismissedCallIds.contains(m.id) &&
-                                !CallSignalingManager.dismissedCallIds.contains(m.mediaUrl)
-                            }
-                            if (incomingCallMsg != null && activeIncomingCall == null) {
-                                val isVid = incomingCallMsg.type == "video_call" || incomingCallMsg.content.contains("فيديو")
-                                val callRoom = incomingCallMsg.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }
-                                activeIncomingCall = IncomingCallData(
-                                    callerId = targetUserId,
-                                    callerName = userName,
-                                    callerAvatar = avatarUrl,
-                                    callRoomId = callRoom,
-                                    isVideo = isVid,
-                                    timestamp = incomingCallMsg.createdAt
-                                )
-                                // Send ringing acknowledgment so caller switches from "Calling..." to "Ringing..."
-                                CallSignalingManager.sendRingingAck(context, targetUserId, callRoom, isVid)
-                            }
+                val nowMs = System.currentTimeMillis()
+                if (!isFetchingMessages || (nowMs - lastFetchAttemptMs > 8000L)) {
+                    isFetchingMessages = true
+                    lastFetchAttemptMs = nowMs
+                    CloudflareClient.fetchCloudflareMessages(context, targetUserId) { loaded ->
+                        if (loaded.isEmpty()) {
+                            isFetchingMessages = false
+                            return@fetchCloudflareMessages
                         }
-
-                        val currentPhotoMap = messages.associate { curr ->
-                            curr.id to (curr.content as? MessageContent.Photo)?.urls?.firstOrNull()
-                        }
-                        val mapped = loaded.map { m ->
-                            val existingLocal = currentPhotoMap[m.id]
-                            val cachedLocalPath = ChatMediaCache.get(context, m.id)
-                                ?: ChatMediaCache.get(context, m.mediaUrl)
-                                ?: ChatMediaCache.get(context, m.fileName)
-
-                            val localFileCandidate = File(mediaDir, "img_${m.id}")
-                            val localFileCandidate2 = if (m.fileName.isNotEmpty()) File(mediaDir, "img_${m.id}_${m.fileName}") else null
-                            val localFileCandidate3 = if (m.fileName.isNotEmpty()) File(mediaDir, m.fileName) else null
-
-                            val localPath = when {
-                                !existingLocal.isNullOrEmpty() && (existingLocal.startsWith("/") || existingLocal.startsWith("file://") || existingLocal.startsWith("content://")) -> existingLocal
-                                !cachedLocalPath.isNullOrEmpty() && File(cachedLocalPath).exists() -> cachedLocalPath
-                                localFileCandidate.exists() && localFileCandidate.length() > 0 -> localFileCandidate.absolutePath
-                                localFileCandidate2 != null && localFileCandidate2.exists() && localFileCandidate2.length() > 0 -> localFileCandidate2.absolutePath
-                                localFileCandidate3 != null && localFileCandidate3.exists() && localFileCandidate3.length() > 0 -> localFileCandidate3.absolutePath
-                                else -> m.mediaUrl.ifEmpty { m.content }
-                            }
-                            val content = when (m.type) {
-                                "image" -> MessageContent.Photo(listOf(localPath))
-                                "call", "audio_call" -> MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = false, statusText = m.content.ifBlank { "مكالمة صوتية" })
-                                "video_call" -> MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = true, statusText = m.content.ifBlank { "مكالمة فيديو" })
-                                "call_init" -> {
-                                    val isVid = m.content.contains("فيديو")
-                                    MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = isVid, statusText = m.content.ifBlank { if (isVid) "مكالمة فيديو" else "مكالمة صوتية" })
+                        val snapshotMessages = messages
+                        coroutineScope.launch(Dispatchers.IO) {
+                            try {
+                                val currentPhotoMap = snapshotMessages.associate { curr ->
+                                    curr.id to (curr.content as? MessageContent.Photo)?.urls?.firstOrNull()
                                 }
-                                "file", "audio", "video" -> MessageContent.Document(
-                                    name = m.fileName.ifEmpty { m.content.ifBlank { if (m.type == "audio") "رسالة صوتية" else "ملف" } },
-                                    size = if (m.type == "audio") (if (m.duration > 0) "${m.duration} ثانية" else "رسالة صوتية") else "ملف",
-                                    type = m.type,
-                                    mediaUrl = localPath.ifBlank { m.mediaUrl },
-                                    durationSec = m.duration
-                                )
-                                else -> MessageContent.Text(m.content)
-                            }
-                            val time = timeFormatter.format(Date(m.createdAt))
-                            Message(m.id, content, time, m.isOutgoing, timestampMs = m.createdAt, clientMessageId = m.id)
-                        }
-                        // Avoid unnecessary state re-assignments to keep scrolling 120 FPS buttery smooth
-                        val loadedIds = mapped.map { it.id }.toSet()
-                        val loadedClientIds = mapped.map { it.clientMessageId }.toSet()
-                        val pending = messages.filter { curr ->
-                            curr.isOutgoing && !loadedIds.contains(curr.id) && !loadedClientIds.contains(curr.clientMessageId)
-                        }
-                        val newMerged = (mapped + pending)
-                            .distinctBy { it.clientMessageId.ifEmpty { it.id } }
-                            .sortedBy { it.timestampMs }
+                                val mapped = loaded.map { m ->
+                                    val existingLocal = currentPhotoMap[m.id]
+                                    val cachedLocalPath = ChatMediaCache.get(context, m.id)
+                                        ?: ChatMediaCache.get(context, m.mediaUrl)
+                                        ?: ChatMediaCache.get(context, m.fileName)
 
-                        if (newMerged.size != messages.size || newMerged.map { it.id to it.status } != messages.map { it.id to it.status }) {
-                            messages = newMerged
+                                    val localFileCandidate = File(mediaDir, "img_${m.id}")
+                                    val localFileCandidate2 = if (m.fileName.isNotEmpty()) File(mediaDir, "img_${m.id}_${m.fileName}") else null
+                                    val localFileCandidate3 = if (m.fileName.isNotEmpty()) File(mediaDir, m.fileName) else null
+
+                                    val localPath = when {
+                                        !existingLocal.isNullOrEmpty() && (existingLocal.startsWith("/") || existingLocal.startsWith("file://") || existingLocal.startsWith("content://")) -> existingLocal
+                                        !cachedLocalPath.isNullOrEmpty() && File(cachedLocalPath).exists() -> cachedLocalPath
+                                        localFileCandidate.exists() && localFileCandidate.length() > 0 -> localFileCandidate.absolutePath
+                                        localFileCandidate2 != null && localFileCandidate2.exists() && localFileCandidate2.length() > 0 -> localFileCandidate2.absolutePath
+                                        localFileCandidate3 != null && localFileCandidate3.exists() && localFileCandidate3.length() > 0 -> localFileCandidate3.absolutePath
+                                        else -> m.mediaUrl.ifEmpty { m.content }
+                                    }
+                                    val content = when (m.type) {
+                                        "image" -> MessageContent.Photo(listOf(localPath))
+                                        "call", "audio_call" -> MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = false, statusText = m.content.ifBlank { "مكالمة صوتية" })
+                                        "video_call" -> MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = true, statusText = m.content.ifBlank { "مكالمة فيديو" })
+                                        "call_init" -> {
+                                            val isVid = m.content.contains("فيديو")
+                                            MessageContent.Call(m.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }, isVideo = isVid, statusText = m.content.ifBlank { if (isVid) "مكالمة فيديو" else "مكالمة صوتية" })
+                                        }
+                                        "file", "audio", "video" -> MessageContent.Document(
+                                            name = m.fileName.ifEmpty { m.content.ifBlank { if (m.type == "audio") "رسالة صوتية" else "ملف" } },
+                                            size = if (m.type == "audio") (if (m.duration > 0) "${m.duration} ثانية" else "رسالة صوتية") else "ملف",
+                                            type = m.type,
+                                            mediaUrl = localPath.ifBlank { m.mediaUrl },
+                                            durationSec = m.duration
+                                        )
+                                        else -> MessageContent.Text(m.content)
+                                    }
+                                    val time = timeFormatter.format(Date(m.createdAt))
+                                    Message(m.id, content, time, m.isOutgoing, timestampMs = m.createdAt, clientMessageId = m.id)
+                                }
+
+                                withContext(Dispatchers.Main) {
+                                    // Check for recent incoming call signals (last 45 seconds) & ensure not from self
+                                    if (!CallActivity.isCallActive) {
+                                        val incomingCallMsg = loaded.lastOrNull { m ->
+                                            (m.type == "audio_call" || m.type == "video_call" || m.type == "call" || m.type == "call_init") &&
+                                            !m.isOutgoing &&
+                                            m.senderId != myId &&
+                                            m.senderId != myUsername &&
+                                            !m.senderId.startsWith("user_me") &&
+                                            (System.currentTimeMillis() - m.createdAt < 45000) &&
+                                            !dismissedCallIds.contains(m.id) &&
+                                            !dismissedCallIds.contains(m.mediaUrl) &&
+                                            !CallSignalingManager.dismissedCallIds.contains(m.id) &&
+                                            !CallSignalingManager.dismissedCallIds.contains(m.mediaUrl)
+                                        }
+                                        if (incomingCallMsg != null && activeIncomingCall == null) {
+                                            val isVid = incomingCallMsg.type == "video_call" || incomingCallMsg.content.contains("فيديو")
+                                            val callRoom = incomingCallMsg.mediaUrl.ifBlank { "call_${listOf(myId, targetUserId).sorted().joinToString("_")}" }
+                                            activeIncomingCall = IncomingCallData(
+                                                callerId = targetUserId,
+                                                callerName = userName,
+                                                callerAvatar = resolvedAvatar,
+                                                callRoomId = callRoom,
+                                                isVideo = isVid,
+                                                timestamp = incomingCallMsg.createdAt
+                                            )
+                                            CallSignalingManager.sendRingingAck(context, targetUserId, callRoom, isVid)
+                                        }
+                                    }
+
+                                    val loadedIds = mapped.map { it.id }.toSet()
+                                    val loadedClientIds = mapped.map { it.clientMessageId }.toSet()
+                                    val pending = messages.filter { curr ->
+                                        curr.isOutgoing && !loadedIds.contains(curr.id) && !loadedClientIds.contains(curr.clientMessageId)
+                                    }
+                                    val newMerged = (mapped + pending)
+                                        .distinctBy { it.clientMessageId.ifEmpty { it.id } }
+                                        .sortedBy { it.timestampMs }
+
+                                    if (newMerged.size != messages.size || newMerged.map { it.id to it.status } != messages.map { it.id to it.status }) {
+                                        messages = newMerged
+                                    }
+                                }
+                            } finally {
+                                isFetchingMessages = false
+                            }
                         }
                     }
                 }
@@ -765,7 +835,7 @@ fun ChatDetailScreen(
                         showNoStoryNotice = false
                         onOpenProfile(targetUserId, userName)
                     },
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4F46E5)),
                     shape = RoundedCornerShape(12.dp)
                 ) {
                     Text("عرض الحساب", fontFamily = TajawalFontFamily, color = Color.White)
@@ -773,7 +843,7 @@ fun ChatDetailScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showNoStoryNotice = false }) {
-                    Text("إغلاق", fontFamily = TajawalFontFamily, color = Color(0xFF64748B))
+                    Text("إغلاق", fontFamily = TajawalFontFamily, color = Color(0xFF94A3B8))
                 }
             },
             title = {
@@ -781,34 +851,94 @@ fun ChatDetailScreen(
                     text = "الحالة اليومية",
                     fontFamily = TajawalFontFamily,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFF0F172A)
+                    color = Color(0xFFF8FAFC)
                 )
             },
             text = {
                 Text(
                     text = "المستخدم $userName لم يقم بنشر أي حالة جديدة خلال الـ 24 ساعة الماضية.",
                     fontFamily = TajawalFontFamily,
-                    color = Color(0xFF64748B),
+                    color = Color(0xFF94A3B8),
                     fontSize = 14.sp
                 )
             },
-            containerColor = Color.White,
+            containerColor = Color(0xFF11192C),
             shape = RoundedCornerShape(20.dp)
         )
+    }
+
+    fun sendOrRetryText(text: String, retryMsgId: String? = null) {
+        val hasNet = isNetworkAvailable(context)
+        val now = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
+        val nowMs = System.currentTimeMillis()
+        val clientMsgId = retryMsgId ?: "msg_${nowMs}_${java.util.UUID.randomUUID().toString().take(8)}"
+
+        if (retryMsgId == null) {
+            val localMsg = Message(
+                id = clientMsgId,
+                content = MessageContent.Text(text),
+                timestamp = now,
+                isOutgoing = true,
+                status = if (hasNet) MessageStatus.SENDING else MessageStatus.FAILED,
+                timestampMs = nowMs,
+                clientMessageId = clientMsgId
+            )
+            messages = (messages + localMsg).sortedBy { it.timestampMs }
+        } else {
+            messages = messages.map { m ->
+                if (m.clientMessageId == clientMsgId || m.id == clientMsgId) {
+                    m.copy(status = if (hasNet) MessageStatus.SENDING else MessageStatus.FAILED)
+                } else m
+            }
+        }
+
+        if (!hasNet) {
+            Toast.makeText(context, "تعذر الإرسال: لا يوجد اتصال بالإنترنت", Toast.LENGTH_SHORT).show()
+        } else if (targetUserId.isNotEmpty()) {
+            CloudflareClient.updateLocalConversation(context, targetUserId, userName, resolvedAvatar, text, nowMs)
+            CloudflareClient.sendCloudflareMessage(
+                context = context,
+                receiverId = targetUserId,
+                text = text,
+                type = "text",
+                messageId = clientMsgId
+            ) { success, _ ->
+                messages = messages.map { m ->
+                    if (m.clientMessageId == clientMsgId || m.id == clientMsgId) {
+                        m.copy(status = if (success) MessageStatus.DELIVERED else MessageStatus.FAILED)
+                    } else m
+                }
+                if (!success) {
+                    Toast.makeText(context, "تعذر الإرسال: اضغط على الرسالة لإعادة المحاولة", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else {
+            messages = messages.map { m ->
+                if (m.clientMessageId == clientMsgId || m.id == clientMsgId) m.copy(status = MessageStatus.DELIVERED) else m
+            }
+        }
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFFF8FAFC))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFF080D1A),
+                        Color(0xFF0B1121),
+                        Color(0xFF0F172A)
+                    )
+                )
+            )
     ) {
-        // 1. TOP BAR (Matching App System: Audio Call, Video Call, Name->Profile, Avatar->Story)
+        // 1. TOP BAR (Deep Navy + Indigo)
         ChatTopBar(
             targetUserId = targetUserId,
             userName = userName,
             isOnline = isTargetOnline,
             isTyping = isTyping || isRemoteTyping,
-            avatarUrl = avatarUrl,
+            avatarUrl = resolvedAvatar,
             onAvatarClick = {
                 val story = StoryManager.getStoryForUser(context, targetUserId, userName)
                 if (story != null) {
@@ -845,7 +975,10 @@ fun ChatDetailScreen(
                             text = message.content.text,
                             timestamp = message.timestamp,
                             isOutgoing = message.isOutgoing,
-                            status = message.status
+                            status = message.status,
+                            onRetry = if (message.isOutgoing && message.status == MessageStatus.FAILED) {
+                                { sendOrRetryText(message.content.text, message.clientMessageId.ifEmpty { message.id }) }
+                            } else null
                         )
                         is MessageContent.Photo -> {
                             if (message.content.urls.size == 1) {
@@ -901,7 +1034,7 @@ fun ChatDetailScreen(
                                     putExtra("isVideo", message.content.isVideo)
                                     putExtra("targetUserId", targetUserId)
                                     putExtra("targetUserName", userName)
-                                    putExtra("targetUserAvatar", avatarUrl)
+                                    putExtra("targetUserAvatar", resolvedAvatar)
                                 }
                                 context.startActivity(intent)
                             }
@@ -920,248 +1053,196 @@ fun ChatDetailScreen(
                 .imePadding()
         ) {
             ChatInputBar(
-                onSendText = { text ->
-                    val hasNet = isNetworkAvailable(context)
-                    val now = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
-                    val nowMs = System.currentTimeMillis()
-                    val clientMsgId = "msg_${nowMs}_${java.util.UUID.randomUUID().toString().take(8)}"
-                    val localMsg = Message(
-                        id = clientMsgId,
-                        content = MessageContent.Text(text),
-                        timestamp = now,
-                        isOutgoing = true,
-                        status = if (hasNet) MessageStatus.SENDING else MessageStatus.FAILED,
-                        timestampMs = nowMs,
-                        clientMessageId = clientMsgId
-                    )
-                    messages = (messages + localMsg).sortedBy { it.timestampMs }
-
-                    if (!hasNet) {
-                        Toast.makeText(context, "تعذر الإرسال: لا يوجد اتصال بالإنترنت", Toast.LENGTH_SHORT).show()
-                    } else if (targetUserId.isNotEmpty()) {
-                        CloudflareClient.updateLocalConversation(context, targetUserId, userName, avatarUrl, text, nowMs)
-                        CloudflareClient.sendCloudflareMessage(
-                            context = context,
-                            receiverId = targetUserId,
-                            text = text,
-                            type = "text",
-                            messageId = clientMsgId
-                        ) { success, _ ->
-                            messages = messages.map { m ->
-                                if (m.clientMessageId == clientMsgId || m.id == clientMsgId) {
-                                    m.copy(status = if (success) MessageStatus.DELIVERED else MessageStatus.FAILED)
-                                } else m
-                            }
-                            if (!success) {
-                                Toast.makeText(context, "تعذر الإرسال: تحقق من الاتصال بالإنترنت", Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    } else {
-                        messages = messages.map { m ->
-                            if (m.clientMessageId == clientMsgId || m.id == clientMsgId) m.copy(status = MessageStatus.DELIVERED) else m
-                        }
-                    }
-                },
+                onSendText = { text -> sendOrRetryText(text) },
                 onSendFile = { uri, mimeType ->
                     val hasNet = isNetworkAvailable(context)
-                    var displayName = "file_${System.currentTimeMillis()}"
-                    try {
-                        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                            if (nameIndex != -1 && cursor.moveToFirst()) {
-                                val n = cursor.getString(nameIndex)
-                                if (!n.isNullOrBlank()) displayName = n
-                            }
-                        }
-                    } catch (e: Exception) { e.printStackTrace() }
-
-                    if (!displayName.contains(".")) {
-                        val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
-                        if (!ext.isNullOrBlank()) displayName = "$displayName.$ext"
-                    }
-
                     val msgType = when {
                         mimeType.startsWith("image/") -> "image"
                         mimeType.startsWith("audio/") -> "audio"
                         mimeType.startsWith("video/") -> "video"
                         else -> "file"
                     }
-
                     val now = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
-                    val msgId = "msg_${System.currentTimeMillis()}_${(100..999).random()}"
+                    val nowMs = System.currentTimeMillis()
+                    val msgId = "msg_${nowMs}_${(100..999).random()}"
+                    val previewUrl = uri.toString()
 
-                    // Read bytes immediately and cache to local app storage
-                    var localSavedPath = uri.toString()
-                    val fileBytes: ByteArray? = try {
-                        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        null
-                    }
-
-                    if (fileBytes != null && fileBytes.isNotEmpty()) {
-                        val mediaDir = File(context.filesDir, "chat_media").apply { mkdirs() }
-                        val localFile = File(mediaDir, "img_${msgId}_$displayName")
-                        localFile.writeBytes(fileBytes)
-                        localSavedPath = localFile.absolutePath
-
-                        try {
-                            val altFile1 = File(mediaDir, "img_$msgId")
-                            altFile1.writeBytes(fileBytes)
-                            val altFile2 = File(mediaDir, msgId)
-                            altFile2.writeBytes(fileBytes)
-                            val altFile3 = File(mediaDir, displayName)
-                            altFile3.writeBytes(fileBytes)
-                        } catch (_: Exception) {}
-
-                        ChatMediaCache.register(context, msgId, localSavedPath)
-                        ChatMediaCache.register(context, displayName, localSavedPath)
-                        ChatMediaCache.register(context, "img_$msgId", localSavedPath)
-                    }
-
+                    // Show bubble immediately on Main Thread without blocking UI
                     val localMsg = Message(
                         id = msgId,
                         content = when (msgType) {
-                            "image" -> MessageContent.Photo(listOf(localSavedPath))
-                            else -> MessageContent.Document(displayName, "مرفق وسائط", msgType)
+                            "image" -> MessageContent.Photo(listOf(previewUrl))
+                            else -> MessageContent.Document("جاري تحضير الملف...", "مرفق وسائط", msgType)
                         },
                         timestamp = now,
                         isOutgoing = true,
-                        status = if (hasNet) MessageStatus.SENDING else MessageStatus.FAILED
+                        status = if (hasNet) MessageStatus.SENDING else MessageStatus.FAILED,
+                        timestampMs = nowMs,
+                        clientMessageId = msgId
                     )
-                    messages = messages + localMsg
+                    messages = (messages + localMsg).sortedBy { it.timestampMs }
 
                     if (!hasNet) {
                         Toast.makeText(context, if (msgType == "image") "تعذر إرسال الصورة: لا يوجد اتصال بالإنترنت" else "تعذر إرسال الملف: لا يوجد اتصال بالإنترنت", Toast.LENGTH_SHORT).show()
-                    } else if (targetUserId.isNotEmpty()) {
+                    } else {
                         coroutineScope.launch(Dispatchers.IO) {
                             try {
-                                val bytes = fileBytes ?: context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                                if (bytes != null) {
-                                    CloudflareClient.uploadMediaFile(context, bytes, displayName, mimeType) { success, r2Url ->
-                                        if (success && !r2Url.isNullOrEmpty()) {
-                                            ChatMediaCache.register(context, r2Url, localSavedPath)
-                                            val r2Key = r2Url.substringAfterLast("/")
-                                            ChatMediaCache.register(context, r2Key, localSavedPath)
-
-                                            messages = messages.map { m ->
-                                                if (m.id == msgId) {
-                                                    m.copy(
-                                                        status = MessageStatus.DELIVERED,
-                                                        content = when (m.content) {
-                                                            is MessageContent.Photo -> MessageContent.Photo(listOf(localSavedPath))
-                                                            else -> m.content
-                                                        }
-                                                    )
-                                                } else m
-                                            }
-                                            CloudflareClient.sendCloudflareMessage(
-                                                context = context,
-                                                receiverId = targetUserId,
-                                                text = displayName,
-                                                type = msgType,
-                                                mediaUrl = r2Url,
-                                                fileName = displayName,
-                                                messageId = msgId
-                                            ) { sendSuccess, _ ->
-                                                if (!sendSuccess) {
-                                                    messages = messages.map { m ->
-                                                        if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
-                                                    }
-                                                    Toast.makeText(context, "تعذر إرسال المرفق: خطأ في الاتصال", Toast.LENGTH_SHORT).show()
-                                                }
-                                            }
-                                        } else {
-                                            // Keep local display and mark failed if network issue
-                                            messages = messages.map { m ->
-                                                if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
-                                            }
-                                            Toast.makeText(context, if (msgType == "image") "تعذر إرسال الصورة: تحقق من الاتصال بالإنترنت" else "تعذر إرسال الملف: تحقق من الاتصال بالإنترنت", Toast.LENGTH_SHORT).show()
+                                var displayName = "file_$nowMs"
+                                try {
+                                    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                                        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                                        if (nameIndex != -1 && cursor.moveToFirst()) {
+                                            val n = cursor.getString(nameIndex)
+                                            if (!n.isNullOrBlank()) displayName = n
                                         }
                                     }
-                                } else {
-                                    messages = messages.map { m ->
-                                        if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                } catch (_: Exception) {}
+
+                                if (!displayName.contains(".")) {
+                                    val ext = MimeTypeMap.getSingleton().getExtensionFromMimeType(mimeType)
+                                    if (!ext.isNullOrBlank()) displayName = "$displayName.$ext"
+                                }
+
+                                val fileBytes = readAndPrepareMediaBytes(context, uri, isImage = (msgType == "image"))
+                                if (fileBytes == null || fileBytes.isEmpty()) {
+                                    withContext(Dispatchers.Main) {
+                                        messages = messages.map { m ->
+                                            if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                        }
+                                        Toast.makeText(context, "تعذر قراءة الملف المرفق", Toast.LENGTH_SHORT).show()
                                     }
-                                    Toast.makeText(context, "تعذر قراءة الملف المرفق", Toast.LENGTH_SHORT).show()
+                                    return@launch
+                                }
+
+                                val mediaDir = File(context.filesDir, "chat_media").apply { mkdirs() }
+                                val localFile = File(mediaDir, "img_${msgId}_$displayName")
+                                localFile.writeBytes(fileBytes)
+                                val localSavedPath = localFile.absolutePath
+
+                                ChatMediaCache.register(context, msgId, localSavedPath)
+                                ChatMediaCache.register(context, displayName, localSavedPath)
+                                ChatMediaCache.register(context, "img_$msgId", localSavedPath)
+
+                                withContext(Dispatchers.Main) {
+                                    messages = messages.map { m ->
+                                        if (m.id == msgId) {
+                                            m.copy(
+                                                content = when (msgType) {
+                                                    "image" -> MessageContent.Photo(listOf(localSavedPath))
+                                                    else -> MessageContent.Document(displayName, "مرفق وسائط", msgType, mediaUrl = localSavedPath)
+                                                }
+                                            )
+                                        } else m
+                                    }
+                                }
+
+                                if (targetUserId.isEmpty()) {
+                                    withContext(Dispatchers.Main) {
+                                        messages = messages.map { m ->
+                                            if (m.id == msgId) m.copy(status = MessageStatus.DELIVERED) else m
+                                        }
+                                    }
+                                    return@launch
+                                }
+
+                                val uploadMime = if (msgType == "image") "image/jpeg" else mimeType
+                                CloudflareClient.uploadMediaFile(context, fileBytes, displayName, uploadMime) { success, r2Url ->
+                                    if (success && !r2Url.isNullOrEmpty()) {
+                                        ChatMediaCache.register(context, r2Url, localSavedPath)
+                                        ChatMediaCache.register(context, r2Url.substringAfterLast("/"), localSavedPath)
+
+                                        val convPreview = if (msgType == "image") "📷 صورة" else "📎 $displayName"
+                                        CloudflareClient.updateLocalConversation(context, targetUserId, userName, resolvedAvatar, convPreview, nowMs)
+                                        CloudflareClient.sendCloudflareMessage(
+                                            context = context,
+                                            receiverId = targetUserId,
+                                            text = displayName,
+                                            type = msgType,
+                                            mediaUrl = r2Url,
+                                            fileName = displayName,
+                                            messageId = msgId
+                                        ) { sendSuccess, _ ->
+                                            messages = messages.map { m ->
+                                                if (m.id == msgId) m.copy(status = if (sendSuccess) MessageStatus.DELIVERED else MessageStatus.FAILED) else m
+                                            }
+                                            if (!sendSuccess) {
+                                                Toast.makeText(context, "تعذر إرسال المرفق: خطأ في الاتصال", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    } else {
+                                        messages = messages.map { m ->
+                                            if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                        }
+                                        Toast.makeText(context, if (msgType == "image") "تعذر إرسال الصورة: تحقق من الاتصال بالإنترنت" else "تعذر إرسال الملف: تحقق من الاتصال بالإنترنت", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             } catch (e: Exception) {
                                 e.printStackTrace()
-                                messages = messages.map { m ->
-                                    if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                withContext(Dispatchers.Main) {
+                                    messages = messages.map { m ->
+                                        if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                    }
+                                    Toast.makeText(context, "تعذر الإرسال: فشل النقل", Toast.LENGTH_SHORT).show()
                                 }
-                                Toast.makeText(context, "تعذر الإرسال: فشل النقل", Toast.LENGTH_SHORT).show()
                             }
-                        }
-                    } else {
-                        messages = messages.map { m ->
-                            if (m.id == msgId) m.copy(status = MessageStatus.DELIVERED) else m
                         }
                     }
                 },
                 onSendEditedPhoto = { editedUri, caption, isViewTwice ->
                     val hasNet = isNetworkAvailable(context)
                     val now = SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date())
-                    val msgId = "msg_${System.currentTimeMillis()}_${(100..999).random()}"
-                    val displayName = "photo_${System.currentTimeMillis()}.jpg"
-
-                    var localSavedPath = editedUri.toString()
-                    val fileBytes: ByteArray? = try {
-                        context.contentResolver.openInputStream(editedUri)?.use { it.readBytes() }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        null
-                    }
-
-                    if (fileBytes != null && fileBytes.isNotEmpty()) {
-                        val mediaDir = File(context.filesDir, "chat_media").apply { mkdirs() }
-                        val localFile = File(mediaDir, "img_${msgId}_$displayName")
-                        localFile.writeBytes(fileBytes)
-                        localSavedPath = localFile.absolutePath
-
-                        try {
-                            val altFile1 = File(mediaDir, "img_$msgId")
-                            altFile1.writeBytes(fileBytes)
-                            val altFile2 = File(mediaDir, msgId)
-                            altFile2.writeBytes(fileBytes)
-                        } catch (_: Exception) {}
-
-                        ChatMediaCache.register(context, msgId, localSavedPath)
-                        ChatMediaCache.register(context, displayName, localSavedPath)
-                        ChatMediaCache.register(context, "img_$msgId", localSavedPath)
-                    }
+                    val nowMs = System.currentTimeMillis()
+                    val msgId = "msg_${nowMs}_${(100..999).random()}"
+                    val displayName = "photo_${nowMs}.jpg"
 
                     val localMsg = Message(
                         id = msgId,
-                        content = MessageContent.Photo(listOf(localSavedPath)),
+                        content = MessageContent.Photo(listOf(editedUri.toString())),
                         timestamp = now,
                         isOutgoing = true,
-                        status = if (hasNet) MessageStatus.SENDING else MessageStatus.FAILED
+                        status = if (hasNet) MessageStatus.SENDING else MessageStatus.FAILED,
+                        timestampMs = nowMs,
+                        clientMessageId = msgId
                     )
-                    messages = messages + localMsg
+                    messages = (messages + localMsg).sortedBy { it.timestampMs }
 
                     if (!hasNet) {
                         Toast.makeText(context, "تعذر إرسال الصورة: لا يوجد اتصال بالإنترنت", Toast.LENGTH_SHORT).show()
-                    } else if (targetUserId.isNotEmpty()) {
+                    } else {
                         coroutineScope.launch(Dispatchers.IO) {
                             try {
-                                val bytes = fileBytes ?: context.contentResolver.openInputStream(editedUri)?.use { it.readBytes() }
+                                val bytes = readAndPrepareMediaBytes(context, editedUri, isImage = true)
                                 if (bytes != null && bytes.isNotEmpty()) {
+                                    val mediaDir = File(context.filesDir, "chat_media").apply { mkdirs() }
+                                    val localFile = File(mediaDir, "img_${msgId}_$displayName")
+                                    localFile.writeBytes(bytes)
+                                    val localSavedPath = localFile.absolutePath
+
+                                    ChatMediaCache.register(context, msgId, localSavedPath)
+                                    ChatMediaCache.register(context, displayName, localSavedPath)
+                                    ChatMediaCache.register(context, "img_$msgId", localSavedPath)
+
+                                    withContext(Dispatchers.Main) {
+                                        messages = messages.map { m ->
+                                            if (m.id == msgId) m.copy(content = MessageContent.Photo(listOf(localSavedPath))) else m
+                                        }
+                                    }
+
+                                    if (targetUserId.isEmpty()) {
+                                        withContext(Dispatchers.Main) {
+                                            messages = messages.map { m ->
+                                                if (m.id == msgId) m.copy(status = MessageStatus.DELIVERED) else m
+                                            }
+                                        }
+                                        return@launch
+                                    }
+
                                     CloudflareClient.uploadMediaFile(context, bytes, displayName, "image/jpeg") { success, r2Url ->
                                         if (success && !r2Url.isNullOrEmpty()) {
                                             ChatMediaCache.register(context, r2Url, localSavedPath)
-                                            val r2Key = r2Url.substringAfterLast("/")
-                                            ChatMediaCache.register(context, r2Key, localSavedPath)
+                                            ChatMediaCache.register(context, r2Url.substringAfterLast("/"), localSavedPath)
 
-                                            messages = messages.map { m ->
-                                                if (m.id == msgId) {
-                                                    m.copy(
-                                                        status = MessageStatus.DELIVERED,
-                                                        content = MessageContent.Photo(listOf(localSavedPath))
-                                                    )
-                                                } else m
-                                            }
-
+                                            CloudflareClient.updateLocalConversation(context, targetUserId, userName, resolvedAvatar, "📷 صورة", nowMs)
                                             CloudflareClient.sendCloudflareMessage(
                                                 context = context,
                                                 receiverId = targetUserId,
@@ -1171,10 +1252,10 @@ fun ChatDetailScreen(
                                                 fileName = displayName,
                                                 messageId = msgId
                                             ) { sendSuccess, _ ->
+                                                messages = messages.map { m ->
+                                                    if (m.id == msgId) m.copy(status = if (sendSuccess) MessageStatus.DELIVERED else MessageStatus.FAILED) else m
+                                                }
                                                 if (!sendSuccess) {
-                                                    messages = messages.map { m ->
-                                                        if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
-                                                    }
                                                     Toast.makeText(context, "تعذر إرسال الصورة: خطأ في الاتصال", Toast.LENGTH_SHORT).show()
                                                 }
                                             }
@@ -1186,22 +1267,22 @@ fun ChatDetailScreen(
                                         }
                                     }
                                 } else {
-                                    messages = messages.map { m ->
-                                        if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                    withContext(Dispatchers.Main) {
+                                        messages = messages.map { m ->
+                                            if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                        }
+                                        Toast.makeText(context, "تعذر قراءة ملف الصورة", Toast.LENGTH_SHORT).show()
                                     }
-                                    Toast.makeText(context, "تعذر قراءة ملف الصورة", Toast.LENGTH_SHORT).show()
                                 }
                             } catch (e: Exception) {
                                 e.printStackTrace()
-                                messages = messages.map { m ->
-                                    if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                withContext(Dispatchers.Main) {
+                                    messages = messages.map { m ->
+                                        if (m.id == msgId) m.copy(status = MessageStatus.FAILED) else m
+                                    }
+                                    Toast.makeText(context, "تعذر الإرسال: فشل النقل", Toast.LENGTH_SHORT).show()
                                 }
-                                Toast.makeText(context, "تعذر الإرسال: فشل النقل", Toast.LENGTH_SHORT).show()
                             }
-                        }
-                    } else {
-                        messages = messages.map { m ->
-                            if (m.id == msgId) m.copy(status = MessageStatus.DELIVERED) else m
                         }
                     }
                 },
@@ -1283,7 +1364,7 @@ fun ChatDetailScreen(
                                     CloudflareClient.uploadMediaFile(context, bytes, displayName, "audio/mp4") { uploadOk, r2Url ->
                                         if (uploadOk && !r2Url.isNullOrEmpty()) {
                                             ChatMediaCache.register(context, r2Url, cachedAudio.absolutePath)
-                                            CloudflareClient.updateLocalConversation(context, targetUserId, userName, avatarUrl, "🎤 رسالة صوتية ($durLabel)", nowMs)
+                                            CloudflareClient.updateLocalConversation(context, targetUserId, userName, resolvedAvatar, "🎤 رسالة صوتية ($durLabel)", nowMs)
                                             CloudflareClient.sendCloudflareMessage(
                                                 context = context,
                                                 receiverId = targetUserId,
@@ -1370,7 +1451,7 @@ fun ChatTopBar(
     userName: String = "سامر الأتروني",
     isOnline: Boolean = true,
     isTyping: Boolean = false,
-    avatarUrl: String = "https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?w=100&h=100&fit=crop",
+    avatarUrl: String = "",
     onAvatarClick: () -> Unit = {},
     onNameClick: () -> Unit = {},
     onBack: () -> Unit
@@ -1379,172 +1460,229 @@ fun ChatTopBar(
     val hasStory = remember(targetUserId, userName) {
         StoryManager.hasActiveStory(context, targetUserId, userName)
     }
+    val initialChar = remember(userName) { userName.take(1).uppercase().ifEmpty { "ص" } }
 
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color.White)
-            .statusBarsPadding()
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .background(Color(0xFF11192C))
     ) {
-        // Back Button
-        IconButton(
-            onClick = onBack,
-            modifier = Modifier.size(38.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.ArrowBack,
-                contentDescription = "رجوع",
-                tint = Color(0xFF0F172A),
-                modifier = Modifier.size(20.dp)
-            )
-        }
-
-        Spacer(modifier = Modifier.width(4.dp))
-
-        // Avatar (With green/blue story ring if story exists)
-        Box(
+        Row(
             modifier = Modifier
-                .size(42.dp)
-                .clip(CircleShape)
-                .clickable { onAvatarClick() }
-                .padding(if (hasStory) 2.dp else 0.dp)
-                .background(
-                    if (hasStory) Brush.sweepGradient(listOf(Color(0xFF2563EB), Color(0xFF10B981), Color(0xFF2563EB)))
-                    else Brush.linearGradient(listOf(Color.Transparent, Color.Transparent)),
-                    CircleShape
-                )
-                .padding(if (hasStory) 2.dp else 0.dp),
-            contentAlignment = Alignment.Center
+                .fillMaxWidth()
+                .statusBarsPadding()
+                .padding(horizontal = 10.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            AsyncImage(
-                model = avatarUrl,
-                contentDescription = "الصورة الشخصية",
-                modifier = Modifier
-                    .fillMaxSize()
-                    .clip(CircleShape)
-                    .border(1.dp, Color(0xFFE2E8F0), CircleShape),
-                contentScale = ContentScale.Crop
-            )
-            // Online/Offline presence indicator dot (Green for online, Red for offline)
+            // Back Button
+            IconButton(
+                onClick = onBack,
+                modifier = Modifier.size(38.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.ArrowBack,
+                    contentDescription = "رجوع",
+                    tint = Color(0xFFE2E8F0),
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(4.dp))
+
+            // Avatar (With Indigo/Cyan story ring if story exists, and initial fallback if no avatar)
             Box(
                 modifier = Modifier
-                    .size(11.dp)
-                    .align(Alignment.BottomEnd)
-                    .background(if (isOnline) Color(0xFF10B981) else Color(0xFFEF4444), CircleShape)
-                    .border(2.dp, Color.White, CircleShape)
-            )
-        }
-
-        Spacer(modifier = Modifier.width(10.dp))
-
-        // Clickable User Name & Status Column -> Opens Personal Profile
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null
-                ) { onNameClick() }
-        ) {
-            Text(
-                text = userName,
-                color = Color(0xFF0F172A),
-                fontWeight = FontWeight.Bold,
-                fontSize = 15.5.sp,
-                fontFamily = TajawalFontFamily,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (isTyping) {
-                Text(
-                    text = "يكتب الآن...",
-                    color = Color(0xFF2563EB),
-                    fontSize = 11.5.sp,
-                    fontFamily = TajawalFontFamily,
-                    maxLines = 1
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .clickable { onAvatarClick() }
+                    .padding(if (hasStory) 2.dp else 0.dp)
+                    .background(
+                        if (hasStory) Brush.sweepGradient(listOf(Color(0xFF4F46E5), Color(0xFF818CF8), Color(0xFF38BDF8), Color(0xFF4F46E5)))
+                        else Brush.linearGradient(listOf(Color.Transparent, Color.Transparent)),
+                        CircleShape
+                    )
+                    .padding(if (hasStory) 2.dp else 0.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(CircleShape)
+                        .background(Color(0xFF1E293B))
+                        .border(1.dp, Color(0xFF28395E), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (avatarUrl.isNotBlank()) {
+                        SubcomposeAsyncImage(
+                            model = avatarUrl,
+                            contentDescription = "الصورة الشخصية",
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(CircleShape),
+                            contentScale = ContentScale.Crop,
+                            loading = {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = initialChar,
+                                        color = Color(0xFF818CF8),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 16.sp,
+                                        fontFamily = TajawalFontFamily
+                                    )
+                                }
+                            },
+                            error = {
+                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                    Text(
+                                        text = initialChar,
+                                        color = Color(0xFF818CF8),
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 16.sp,
+                                        fontFamily = TajawalFontFamily
+                                    )
+                                }
+                            }
+                        )
+                    } else {
+                        Text(
+                            text = initialChar,
+                            color = Color(0xFF818CF8),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp,
+                            fontFamily = TajawalFontFamily
+                        )
+                    }
+                }
+                // Online/Offline presence indicator dot
+                Box(
+                    modifier = Modifier
+                        .size(11.dp)
+                        .align(Alignment.BottomEnd)
+                        .background(if (isOnline) Color(0xFF10B981) else Color(0xFFEF4444), CircleShape)
+                        .border(2.dp, Color(0xFF11192C), CircleShape)
                 )
-            } else if (isOnline) {
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            // Clickable User Name & Status Column -> Opens Personal Profile
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { onNameClick() }
+            ) {
                 Text(
-                    text = "متصل",
-                    color = Color(0xFF10B981),
-                    fontSize = 11.5.sp,
+                    text = userName,
+                    color = Color(0xFFF8FAFC),
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.5.sp,
                     fontFamily = TajawalFontFamily,
-                    maxLines = 1
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
-            } else {
-                Text(
-                    text = "غير متصل",
-                    color = Color(0xFFEF4444),
-                    fontSize = 11.5.sp,
-                    fontFamily = TajawalFontFamily,
-                    maxLines = 1
+                if (isTyping) {
+                    Text(
+                        text = "يكتب الآن...",
+                        color = Color(0xFF818CF8),
+                        fontSize = 11.5.sp,
+                        fontFamily = TajawalFontFamily,
+                        maxLines = 1
+                    )
+                } else if (isOnline) {
+                    Text(
+                        text = "متصل الآن",
+                        color = Color(0xFF34D399),
+                        fontSize = 11.5.sp,
+                        fontFamily = TajawalFontFamily,
+                        maxLines = 1
+                    )
+                } else {
+                    Text(
+                        text = "غير متصل",
+                        color = Color(0xFF94A3B8),
+                        fontSize = 11.5.sp,
+                        fontFamily = TajawalFontFamily,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            // 1. Audio Call Button
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF18233E))
+                    .border(1.dp, Color(0xFF28395E), CircleShape)
+                    .clickable {
+                        if (targetUserId.isBlank()) {
+                            Toast.makeText(context, "تعذر بدء المكالمة: معرف المستخدم غير متاح", Toast.LENGTH_SHORT).show()
+                            return@clickable
+                        }
+                        val myUserId = CloudflareClient.getCurrentUserId(context)
+                        val callRoomId = "call_" + listOf(myUserId, targetUserId).sorted().joinToString("_") + "_" + System.currentTimeMillis()
+
+                        val intent = Intent(context, CallActivity::class.java).apply {
+                            putExtra("callID", callRoomId)
+                            putExtra("isVideo", false)
+                            putExtra("isIncoming", false)
+                            putExtra("targetUserId", targetUserId)
+                            putExtra("targetUserName", userName)
+                            putExtra("targetUserAvatar", avatarUrl)
+                        }
+                        context.startActivity(intent)
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Call,
+                    contentDescription = "اتصال صوتي",
+                    tint = Color(0xFF818CF8),
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            // 2. Video Call Button
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF18233E))
+                    .border(1.dp, Color(0xFF28395E), CircleShape)
+                    .clickable {
+                        if (targetUserId.isBlank()) {
+                            Toast.makeText(context, "تعذر بدء المكالمة: معرف المستخدم غير متاح", Toast.LENGTH_SHORT).show()
+                            return@clickable
+                        }
+                        val myUserId = CloudflareClient.getCurrentUserId(context)
+                        val callRoomId = "call_" + listOf(myUserId, targetUserId).sorted().joinToString("_") + "_" + System.currentTimeMillis()
+
+                        val intent = Intent(context, CallActivity::class.java).apply {
+                            putExtra("callID", callRoomId)
+                            putExtra("isVideo", true)
+                            putExtra("isIncoming", false)
+                            putExtra("targetUserId", targetUserId)
+                            putExtra("targetUserName", userName)
+                            putExtra("targetUserAvatar", avatarUrl)
+                        }
+                        context.startActivity(intent)
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Videocam,
+                    contentDescription = "اتصال فيديو",
+                    tint = Color(0xFF818CF8),
+                    modifier = Modifier.size(21.dp)
                 )
             }
         }
-
-        // 1. Audio Call Button - Free Icon
-        IconButton(
-            onClick = {
-                if (targetUserId.isBlank()) {
-                    Toast.makeText(context, "تعذر بدء المكالمة: معرف المستخدم غير متاح", Toast.LENGTH_SHORT).show()
-                    return@IconButton
-                }
-                val myUserId = CloudflareClient.getCurrentUserId(context)
-                val callRoomId = "call_" + listOf(myUserId, targetUserId).sorted().joinToString("_") + "_" + System.currentTimeMillis()
-
-                val intent = Intent(context, CallActivity::class.java).apply {
-                    putExtra("callID", callRoomId)
-                    putExtra("isVideo", false)
-                    putExtra("isIncoming", false)
-                    putExtra("targetUserId", targetUserId)
-                    putExtra("targetUserName", userName)
-                    putExtra("targetUserAvatar", avatarUrl)
-                }
-                context.startActivity(intent)
-            },
-            modifier = Modifier.size(38.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.Call,
-                contentDescription = "اتصال صوتي",
-                tint = Color(0xFF2563EB),
-                modifier = Modifier.size(22.dp)
-            )
-        }
-
-        Spacer(modifier = Modifier.width(4.dp))
-
-        // 2. Video Call Button - Free Icon
-        IconButton(
-            onClick = {
-                if (targetUserId.isBlank()) {
-                    Toast.makeText(context, "تعذر بدء المكالمة: معرف المستخدم غير متاح", Toast.LENGTH_SHORT).show()
-                    return@IconButton
-                }
-                val myUserId = CloudflareClient.getCurrentUserId(context)
-                val callRoomId = "call_" + listOf(myUserId, targetUserId).sorted().joinToString("_") + "_" + System.currentTimeMillis()
-
-                val intent = Intent(context, CallActivity::class.java).apply {
-                    putExtra("callID", callRoomId)
-                    putExtra("isVideo", true)
-                    putExtra("isIncoming", false)
-                    putExtra("targetUserId", targetUserId)
-                    putExtra("targetUserName", userName)
-                    putExtra("targetUserAvatar", avatarUrl)
-                }
-                context.startActivity(intent)
-            },
-            modifier = Modifier.size(38.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.Videocam,
-                contentDescription = "اتصال فيديو",
-                tint = Color(0xFF2563EB),
-                modifier = Modifier.size(24.dp)
-            )
-        }
+        HorizontalDivider(thickness = 1.dp, color = Color(0xFF1F2E4D))
     }
 }
 
@@ -1799,11 +1937,29 @@ fun StoryViewerDialog(
 
 @Composable
 fun TextBubble(
-    text: String, 
-    timestamp: String, 
+    text: String,
+    timestamp: String,
     isOutgoing: Boolean,
-    status: MessageStatus = MessageStatus.DELIVERED
+    status: MessageStatus = MessageStatus.DELIVERED,
+    onRetry: (() -> Unit)? = null
 ) {
+    val outgoingBrush = remember(status) {
+        if (status == MessageStatus.FAILED) {
+            Brush.linearGradient(listOf(Color(0xFFDC2626), Color(0xFFEF4444)))
+        } else {
+            Brush.linearGradient(listOf(Color(0xFF4F46E5), Color(0xFF6366F1)))
+        }
+    }
+    val incomingBrush = remember {
+        Brush.linearGradient(listOf(Color(0xFF17223B), Color(0xFF17223B)))
+    }
+    val bubbleShape = RoundedCornerShape(
+        topStart = 18.dp,
+        topEnd = 18.dp,
+        bottomStart = if (isOutgoing) 18.dp else 4.dp,
+        bottomEnd = if (isOutgoing) 4.dp else 18.dp
+    )
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isOutgoing) Arrangement.End else Arrangement.Start
@@ -1813,35 +1969,24 @@ fun TextBubble(
         ) {
             Column(
                 modifier = Modifier
-                    .widthIn(max = 280.dp)
-                    .clip(
-                        RoundedCornerShape(
-                            topStart = 16.dp,
-                            topEnd = 16.dp,
-                            bottomStart = if (isOutgoing) 16.dp else 4.dp,
-                            bottomEnd = if (isOutgoing) 4.dp else 16.dp
-                        )
-                    )
-                    .background(
-                        if (isOutgoing) {
-                            if (status == MessageStatus.FAILED) Color(0xFFEF4444) else Color(0xFF2563EB)
-                        } else Color.White
-                    )
+                    .widthIn(max = 285.dp)
+                    .clip(bubbleShape)
+                    .background(if (isOutgoing) outgoingBrush else incomingBrush)
                     .border(
                         width = 1.dp,
-                        color = if (isOutgoing) Color(0x22FFFFFF) else Color(0xFFE2E8F0),
-                        shape = RoundedCornerShape(
-                            topStart = 16.dp,
-                            topEnd = 16.dp,
-                            bottomStart = if (isOutgoing) 16.dp else 4.dp,
-                            bottomEnd = if (isOutgoing) 4.dp else 16.dp
-                        )
+                        color = if (isOutgoing) Color(0x28FFFFFF) else Color(0xFF263659),
+                        shape = bubbleShape
                     )
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
+                    .let { base ->
+                        if (isOutgoing && status == MessageStatus.FAILED && onRetry != null) {
+                            base.clickable { onRetry() }
+                        } else base
+                    }
+                    .padding(horizontal = 14.dp, vertical = 9.dp)
             ) {
                 Text(
                     text = text,
-                    color = if (isOutgoing) Color.White else Color(0xFF0F172A),
+                    color = if (isOutgoing) Color.White else Color(0xFFF1F5F9),
                     fontFamily = TajawalFontFamily,
                     fontSize = 14.5.sp,
                     lineHeight = 20.sp
@@ -1849,7 +1994,7 @@ fun TextBubble(
                 Row(
                     modifier = Modifier
                         .align(Alignment.End)
-                        .padding(top = 2.dp),
+                        .padding(top = 3.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
@@ -1873,7 +2018,7 @@ fun TextBubble(
                             else -> {
                                 Text(
                                     text = "✓✓",
-                                    color = Color(0xFFDBEAFE),
+                                    color = Color(0xFFE0E7FF),
                                     fontFamily = TajawalFontFamily,
                                     fontSize = 10.sp
                                 )
@@ -1882,7 +2027,7 @@ fun TextBubble(
                     }
                     Text(
                         text = timestamp,
-                        color = if (isOutgoing) Color(0xFFDBEAFE) else Color(0xFF64748B),
+                        color = if (isOutgoing) Color(0xFFE0E7FF) else Color(0xFF94A3B8),
                         fontFamily = TajawalFontFamily,
                         fontSize = 10.sp
                     )
@@ -1891,11 +2036,13 @@ fun TextBubble(
 
             if (isOutgoing && status == MessageStatus.FAILED) {
                 Text(
-                    text = "تعذر الإرسال (تحقق من الإنترنت)",
-                    color = Color(0xFFDC2626),
+                    text = if (onRetry != null) "تعذر الإرسال • اضغط لإعادة المحاولة" else "تعذر الإرسال (تحقق من الإنترنت)",
+                    color = Color(0xFFFCA5A5),
                     fontFamily = TajawalFontFamily,
                     fontSize = 10.5.sp,
-                    modifier = Modifier.padding(top = 2.dp, end = 4.dp)
+                    modifier = Modifier
+                        .padding(top = 3.dp, end = 4.dp)
+                        .let { mod -> if (onRetry != null) mod.clickable { onRetry() } else mod }
                 )
             }
         }
@@ -1904,8 +2051,8 @@ fun TextBubble(
 
 @Composable
 fun SinglePhotoBubble(
-    url: String, 
-    timestamp: String, 
+    url: String,
+    timestamp: String,
     isOutgoing: Boolean,
     status: MessageStatus = MessageStatus.DELIVERED,
     onPhotoClick: (String) -> Unit = {}
@@ -1939,10 +2086,10 @@ fun SinglePhotoBubble(
                     .fillMaxWidth()
                     .height(220.dp)
                     .clip(RoundedCornerShape(18.dp))
-                    .background(Color(0xFFF1F5F9))
+                    .background(Color(0xFF17223B))
                     .border(
                         1.5.dp,
-                        if (isOutgoing && status == MessageStatus.FAILED) Color(0xFFEF4444) else Color(0xFFE2E8F0),
+                        if (isOutgoing && status == MessageStatus.FAILED) Color(0xFFEF4444) else Color(0xFF263659),
                         RoundedCornerShape(18.dp)
                     )
                     .clickable { onPhotoClick(url) }
@@ -1987,7 +2134,7 @@ fun SinglePhotoBubble(
                                 Icon(
                                     imageVector = Icons.Default.ErrorOutline,
                                     contentDescription = "تعذر الإرسال",
-                                    tint = Color(0xFFEF4444),
+                                    tint = Color(0xFFFCA5A5),
                                     modifier = Modifier.size(13.dp)
                                 )
                             }
@@ -2019,12 +2166,12 @@ fun SinglePhotoBubble(
                     Icon(
                         imageVector = Icons.Default.ErrorOutline,
                         contentDescription = null,
-                        tint = Color(0xFFDC2626),
+                        tint = Color(0xFFFCA5A5),
                         modifier = Modifier.size(12.dp)
                     )
                     Text(
                         text = "تعذر إرسال الصورة (لا يوجد اتصال بالإنترنت)",
-                        color = Color(0xFFDC2626),
+                        color = Color(0xFFFCA5A5),
                         fontFamily = TajawalFontFamily,
                         fontSize = 10.5.sp,
                         fontWeight = FontWeight.Medium
@@ -2037,8 +2184,8 @@ fun SinglePhotoBubble(
 
 @Composable
 fun MultiPhotoBubble(
-    urls: List<String>, 
-    timestamp: String, 
+    urls: List<String>,
+    timestamp: String,
     isOutgoing: Boolean,
     status: MessageStatus = MessageStatus.DELIVERED,
     onPhotoClick: (String) -> Unit = {}
@@ -2060,10 +2207,10 @@ fun MultiPhotoBubble(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
-                    .background(Color.White)
+                    .background(Color(0xFF17223B))
                     .border(
-                        1.5.dp, 
-                        if (isOutgoing && status == MessageStatus.FAILED) Color(0xFFEF4444) else Color(0xFFE2E8F0), 
+                        1.5.dp,
+                        if (isOutgoing && status == MessageStatus.FAILED) Color(0xFFEF4444) else Color(0xFF263659),
                         RoundedCornerShape(16.dp)
                     )
             ) {
@@ -2084,7 +2231,7 @@ fun MultiPhotoBubble(
                                 modifier = Modifier
                                     .weight(1f)
                                     .fillMaxHeight()
-                                    .background(Color(0xFFF1F5F9))
+                                    .background(Color(0xFF1E293B))
                                     .clickable { onPhotoClick(itemUrl) }
                             ) {
                                 AsyncImage(
@@ -2102,7 +2249,7 @@ fun MultiPhotoBubble(
             if (isOutgoing && status == MessageStatus.FAILED) {
                 Text(
                     text = "تعذر إرسال الصور (لا يوجد اتصال بالإنترنت)",
-                    color = Color(0xFFDC2626),
+                    color = Color(0xFFFCA5A5),
                     fontFamily = TajawalFontFamily,
                     fontSize = 10.5.sp,
                     modifier = Modifier.padding(top = 3.dp, end = 4.dp)
@@ -2390,14 +2537,14 @@ fun FullscreenPhotoViewerDialog(
     if (showDeleteConfirm) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
-            containerColor = Color.White,
+            containerColor = Color(0xFF11192C),
             shape = RoundedCornerShape(20.dp),
             title = {
                 Text(
                     text = "حذف الصورة",
                     fontFamily = TajawalFontFamily,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFF0F172A),
+                    color = Color(0xFFF8FAFC),
                     fontSize = 17.sp
                 )
             },
@@ -2405,7 +2552,7 @@ fun FullscreenPhotoViewerDialog(
                 Text(
                     text = "هل أنت متأكد من حذف هذه الصورة من سجل المحادثة؟",
                     fontFamily = TajawalFontFamily,
-                    color = Color(0xFF64748B),
+                    color = Color(0xFF94A3B8),
                     fontSize = 14.sp
                 )
             },
@@ -2431,7 +2578,7 @@ fun FullscreenPhotoViewerDialog(
                     Text(
                         text = "إلغاء",
                         fontFamily = TajawalFontFamily,
-                        color = Color(0xFF64748B)
+                        color = Color(0xFF94A3B8)
                     )
                 }
             }
@@ -2513,6 +2660,17 @@ fun DocumentBubble(
         }
     }
 
+    val docOutgoingBrush = remember(status) {
+        if (status == MessageStatus.FAILED) {
+            Brush.linearGradient(listOf(Color(0xFFDC2626), Color(0xFFEF4444)))
+        } else {
+            Brush.linearGradient(listOf(Color(0xFF4F46E5), Color(0xFF6366F1)))
+        }
+    }
+    val docIncomingBrush = remember {
+        Brush.linearGradient(listOf(Color(0xFF17223B), Color(0xFF17223B)))
+    }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isOutgoing) Arrangement.End else Arrangement.Start
@@ -2532,15 +2690,10 @@ fun DocumentBubble(
                             Toast.makeText(context, "الملف: ${content.name}", Toast.LENGTH_SHORT).show()
                         }
                     }
-                    .background(
-                        if (isOutgoing) {
-                            if (status == MessageStatus.FAILED) Color(0xFFEF4444) else Color(0xFF2563EB)
-                        } else Color.White,
-                        RoundedCornerShape(16.dp)
-                    )
+                    .background(if (isOutgoing) docOutgoingBrush else docIncomingBrush, RoundedCornerShape(16.dp))
                     .border(
                         1.dp,
-                        if (isOutgoing) Color(0x33FFFFFF) else Color(0xFFE2E8F0),
+                        if (isOutgoing) Color(0x28FFFFFF) else Color(0xFF263659),
                         RoundedCornerShape(16.dp)
                     )
                     .padding(12.dp),
@@ -2550,7 +2703,7 @@ fun DocumentBubble(
                     modifier = Modifier
                         .size(42.dp)
                         .background(
-                            if (isOutgoing) Color.White.copy(alpha = 0.2f) else Color(0xFFEFF6FF),
+                            if (isOutgoing) Color.White.copy(alpha = 0.2f) else Color(0xFF1E293B),
                             RoundedCornerShape(12.dp)
                         ),
                     contentAlignment = Alignment.Center
@@ -2572,14 +2725,14 @@ fun DocumentBubble(
                         Icon(
                             imageVector = if (isAudioPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                             contentDescription = if (isAudioPlaying) "إيقاف مؤقت" else "تشغيل",
-                            tint = if (isOutgoing) Color.White else Color(0xFF2563EB),
+                            tint = if (isOutgoing) Color.White else Color(0xFF818CF8),
                             modifier = Modifier.size(24.dp)
                         )
                     } else {
                         Icon(
                             imageVector = Icons.Default.InsertDriveFile,
                             contentDescription = null,
-                            tint = if (isOutgoing) Color.White else Color(0xFF2563EB),
+                            tint = if (isOutgoing) Color.White else Color(0xFF818CF8),
                             modifier = Modifier.size(22.dp)
                         )
                     }
@@ -2588,7 +2741,7 @@ fun DocumentBubble(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = if (isAudio) "رسالة صوتية" else content.name,
-                        color = if (isOutgoing) Color.White else Color(0xFF0F172A),
+                        color = if (isOutgoing) Color.White else Color(0xFFF1F5F9),
                         fontWeight = FontWeight.Bold,
                         fontSize = 13.5.sp,
                         fontFamily = TajawalFontFamily,
@@ -2597,7 +2750,7 @@ fun DocumentBubble(
                     )
                     Text(
                         text = if (isAudio) "${if (isAudioPlaying) "جاري التشغيل • " else ""}${content.size} • $timestamp" else "${content.size} • $timestamp",
-                        color = if (isOutgoing) Color(0xFFDBEAFE) else Color(0xFF64748B),
+                        color = if (isOutgoing) Color(0xFFE0E7FF) else Color(0xFF94A3B8),
                         fontSize = 11.sp,
                         fontFamily = TajawalFontFamily
                     )
@@ -2607,7 +2760,7 @@ fun DocumentBubble(
             if (isOutgoing && status == MessageStatus.FAILED) {
                 Text(
                     text = "تعذر إرسال الملف (لا يوجد اتصال بالإنترنت)",
-                    color = Color(0xFFDC2626),
+                    color = Color(0xFFFCA5A5),
                     fontFamily = TajawalFontFamily,
                     fontSize = 10.5.sp,
                     modifier = Modifier.padding(top = 3.dp, end = 4.dp)
@@ -2627,14 +2780,14 @@ fun MapCardBubble(content: MessageContent.Location, timestamp: String, isOutgoin
             modifier = Modifier
                 .fillMaxWidth(0.82f)
                 .clip(RoundedCornerShape(16.dp))
-                .background(Color.White)
-                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(16.dp))
+                .background(Color(0xFF17223B))
+                .border(1.dp, Color(0xFF263659), RoundedCornerShape(16.dp))
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(130.dp)
-                    .background(Color(0xFFE2E8F0))
+                    .background(Color(0xFF1E293B))
             ) {
                 AsyncImage(
                     model = "https://images.unsplash.com/photo-1524661135-423995f22d0b?q=80&w=400&h=300&fit=crop",
@@ -2649,13 +2802,13 @@ fun MapCardBubble(content: MessageContent.Location, timestamp: String, isOutgoin
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp,
                     fontFamily = TajawalFontFamily,
-                    color = Color(0xFF0F172A)
+                    color = Color(0xFFF1F5F9)
                 )
                 Text(
                     text = "${content.city} • $timestamp",
                     fontSize = 11.sp,
                     fontFamily = TajawalFontFamily,
-                    color = Color(0xFF64748B)
+                    color = Color(0xFF94A3B8)
                 )
             }
         }
@@ -2671,8 +2824,8 @@ fun CallBubble(
     onJoinCall: () -> Unit
 ) {
     val isVideo = content.isVideo
-    val accentColor = if (isVideo) Color(0xFF2563EB) else Color(0xFF10B981)
-    val bgLight = if (isVideo) Color(0xFFEFF6FF) else Color(0xFFECFDF5)
+    val accentColor = if (isVideo) Color(0xFF6366F1) else Color(0xFF10B981)
+    val bgTint = if (isVideo) Color(0xFF1E1B4B) else Color(0xFF064E3B)
     val callTitle = if (isVideo) "مكالمة فيديو" else "مكالمة صوتية"
     val callIcon = if (isVideo) Icons.Default.Videocam else Icons.Default.Call
 
@@ -2684,8 +2837,8 @@ fun CallBubble(
             modifier = Modifier
                 .widthIn(min = 230.dp, max = 290.dp)
                 .clip(RoundedCornerShape(16.dp))
-                .background(Color.White)
-                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(16.dp))
+                .background(Color(0xFF17223B))
+                .border(1.dp, Color(0xFF263659), RoundedCornerShape(16.dp))
                 .padding(12.dp)
         ) {
             Row(
@@ -2696,13 +2849,13 @@ fun CallBubble(
                     modifier = Modifier
                         .size(44.dp)
                         .clip(CircleShape)
-                        .background(bgLight),
+                        .background(bgTint),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = callIcon,
                         contentDescription = callTitle,
-                        tint = accentColor,
+                        tint = if (isVideo) Color(0xFF818CF8) else Color(0xFF34D399),
                         modifier = Modifier.size(24.dp)
                     )
                 }
@@ -2713,13 +2866,13 @@ fun CallBubble(
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
                         fontFamily = TajawalFontFamily,
-                        color = Color(0xFF0F172A)
+                        color = Color(0xFFF1F5F9)
                     )
                     Text(
                         text = if (isOutgoing) "مكالمة صادرة • $timestamp" else "مكالمة واردة • $timestamp",
                         fontSize = 11.5.sp,
                         fontFamily = TajawalFontFamily,
-                        color = Color(0xFF64748B)
+                        color = Color(0xFF94A3B8)
                     )
                 }
             }
@@ -2763,15 +2916,15 @@ fun SnapMediaBubble(content: MessageContent.Snap, timestamp: String, isOutgoing:
         Row(
             modifier = Modifier
                 .widthIn(min = 160.dp, max = 220.dp)
-                .background(Color.White, RoundedCornerShape(16.dp))
-                .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(16.dp))
+                .background(Color(0xFF17223B), RoundedCornerShape(16.dp))
+                .border(1.dp, Color(0xFF263659), RoundedCornerShape(16.dp))
                 .padding(10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
                 imageVector = Icons.Default.LocalFireDepartment,
                 contentDescription = "Snap",
-                tint = Color(0xFFF59E0B),
+                tint = Color(0xFFFBBF24),
                 modifier = Modifier.size(24.dp)
             )
             Spacer(modifier = Modifier.width(8.dp))
@@ -2781,11 +2934,11 @@ fun SnapMediaBubble(content: MessageContent.Snap, timestamp: String, isOutgoing:
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp,
                     fontFamily = TajawalFontFamily,
-                    color = Color(0xFF0F172A)
+                    color = Color(0xFFF1F5F9)
                 )
                 Text(
                     text = "${content.timer} ثواني • $timestamp",
-                    color = Color(0xFF64748B),
+                    color = Color(0xFF94A3B8),
                     fontSize = 11.sp,
                     fontFamily = TajawalFontFamily
                 )

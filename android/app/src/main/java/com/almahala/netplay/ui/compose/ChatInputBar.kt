@@ -33,6 +33,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -216,237 +217,251 @@ fun ChatInputBar(
         )
     }
 
-    Box(
+    val indigoGradient = remember {
+        Brush.linearGradient(
+            colors = listOf(Color(0xFF4F46E5), Color(0xFF6366F1))
+        )
+    }
+
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color(0xFFF8FAFC))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        contentAlignment = Alignment.BottomCenter
+            .background(Color(0xFF11192C))
     ) {
-        if (isRecording) {
-            val pulseTransition = rememberInfiniteTransition(label = "rec_pulse")
-            val dotAlpha by pulseTransition.animateFloat(
-                initialValue = 0.25f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(600, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "rec_alpha"
-            )
-            val mins = recordingSeconds / 60
-            val secs = recordingSeconds % 60
-            val timeStr = String.format("%02d:%02d", mins, secs)
+        HorizontalDivider(thickness = 1.dp, color = Color(0xFF1F2E4D))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            if (isRecording) {
+                val pulseTransition = rememberInfiniteTransition(label = "rec_pulse")
+                val dotAlpha by pulseTransition.animateFloat(
+                    initialValue = 0.25f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(600, easing = FastOutSlowInEasing),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "rec_alpha"
+                )
+                val mins = recordingSeconds / 60
+                val secs = recordingSeconds % 60
+                val timeStr = String.format("%02d:%02d", mins, secs)
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 44.dp)
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(Color(0xFFFEF2F2), RoundedCornerShape(24.dp))
-                    .border(1.dp, Color(0xFFFECACA), RoundedCornerShape(24.dp))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Cancel button
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .clip(CircleShape)
-                        .background(Color.White, CircleShape)
-                        .border(1.dp, Color(0xFFFECACA), CircleShape)
-                        .clickable { stopAndReleaseRecorder(saveAndSend = false) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.DeleteOutline,
-                        contentDescription = "إلغاء التسجيل",
-                        tint = Color(0xFFDC2626),
-                        modifier = Modifier.size(19.dp)
-                    )
-                }
-
-                // Pulsing red indicator & duration
                 Row(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 46.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(Color(0xFF2A1215), RoundedCornerShape(24.dp))
+                        .border(1.dp, Color(0xFF7F1D1D), RoundedCornerShape(24.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    // Cancel button
                     Box(
                         modifier = Modifier
-                            .size(10.dp)
-                            .alpha(dotAlpha)
-                            .background(Color(0xFFEF4444), CircleShape)
-                    )
-                    Text(
-                        text = "جاري التسجيل الصوتي • $timeStr",
-                        fontFamily = TajawalFontFamily,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 13.sp,
-                        color = Color(0xFF991B1B)
-                    )
-                }
-
-                // Send Voice Note button
-                Box(
-                    modifier = Modifier
-                        .size(38.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF2563EB), CircleShape)
-                        .clickable { stopAndReleaseRecorder(saveAndSend = true) },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Send,
-                        contentDescription = "إرسال التسجيل",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-            }
-        } else {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // 1. Attachment (+) Button
-                Box(
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(CircleShape)
-                        .background(Color.White, CircleShape)
-                        .border(1.dp, Color(0xFFE2E8F0), CircleShape)
-                        .clickable {
-                            coroutineScope.launch {
-                                if (showAttachments) {
-                                    sheetState.hide()
-                                    showAttachments = false
-                                } else {
-                                    showAttachments = true
-                                }
-                            }
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Add,
-                        contentDescription = "مرفقات",
-                        tint = Color(0xFF2563EB),
-                        modifier = Modifier
-                            .size(22.dp)
-                            .rotate(rotation)
-                    )
-                }
-
-                // 2. Center Text Field & Actions
-                Row(
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 44.dp)
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(Color.White, RoundedCornerShape(24.dp))
-                        .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(24.dp))
-                        .padding(horizontal = 14.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    BasicTextField(
-                        value = text,
-                        onValueChange = {
-                            text = it
-                            onTyping()
-                        },
-                        modifier = Modifier.weight(1f),
-                        textStyle = TextStyle(
-                            fontSize = 15.sp,
-                            fontFamily = TajawalFontFamily,
-                            color = Color(0xFF0F172A)
-                        ),
-                        cursorBrush = SolidColor(Color(0xFF2563EB)),
-                        decorationBox = { innerTextField ->
-                            if (text.isEmpty()) {
-                                Text(
-                                    text = "اكتب رسالة...",
-                                    color = Color(0xFF94A3B8),
-                                    fontSize = 14.sp,
-                                    fontFamily = TajawalFontFamily
-                                )
-                            }
-                            innerTextField()
-                        }
-                    )
-
-                    Spacer(modifier = Modifier.width(6.dp))
-
-                    // Quick photo / camera action with built-in Editor
-                    IconButton(
-                        onClick = { photoPickerLauncher.launch("image/*") },
-                        modifier = Modifier.size(30.dp)
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF3F1D21), CircleShape)
+                            .border(1.dp, Color(0xFFEF4444).copy(alpha = 0.45f), CircleShape)
+                            .clickable { stopAndReleaseRecorder(saveAndSend = false) },
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.CameraAlt,
-                            contentDescription = "التقاط صورة",
-                            tint = Color(0xFF64748B),
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = "إلغاء التسجيل",
+                            tint = Color(0xFFFCA5A5),
                             modifier = Modifier.size(19.dp)
                         )
                     }
-                }
 
-                // 3. Send or Mic Button
-                var lastSendTimestamp by remember { mutableLongStateOf(0L) }
-                if (text.isNotBlank()) {
+                    // Pulsing red indicator & duration
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(10.dp)
+                                .alpha(dotAlpha)
+                                .background(Color(0xFFEF4444), CircleShape)
+                        )
+                        Text(
+                            text = "جاري التسجيل الصوتي • $timeStr",
+                            fontFamily = TajawalFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = Color(0xFFFCA5A5)
+                        )
+                    }
+
+                    // Send Voice Note button
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .shadow(6.dp, CircleShape)
+                            .clip(CircleShape)
+                            .background(indigoGradient, CircleShape)
+                            .clickable { stopAndReleaseRecorder(saveAndSend = true) },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = "إرسال التسجيل",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // 1. Attachment (+) Button
                     Box(
                         modifier = Modifier
                             .size(42.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF2563EB), CircleShape)
+                            .background(Color(0xFF18233E), CircleShape)
+                            .border(1.dp, Color(0xFF28395E), CircleShape)
                             .clickable {
-                                val now = System.currentTimeMillis()
-                                if (now - lastSendTimestamp > 350L) {
-                                    lastSendTimestamp = now
-                                    val trimmed = text.trim()
-                                    if (trimmed.isNotEmpty()) {
-                                        onSendText(trimmed)
-                                        text = ""
+                                coroutineScope.launch {
+                                    if (showAttachments) {
+                                        sheetState.hide()
+                                        showAttachments = false
+                                    } else {
+                                        showAttachments = true
                                     }
                                 }
                             },
                         contentAlignment = Alignment.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Send,
-                            contentDescription = "إرسال",
-                            tint = Color.White,
-                            modifier = Modifier.size(19.dp)
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "مرفقات",
+                            tint = Color(0xFF818CF8),
+                            modifier = Modifier
+                                .size(22.dp)
+                                .rotate(rotation)
                         )
                     }
-                } else {
-                    Box(
+
+                    // 2. Center Text Field & Actions
+                    Row(
                         modifier = Modifier
-                            .size(42.dp)
-                            .clip(CircleShape)
-                            .background(Color.White, CircleShape)
-                            .border(1.dp, Color(0xFFE2E8F0), CircleShape)
-                            .clickable {
-                                val hasPerm = ContextCompat.checkSelfPermission(
-                                    context,
-                                    Manifest.permission.RECORD_AUDIO
-                                ) == PackageManager.PERMISSION_GRANTED
-                                if (hasPerm) {
-                                    startVoiceRecording()
-                                } else {
-                                    recordAudioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                }
-                            },
-                        contentAlignment = Alignment.Center
+                            .weight(1f)
+                            .heightIn(min = 44.dp)
+                            .clip(RoundedCornerShape(24.dp))
+                            .background(Color(0xFF18233E), RoundedCornerShape(24.dp))
+                            .border(1.dp, Color(0xFF28395E), RoundedCornerShape(24.dp))
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Mic,
-                            contentDescription = "تسجيل صوتي",
-                            tint = Color(0xFF2563EB),
-                            modifier = Modifier.size(20.dp)
+                        BasicTextField(
+                            value = text,
+                            onValueChange = {
+                                text = it
+                                onTyping()
+                            },
+                            modifier = Modifier.weight(1f),
+                            textStyle = TextStyle(
+                                fontSize = 15.sp,
+                                fontFamily = TajawalFontFamily,
+                                color = Color(0xFFF8FAFC)
+                            ),
+                            cursorBrush = SolidColor(Color(0xFF818CF8)),
+                            decorationBox = { innerTextField ->
+                                if (text.isEmpty()) {
+                                    Text(
+                                        text = "اكتب رسالة...",
+                                        color = Color(0xFF64748B),
+                                        fontSize = 14.sp,
+                                        fontFamily = TajawalFontFamily
+                                    )
+                                }
+                                innerTextField()
+                            }
                         )
+
+                        Spacer(modifier = Modifier.width(6.dp))
+
+                        // Quick photo / camera action with built-in Editor
+                        IconButton(
+                            onClick = { photoPickerLauncher.launch("image/*") },
+                            modifier = Modifier.size(30.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CameraAlt,
+                                contentDescription = "التقاط صورة",
+                                tint = Color(0xFF94A3B8),
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+                    }
+
+                    // 3. Send or Mic Button
+                    var lastSendTimestamp by remember { mutableLongStateOf(0L) }
+                    if (text.isNotBlank()) {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .shadow(6.dp, CircleShape)
+                                .clip(CircleShape)
+                                .background(indigoGradient, CircleShape)
+                                .clickable {
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastSendTimestamp > 350L) {
+                                        lastSendTimestamp = now
+                                        val trimmed = text.trim()
+                                        if (trimmed.isNotEmpty()) {
+                                            onSendText(trimmed)
+                                            text = ""
+                                        }
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Send,
+                                contentDescription = "إرسال",
+                                tint = Color.White,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF18233E), CircleShape)
+                                .border(1.dp, Color(0xFF28395E), CircleShape)
+                                .clickable {
+                                    val hasPerm = ContextCompat.checkSelfPermission(
+                                        context,
+                                        Manifest.permission.RECORD_AUDIO
+                                    ) == PackageManager.PERMISSION_GRANTED
+                                    if (hasPerm) {
+                                        startVoiceRecording()
+                                    } else {
+                                        recordAudioPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    }
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = "تسجيل صوتي",
+                                tint = Color(0xFF818CF8),
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -457,7 +472,7 @@ fun ChatInputBar(
         ModalBottomSheet(
             onDismissRequest = { showAttachments = false },
             sheetState = sheetState,
-            containerColor = Color.White,
+            containerColor = Color(0xFF11192C),
             shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
             dragHandle = {
                 Box(
@@ -465,7 +480,7 @@ fun ChatInputBar(
                         .padding(vertical = 10.dp)
                         .width(40.dp)
                         .height(4.dp)
-                        .background(Color(0xFFCBD5E1), CircleShape)
+                        .background(Color(0xFF334155), CircleShape)
                 )
             }
         ) {
@@ -511,7 +526,7 @@ fun AttachmentGrid(
             fontFamily = TajawalFontFamily,
             fontWeight = FontWeight.Bold,
             fontSize = 17.sp,
-            color = Color(0xFF0F172A),
+            color = Color(0xFFF8FAFC),
             modifier = Modifier.padding(bottom = 16.dp)
         )
 
@@ -519,16 +534,16 @@ fun AttachmentGrid(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceAround
         ) {
-            AttachmentIcon("معرض الصور", Color(0xFFEEF2FF), Color(0xFF4F46E5), Icons.Default.InsertPhoto) {
+            AttachmentIcon("معرض الصور", Color(0xFF1E1B4B), Color(0xFF818CF8), Icons.Default.InsertPhoto) {
                 onPickPhoto()
             }
-            AttachmentIcon("الكاميرا", Color(0xFFFEF3C7), Color(0xFFD97706), Icons.Default.CameraAlt) {
+            AttachmentIcon("الكاميرا", Color(0xFF2D1F0B), Color(0xFFFBBF24), Icons.Default.CameraAlt) {
                 onPickPhoto()
             }
-            AttachmentIcon("مستند وملف", Color(0xFFECFDF5), Color(0xFF059669), Icons.Default.InsertDriveFile) {
+            AttachmentIcon("مستند وملف", Color(0xFF0B2922), Color(0xFF34D399), Icons.Default.InsertDriveFile) {
                 onPickDocument()
             }
-            AttachmentIcon("تسجيل صوتي", Color(0xFFEFF6FF), Color(0xFF2563EB), Icons.Default.Mic) {
+            AttachmentIcon("تسجيل صوتي", Color(0xFF172554), Color(0xFF60A5FA), Icons.Default.Mic) {
                 onPickAudio()
             }
         }
@@ -539,18 +554,18 @@ fun AttachmentGrid(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceAround
         ) {
-            AttachmentIcon("الموقع الجغرافي", Color(0xFFFDF2F8), Color(0xFFDB2777), Icons.Default.LocationOn) {
+            AttachmentIcon("الموقع الجغرافي", Color(0xFF351327), Color(0xFFF472B6), Icons.Default.LocationOn) {
                 onOpenLocation()
             }
-            AttachmentIcon("جهة اتصال", Color(0xFFF0FDF4), Color(0xFF16A34A), Icons.Default.Person) {
+            AttachmentIcon("جهة اتصال", Color(0xFF0D281D), Color(0xFF4ADE80), Icons.Default.Person) {
                 Toast.makeText(context, "مشاركة جهة اتصال", Toast.LENGTH_SHORT).show()
                 onDismiss()
             }
-            AttachmentIcon("تصويت سريع", Color(0xFFF5F3FF), Color(0xFF7C3AED), Icons.Default.Poll) {
+            AttachmentIcon("تصويت سريع", Color(0xFF241744), Color(0xFFA78BFA), Icons.Default.Poll) {
                 Toast.makeText(context, "إنشاء استطلاع رأي", Toast.LENGTH_SHORT).show()
                 onDismiss()
             }
-            AttachmentIcon("غرفة لعب", Color(0xFFFFF1F2), Color(0xFFE11D48), Icons.Default.SportsEsports) {
+            AttachmentIcon("غرفة لعب", Color(0xFF381320), Color(0xFFFB7185), Icons.Default.SportsEsports) {
                 Toast.makeText(context, "دعوة لغرفة اللعب", Toast.LENGTH_SHORT).show()
                 onDismiss()
             }
@@ -580,7 +595,7 @@ fun AttachmentIcon(
             modifier = Modifier
                 .size(52.dp)
                 .background(bgTint, CircleShape)
-                .border(1.dp, iconTint.copy(alpha = 0.2f), CircleShape),
+                .border(1.dp, iconTint.copy(alpha = 0.35f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -593,7 +608,7 @@ fun AttachmentIcon(
         Spacer(modifier = Modifier.height(6.dp))
         Text(
             text = label,
-            color = Color(0xFF334155),
+            color = Color(0xFFE2E8F0),
             fontFamily = TajawalFontFamily,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,

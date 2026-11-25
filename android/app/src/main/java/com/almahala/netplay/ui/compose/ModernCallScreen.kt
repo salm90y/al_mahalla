@@ -72,10 +72,13 @@ fun ModernCallScreen(
     var showMoreMenu by remember { mutableStateOf(false) }
     var showAddPersonDialog by remember { mutableStateOf(false) }
 
-    // Auto-dismiss screen if call ended or declined from remote
+    var hasAutoEnded by remember { mutableStateOf(false) }
+
+    // Auto-dismiss screen once if call ended or declined from remote
     LaunchedEffect(callState) {
-        if (callState == CallState.ENDED || callState == CallState.REJECTED || callState == CallState.TIMEOUT || callState == CallState.BUSY || callState == CallState.FAILED) {
-            kotlinx.coroutines.delay(1000)
+        if (!hasAutoEnded && (callState == CallState.ENDED || callState == CallState.REJECTED || callState == CallState.TIMEOUT || callState == CallState.BUSY || callState == CallState.FAILED)) {
+            hasAutoEnded = true
+            kotlinx.coroutines.delay(900)
             onEndCall()
         }
     }
@@ -397,11 +400,14 @@ fun ModernCallScreen(
     if (showKeypad) {
         DialpadBottomSheet(
             onDismiss = { showKeypad = false },
-            onDigitClick = { digit ->
+            onDigitClick = { _ ->
                 try {
                     val toneGen = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 60)
-                    toneGen.startTone(ToneGenerator.TONE_DTMF_1, 150)
-                } catch (_: Exception) {}
+                    toneGen.startTone(ToneGenerator.TONE_DTMF_1, 140)
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        try { toneGen.release() } catch (_: Exception) {}
+                    }, 220)
+                } catch (_: Throwable) {}
             }
         )
     }

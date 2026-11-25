@@ -129,32 +129,153 @@ fun clearAuthToken(context: Context) {
         getPrefs(context).edit().remove(KEY_AUTH_TOKEN).apply()
         UserManager.logout(context)
     }
+    private val avatarCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val avatarCacheLock = Any()
+
+    private fun safeHeaderValue(raw: String, fallback: String = "user"): String {
+        if (raw.isEmpty()) return fallback
+        val hasNonAsciiOrCtrl = raw.any { it.code < 0x20 || it.code > 0x7E }
+        if (!hasNonAsciiOrCtrl) return raw
+        return try {
+            java.net.URLEncoder.encode(raw, "UTF-8")
+        } catch (_: Exception) {
+            val ascii = raw.filter { it.code in 0x20..0x7E }
+            ascii.ifEmpty { fallback }
+        }
+    }
+
+    fun normalizeAvatarUrl(context: Context, rawUrl: String?): String {
+        val trimmed = rawUrl?.trim().orEmpty()
+        if (trimmed.isBlank()) return ""
+        if (trimmed.contains("images.unsplash.com/photo-1506794778202-cad84cf45f1d")) return ""
+        if (trimmed.equals("null", ignoreCase = true) || trimmed.equals("undefined", ignoreCase = true)) return ""
+        val base = getBaseUrl(context).trimEnd('/')
+        if (trimmed.startsWith("/")) {
+            return "$base$trimmed"
+        }
+        if (trimmed.contains("/media/")) {
+            val mediaPath = trimmed.substringAfter("/media/").trimStart('/')
+            return "$base/media/$mediaPath"
+        }
+        if (trimmed.contains("al-mahalla.ahmed1986y5.workers.dev") ||
+            trimmed.contains("al-mahalla.ahmed1986y.com") ||
+            trimmed.contains("api.ahmed1986y.com")) {
+            val suffix = trimmed.substringAfter("://", "").substringAfter("/", "")
+            return if (suffix.isNotEmpty()) "$base/$suffix" else base
+        }
+        return trimmed
+    }
+
+    private fun loadAvatarCacheIfNeeded(context: Context) {
+        if (avatarCache.isNotEmpty()) return
+        synchronized(avatarCacheLock) {
+            if (avatarCache.isNotEmpty()) return
+            try {
+                val raw = getPrefs(context).getString("user_avatar_registry_json", null)
+                if (!raw.isNullOrBlank()) {
+                    val obj = JSONObject(raw)
+                    val keys = obj.keys()
+                    while (keys.hasNext()) {
+                        val k = keys.next()
+                        val v = obj.optString(k, "")
+                        if (k.isNotBlank() && v.isNotBlank()) {
+                            avatarCache[k] = v
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun cacheUserAvatar(context: Context, userId: String?, username: String?, rawAvatar: String?) {
+        val clean = normalizeAvatarUrl(context, rawAvatar)
+        if (clean.isBlank()) return
+        loadAvatarCacheIfNeeded(context)
+        var changed = false
+        val idKey = userId?.trim()?.lowercase().orEmpty()
+        val nameKey = username?.trim()?.lowercase().orEmpty()
+        if (idKey.isNotEmpty() && avatarCache[idKey] != clean) {
+            avatarCache[idKey] = clean
+            changed = true
+        }
+        if (nameKey.isNotEmpty() && avatarCache[nameKey] != clean) {
+            avatarCache[nameKey] = clean
+            changed = true
+        }
+        if (changed) {
+            try {
+                val json = JSONObject()
+                avatarCache.forEach { (k, v) -> json.put(k, v) }
+                getPrefs(context).edit().putString("user_avatar_registry_json", json.toString()).apply()
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun getCachedUserAvatar(context: Context, userId: String? = null, username: String? = null): String {
+        loadAvatarCacheIfNeeded(context)
+        val idKey = userId?.trim()?.lowercase().orEmpty()
+        val nameKey = username?.trim()?.lowercase().orEmpty()
+        if (idKey.isNotEmpty()) {
+            avatarCache[idKey]?.let { if (it.isNotBlank()) return normalizeAvatarUrl(context, it) }
+        }
+        if (nameKey.isNotEmpty()) {
+            avatarCache[nameKey]?.let { if (it.isNotBlank()) return normalizeAvatarUrl(context, it) }
+        }
+        val localFriends = getLocalFriends(context)
+        val matchedFriend = localFriends.firstOrNull { f ->
+            (idKey.isNotEmpty() && f.id.trim().lowercase() == idKey) ||
+                (nameKey.isNotEmpty() && f.username.trim().lowercase() == nameKey) ||
+                (idKey.isNotEmpty() && f.username.trim().lowercase() == idKey) ||
+                (nameKey.isNotEmpty() && f.id.trim().lowercase() == nameKey)
+        }
+        val friendAvatar = normalizeAvatarUrl(context, matchedFriend?.avatarUrl)
+        if (friendAvatar.isNotBlank()) {
+            cacheUserAvatar(context, matchedFriend?.id ?: userId, matchedFriend?.username ?: username, friendAvatar)
+            return friendAvatar
+        }
+        val convMatch = getLocalConversationsRaw(context).firstOrNull { c ->
+            (idKey.isNotEmpty() && c.otherUserId.trim().lowercase() == idKey) ||
+                (nameKey.isNotEmpty() && c.otherUsername.trim().lowercase() == nameKey)
+        }
+        return normalizeAvatarUrl(context, convMatch?.otherAvatar)
+    }
+
     // ----------------- Zego Config Endpoint -----------------
     fun getZegoConfig(context: Context, callback: (Boolean, Long, String) -> Unit) {
         val fallbackAppId = 1477087305L
         val fallbackAppSign = "29c005b621138958b88eea14c91bd62b2189095171ce962ffe3680974493b41d"
+        val prefs = getPrefs(context)
+        val cachedAppId = prefs.getLong("zego_app_id", fallbackAppId).let { if (it > 0L) it else fallbackAppId }
+        val cachedAppSign = prefs.getString("zego_app_sign", fallbackAppSign).orEmpty().ifEmpty { fallbackAppSign }
+
+        // Return immediately with cached/default config so call & watch-party startup never blocks on HTTP
+        mainHandler.post { callback(true, cachedAppId, cachedAppSign) }
+
+        // Refresh in background for future sessions
         val url = "${getBaseUrl(context)}/api/zego/config"
         val request = Request.Builder()
             .url(url)
             .get()
             .build()
-        
+
         httpClient.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                mainHandler.post { callback(true, fallbackAppId, fallbackAppSign) }
-            }
+            override fun onFailure(call: Call, e: IOException) {}
             override fun onResponse(call: Call, response: Response) {
-                val respStr = response.body?.string() ?: ""
-                try {
-                    val obj = JSONObject(respStr)
-                    val appId = obj.optLong("appId", fallbackAppId)
-                    val appSign = obj.optString("appSign", fallbackAppSign).ifEmpty { fallbackAppSign }
-                    if (appId > 0L && appSign.isNotEmpty()) {
-                        mainHandler.post { callback(true, appId, appSign) }
-                        return
-                    }
-                } catch (e: Exception) {}
-                mainHandler.post { callback(true, fallbackAppId, fallbackAppSign) }
+                response.use { resp ->
+                    if (!resp.isSuccessful) return
+                    val respStr = resp.body?.string() ?: return
+                    try {
+                        val obj = JSONObject(respStr)
+                        val appId = obj.optLong("appId", fallbackAppId)
+                        val appSign = obj.optString("appSign", fallbackAppSign).ifEmpty { fallbackAppSign }
+                        if (appId > 0L && appSign.isNotEmpty()) {
+                            prefs.edit()
+                                .putLong("zego_app_id", appId)
+                                .putString("zego_app_sign", appSign)
+                                .apply()
+                        }
+                    } catch (_: Exception) {}
+                }
             }
         })
     }
@@ -206,16 +327,17 @@ val token = json.optString("token")
 val userObj = json.optJSONObject("user")
                             if (token.isNotEmpty() && userObj != null) {
                                 saveAuthToken(context, token)
-val profile = com.almahala.netplay.UserProfile(
+                                val profile = com.almahala.netplay.UserProfile(
                                     id = userObj.optString("id"),
                                     username = userObj.optString("username"),
                                     isAdmin = userObj.optString("username").lowercase() == "ahmed",
                                     createdAt = userObj.optLong("created_at", System.currentTimeMillis()),
                                     fullName = userObj.optString("username"),
                                     role = if (userObj.optString("username").lowercase() == "ahmed") "مشرف" else "عضو",
-                                    avatar = userObj.optString("avatar_url", ""),
+                                    avatar = normalizeAvatarUrl(context, userObj.optString("avatar_url", "")),
                                     email = userObj.optString("email", "")
                                 )
+                                cacheUserAvatar(context, profile.id, profile.username, profile.avatarUrl)
                                 UserManager.saveAuthenticatedSession(context, profile, token)
                                 mainHandler.post { callback(true, null, profile) }
                                 return
@@ -382,13 +504,13 @@ clearAuthToken(context)
      */
     fun uploadAvatar(context: Context, imageBytes: ByteArray, filename: String = "avatar.jpg", callback: (Boolean, String?) -> Unit) {
         val token = getAuthToken(context)
-val url = "${getBaseUrl(context)}/upload/avatar"
+        val url = "${getBaseUrl(context)}/upload/avatar"
         val mediaType = "image/jpeg".toMediaTypeOrNull()
-val body = imageBytes.toRequestBody(mediaType)
-val requestBuilder = Request.Builder()
+        val body = imageBytes.toRequestBody(mediaType)
+        val requestBuilder = Request.Builder()
             .url(url)
             .post(body)
-            .addHeader("X-File-Name", filename)
+            .addHeader("X-File-Name", safeHeaderValue(filename, "avatar.jpg"))
             .addHeader("Content-Type", "image/jpeg")
         if (!token.isNullOrEmpty()) {
             requestBuilder.addHeader("Authorization", "Bearer $token")
@@ -397,12 +519,15 @@ val requestBuilder = Request.Builder()
             override fun onFailure(call: Call, e: IOException) {
                 mainHandler.post { callback(false, null) }
             }
-override fun onResponse(call: Call, response: Response) {
+            override fun onResponse(call: Call, response: Response) {
                 response.use { resp ->
                     if (resp.isSuccessful) {
                         try {
                             val json = JSONObject(resp.body?.string() ?: "{}")
-val avatarUrl = json.optString("avatar_url")
+                            val avatarUrl = normalizeAvatarUrl(context, json.optString("avatar_url"))
+                            if (avatarUrl.isNotEmpty()) {
+                                cacheUserAvatar(context, getCurrentUserId(context), getCurrentUsername(context), avatarUrl)
+                            }
                             mainHandler.post { callback(avatarUrl.isNotEmpty(), avatarUrl) }
                             return
                         } catch (_: Exception) {}
@@ -489,10 +614,13 @@ override fun onResponse(call: Call, response: Response) {
                         try {
                             val json = JSONObject(response.body?.string() ?: "{}")
 val array = json.optJSONArray("friends") ?: JSONArray()
-val list = mutableListOf<FriendItem>()
                             for (i in 0 until array.length()) {
                                 val item = array.getJSONObject(i)
-                                list.add(parseFriend(item))
+                                val parsed = parseFriend(item)
+                                val cleanAvatar = normalizeAvatarUrl(context, parsed.avatarUrl)
+                                val fixed = if (cleanAvatar != parsed.avatarUrl) parsed.copy(avatarUrl = cleanAvatar) else parsed
+                                cacheUserAvatar(context, fixed.id, fixed.username, fixed.avatarUrl)
+                                list.add(fixed)
                             }
                             if (list.isNotEmpty()) {
                                 saveLocalFriends(context, list)
@@ -872,7 +1000,7 @@ val request = Request.Builder().url(url).post(body).apply {
             .url(url)
             .post(body)
             .addHeader("Content-Type", mimeType)
-            .addHeader("X-File-Name", fileName)
+            .addHeader("X-File-Name", safeHeaderValue(fileName, "media_${System.currentTimeMillis()}"))
             .apply { if (token != null) addHeader("Authorization", "Bearer $token") }
             .build()
         httpClient.newCall(request).enqueue(object : Callback {
@@ -884,7 +1012,8 @@ val request = Request.Builder().url(url).post(body).apply {
                     if (response.isSuccessful) {
                         try {
                             val json = JSONObject(response.body?.string() ?: "{}")
-                            val mediaUrl = json.optString("media_url").ifEmpty { json.optString("url") }
+                            val rawUrl = json.optString("media_url").ifEmpty { json.optString("url") }
+                            val mediaUrl = normalizeAvatarUrl(context, rawUrl).ifEmpty { rawUrl }
                             mainHandler.post { callback(mediaUrl) }
                             return
                         } catch (_: Exception) {}
@@ -1401,7 +1530,7 @@ override fun onResponse(call: Call, response: Response) {
         val isOnline: Boolean get() = otherStatus == "online" || (System.currentTimeMillis() - otherLastSeen < 120_000)
     }
 
-    fun getLocalConversations(context: Context): List<StoredConversation> {
+    private fun getLocalConversationsRaw(context: Context): List<StoredConversation> {
         val prefs = getPrefs(context)
         val raw = prefs.getString("local_conversations_list", null) ?: return emptyList()
         val list = mutableListOf<StoredConversation>()
@@ -1413,7 +1542,7 @@ override fun onResponse(call: Call, response: Response) {
                     StoredConversation(
                         otherUserId = obj.optString("other_user_id"),
                         otherUsername = obj.optString("other_username", "مستخدم"),
-                        otherAvatar = obj.optString("other_avatar", ""),
+                        otherAvatar = normalizeAvatarUrl(context, obj.optString("other_avatar", "")),
                         lastMessageText = obj.optString("last_message_text", ""),
                         lastMessageAt = obj.optLong("last_message_at", System.currentTimeMillis()),
                         unreadCount = obj.optInt("unread_count", 0),
@@ -1424,6 +1553,17 @@ override fun onResponse(call: Call, response: Response) {
             }
         } catch (_: Exception) {}
         return list.sortedByDescending { it.lastMessageAt }
+    }
+
+    fun getLocalConversations(context: Context): List<StoredConversation> {
+        val rawList = getLocalConversationsRaw(context)
+        if (rawList.isEmpty()) return emptyList()
+        return rawList.map { conv ->
+            val resolvedAvatar = conv.otherAvatar.ifBlank {
+                getCachedUserAvatar(context, conv.otherUserId, conv.otherUsername)
+            }
+            if (resolvedAvatar != conv.otherAvatar) conv.copy(otherAvatar = resolvedAvatar) else conv
+        }
     }
 
     fun updateLocalConversation(
@@ -1437,10 +1577,17 @@ override fun onResponse(call: Call, response: Response) {
         lastSeen: Long = 0L
     ) {
         if (otherUserId.isBlank()) return
-        val current = getLocalConversations(context).toMutableList()
+        val current = getLocalConversationsRaw(context).toMutableList()
         val existingIndex = current.indexOfFirst { it.otherUserId.equals(otherUserId, ignoreCase = true) }
         val finalName = if (otherUsername.isNotBlank()) otherUsername else (current.getOrNull(existingIndex)?.otherUsername ?: otherUserId)
-        val finalAvatar = if (otherAvatar.isNotBlank()) otherAvatar else (current.getOrNull(existingIndex)?.otherAvatar ?: "")
+        val normalizedIncomingAvatar = normalizeAvatarUrl(context, otherAvatar)
+        if (normalizedIncomingAvatar.isNotBlank()) {
+            cacheUserAvatar(context, otherUserId, finalName, normalizedIncomingAvatar)
+        }
+        val existingAvatar = normalizeAvatarUrl(context, current.getOrNull(existingIndex)?.otherAvatar)
+        val finalAvatar = normalizedIncomingAvatar
+            .ifBlank { existingAvatar }
+            .ifBlank { getCachedUserAvatar(context, otherUserId, finalName) }
         val finalStatus = if (status != "offline") status else (current.getOrNull(existingIndex)?.otherStatus ?: "offline")
         val finalLastSeen = if (lastSeen > 0) lastSeen else (current.getOrNull(existingIndex)?.otherLastSeen ?: 0L)
         
@@ -1483,8 +1630,8 @@ override fun onResponse(call: Call, response: Response) {
 
         val reqBuilder = Request.Builder()
             .url(url)
-            .addHeader("X-User-Id", myId)
-            .addHeader("X-User-Name", myUsername)
+            .addHeader("X-User-Id", safeHeaderValue(myId, "user_me"))
+            .addHeader("X-User-Name", safeHeaderValue(myUsername, "user"))
         if (!token.isNullOrEmpty()) {
             reqBuilder.addHeader("Authorization", "Bearer $token")
         }
@@ -1504,7 +1651,13 @@ override fun onResponse(call: Call, response: Response) {
                                 val obj = arr.getJSONObject(i)
                                 val otherId = obj.optString("other_user_id", obj.optString("id"))
                                 val otherName = obj.optString("other_username", obj.optString("name", otherId))
-                                val avatar = obj.optString("other_avatar", obj.optString("avatar_url", ""))
+                                val rawAvatar = obj.optString("other_avatar", "").ifBlank {
+                                    obj.optString("avatar_url", "").ifBlank { obj.optString("avatar", "") }
+                                }
+                                val avatar = normalizeAvatarUrl(context, rawAvatar).ifBlank {
+                                    getCachedUserAvatar(context, otherId, otherName)
+                                }
+                                cacheUserAvatar(context, otherId, otherName, avatar)
                                 val rawText = obj.optString("last_message_text", "")
                                 val otherStatus = obj.optString("other_status", "offline")
                                 val otherLastSeen = obj.optLong("other_last_seen", 0L)
@@ -1606,8 +1759,8 @@ override fun onResponse(call: Call, response: Response) {
 
         val reqBuilder = Request.Builder()
             .url(url)
-            .addHeader("X-User-Id", myId)
-            .addHeader("X-User-Name", myUsername)
+            .addHeader("X-User-Id", safeHeaderValue(myId, "user_me"))
+            .addHeader("X-User-Name", safeHeaderValue(myUsername, "user"))
         if (!token.isNullOrEmpty()) {
             reqBuilder.addHeader("Authorization", "Bearer $token")
         }
@@ -1735,8 +1888,8 @@ override fun onResponse(call: Call, response: Response) {
         val reqBuilder = Request.Builder()
             .url(url)
             .post(requestBody)
-            .addHeader("X-User-Id", myId)
-            .addHeader("X-User-Name", myUsername)
+            .addHeader("X-User-Id", safeHeaderValue(myId, "user_me"))
+            .addHeader("X-User-Name", safeHeaderValue(myUsername, "user"))
         if (!token.isNullOrEmpty()) {
             reqBuilder.addHeader("Authorization", "Bearer $token")
         }
@@ -1762,17 +1915,31 @@ override fun onResponse(call: Call, response: Response) {
             } catch (_: Exception) {}
         }
 
-        httpClient.newCall(reqBuilder.build()).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                mainHandler.post { callback(false, localMsg) }
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                response.use { resp ->
-                    mainHandler.post { callback(resp.isSuccessful, localMsg) }
+        val builtRequest = reqBuilder.build()
+        fun enqueueAttempt(attempt: Int) {
+            httpClient.newCall(builtRequest).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (attempt == 0) {
+                        mainHandler.postDelayed({ enqueueAttempt(1) }, 700L)
+                    } else {
+                        mainHandler.post { callback(false, localMsg) }
+                    }
                 }
-            }
-        })
+
+                override fun onResponse(call: Call, response: Response) {
+                    response.use { resp ->
+                        if (resp.isSuccessful) {
+                            mainHandler.post { callback(true, localMsg) }
+                        } else if (attempt == 0 && resp.code >= 500) {
+                            mainHandler.postDelayed({ enqueueAttempt(1) }, 700L)
+                        } else {
+                            mainHandler.post { callback(false, localMsg) }
+                        }
+                    }
+                }
+            })
+        }
+        enqueueAttempt(0)
     }
 
     /**
@@ -1866,8 +2033,8 @@ override fun onResponse(call: Call, response: Response) {
         val emptyBody = "{}".toRequestBody("application/json".toMediaType())
         val reqBuilder = Request.Builder().url(url).post(emptyBody)
         if (!token.isNullOrEmpty()) reqBuilder.addHeader("Authorization", "Bearer $token")
-        if (myId.isNotEmpty()) reqBuilder.addHeader("x-user-id", myId)
-        if (myUsername.isNotEmpty()) reqBuilder.addHeader("x-user-name", myUsername)
+        if (myId.isNotEmpty()) reqBuilder.addHeader("x-user-id", safeHeaderValue(myId, "user_me"))
+        if (myUsername.isNotEmpty()) reqBuilder.addHeader("x-user-name", safeHeaderValue(myUsername, "user"))
 
         httpClient.newCall(reqBuilder.build()).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {}
@@ -1886,8 +2053,8 @@ override fun onResponse(call: Call, response: Response) {
         val emptyBody = "{}".toRequestBody("application/json".toMediaType())
         val reqBuilder = Request.Builder().url(url).post(emptyBody)
         if (!token.isNullOrEmpty()) reqBuilder.addHeader("Authorization", "Bearer $token")
-        if (myId.isNotEmpty()) reqBuilder.addHeader("x-user-id", myId)
-        if (myUsername.isNotEmpty()) reqBuilder.addHeader("x-user-name", myUsername)
+        if (myId.isNotEmpty()) reqBuilder.addHeader("x-user-id", safeHeaderValue(myId, "user_me"))
+        if (myUsername.isNotEmpty()) reqBuilder.addHeader("x-user-name", safeHeaderValue(myUsername, "user"))
 
         httpClient.newCall(reqBuilder.build()).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {}

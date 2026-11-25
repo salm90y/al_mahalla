@@ -1,8 +1,11 @@
 package com.almahala.netplay.network
 
+import android.Manifest
 import android.app.Application
 import android.content.Context
+import android.content.pm.PackageManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.almahala.netplay.UserManager
 import im.zego.zegoexpress.ZegoExpressEngine
 import im.zego.zegoexpress.callback.IZegoEventHandler
@@ -15,6 +18,7 @@ import im.zego.zegoexpress.entity.ZegoStream
 import im.zego.zegoexpress.entity.ZegoUser
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 
 /**
  * ZegoCallManager: Official Voice & Video Calling Engine for Al-Mahalla.
@@ -28,6 +32,9 @@ object ZegoCallManager {
 
     private var zegoEngine: ZegoExpressEngine? = null
     private val isInitialized = AtomicBoolean(false)
+    private val isInitializing = AtomicBoolean(false)
+    private val initLock = Any()
+    private val pendingInitCallbacks = mutableListOf<(Boolean) -> Unit>()
     private var currentRoomId: String = ""
     private val isPublishing = AtomicBoolean(false)
     private val isMicMuted = AtomicBoolean(false)
@@ -40,8 +47,20 @@ object ZegoCallManager {
     var onRemoteUserJoined: ((String) -> Unit)? = null
     var onRemoteUserLeft: ((String) -> Unit)? = null
 
+    private fun dispatchInitCallbacks(success: Boolean) {
+        val callbacks = synchronized(initLock) {
+            isInitializing.set(false)
+            val copy = pendingInitCallbacks.toList()
+            pendingInitCallbacks.clear()
+            copy
+        }
+        callbacks.forEach { cb ->
+            try { cb(success) } catch (_: Throwable) {}
+        }
+    }
+
     /**
-     * Initialize Zego Express Engine
+     * Initialize Zego Express Engine (Thread-safe single-flight)
      */
     fun initEngine(context: Context, callback: ((Boolean) -> Unit)? = null) {
         if (isInitialized.get() && zegoEngine != null) {
@@ -49,12 +68,38 @@ object ZegoCallManager {
             return
         }
 
-        CloudflareClient.getZegoConfig(context) { _, appId, appSign ->
+        val shouldStartInit = synchronized(initLock) {
+            if (isInitialized.get() && zegoEngine != null) {
+                false
+            } else {
+                if (callback != null) pendingInitCallbacks.add(callback)
+                if (isInitializing.compareAndSet(false, true)) {
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+
+        if (isInitialized.get() && zegoEngine != null && !shouldStartInit) {
+            synchronized(initLock) { pendingInitCallbacks.clear() }
+            callback?.invoke(true)
+            return
+        }
+
+        if (!shouldStartInit) return
+
+        val appCtx = context.applicationContext
+        CloudflareClient.getZegoConfig(appCtx) { _, appId, appSign ->
             val finalAppId = if (appId > 0L) appId else DEFAULT_APP_ID
             val finalAppSign = if (appSign.isNotEmpty()) appSign else DEFAULT_APP_SIGN
 
             try {
-                val app = context.applicationContext as Application
+                if (isInitialized.get() && zegoEngine != null) {
+                    dispatchInitCallbacks(true)
+                    return@getZegoConfig
+                }
+                val app = appCtx as Application
                 val profile = ZegoEngineProfile().apply {
                     this.appID = finalAppId
                     this.appSign = finalAppSign
@@ -89,30 +134,35 @@ object ZegoCallManager {
                         for (stream in streamList) {
                             if (updateType == ZegoUpdateType.ADD) {
                                 Log.d(TAG, "Remote Zego stream added: ${stream.streamID}")
-                                zegoEngine?.startPlayingStream(stream.streamID)
+                                try {
+                                    zegoEngine?.startPlayingStream(stream.streamID)
+                                } catch (_: Throwable) {}
                                 onRemoteUserJoined?.invoke(stream.user.userID)
                             } else if (updateType == ZegoUpdateType.DELETE) {
                                 Log.d(TAG, "Remote Zego stream removed: ${stream.streamID}")
-                                zegoEngine?.stopPlayingStream(stream.streamID)
+                                try {
+                                    zegoEngine?.stopPlayingStream(stream.streamID)
+                                } catch (_: Throwable) {}
                                 onRemoteUserLeft?.invoke(stream.user.userID)
                             }
                         }
                     }
                 })
 
-                isInitialized.set(true)
-                Log.d(TAG, "ZegoExpressEngine successfully initialized with appId=$finalAppId")
-                callback?.invoke(true)
+                isInitialized.set(zegoEngine != null)
+                Log.d(TAG, "ZegoExpressEngine initialized=${isInitialized.get()} appId=$finalAppId")
+                dispatchInitCallbacks(isInitialized.get())
             } catch (e: Throwable) {
                 Log.e(TAG, "Failed to initialize Zego engine: ${e.message}", e)
-                callback?.invoke(false)
+                isInitialized.set(false)
+                dispatchInitCallbacks(false)
             }
         }
     }
 
     private fun sanitizeId(raw: String, prefix: String): String {
         val cleaned = raw.replace(Regex("[^a-zA-Z0-9_]"), "_").trim('_')
-        return if (cleaned.isNotEmpty()) cleaned.take(64) else "${prefix}_${Math.abs(raw.hashCode())}".take(64)
+        return if (cleaned.isNotEmpty()) cleaned.take(64) else "${prefix}_${abs(raw.hashCode().toLong())}".take(64)
     }
 
     /**
@@ -307,10 +357,11 @@ object ZegoCallManager {
         onConnected: (() -> Unit)? = null,
         onError: ((String) -> Unit)? = null
     ) {
+        val appCtx = context.applicationContext
         val safeRoomId = sanitizeId(roomId, "room")
         onCallConnected = onConnected
 
-        initEngine(context) { success ->
+        initEngine(appCtx) { success ->
             if (!success || zegoEngine == null) {
                 onError?.invoke("تعذر الاتصال بخوادم Zego للمكالمات")
                 return@initEngine
@@ -330,6 +381,7 @@ object ZegoCallManager {
                         engine.logoutRoom(currentRoomId)
                     } catch (_: Throwable) {}
                 }
+                val alreadyInRoom = currentRoomId == safeRoomId
                 currentRoomId = safeRoomId
 
                 val user = ZegoUser(safeUserId, safeUserName)
@@ -337,33 +389,45 @@ object ZegoCallManager {
                     isUserStatusNotify = true
                 }
 
-                // 1. Audio routing (speaker on for video calls by default, earpiece/headset or toggleable for voice)
+                val hasAudioPerm = ContextCompat.checkSelfPermission(
+                    appCtx, Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                val hasCameraPerm = ContextCompat.checkSelfPermission(
+                    appCtx, Manifest.permission.CAMERA
+                ) == PackageManager.PERMISSION_GRANTED
+
+                // 1. Audio routing
                 try {
                     engine.setAudioRouteToSpeaker(isVideo)
                     isSpeakerOn.set(isVideo)
                 } catch (_: Throwable) {}
 
-                // 2. Microphone & Camera — ALWAYS start unmuted for both caller and recipient!
+                // 2. Microphone & Camera — ONLY activate hardware capture when permission is granted!
                 try {
-                    engine.muteMicrophone(false)
-                    isMicMuted.set(false)
-                    engine.enableCamera(isVideo)
-                    isCameraOn.set(isVideo)
+                    engine.muteMicrophone(!hasAudioPerm)
+                    isMicMuted.set(!hasAudioPerm)
+                    val enableCam = isVideo && hasCameraPerm
+                    engine.enableCamera(enableCam)
+                    isCameraOn.set(enableCam)
                 } catch (_: Throwable) {}
 
-                // 3. Log in to Zego Room with sanitized room ID
-                engine.loginRoom(safeRoomId, user, roomConfig)
-
-                // 4. Start publishing stream safely
-                val streamId = "s_${safeRoomId}_${safeUserId}"
-                try {
-                    engine.startPublishingStream(streamId)
-                    isPublishing.set(true)
-                } catch (pe: Throwable) {
-                    Log.w(TAG, "startPublishingStream non-fatal warning: ${pe.message}")
+                // 3. Log in to Zego Room safely
+                if (!alreadyInRoom) {
+                    engine.loginRoom(safeRoomId, user, roomConfig)
                 }
 
-                Log.d(TAG, "Zego call initiated: safeRoomId=$safeRoomId, safeStreamId=$streamId, isVideo=$isVideo, isOutgoing=$isOutgoing")
+                // 4. Start publishing stream only when RECORD_AUDIO is already granted (otherwise CallActivity starts it in onRequestPermissionsResult)
+                val streamId = "s_${safeRoomId}_${safeUserId}"
+                if (hasAudioPerm && !isPublishing.get()) {
+                    try {
+                        engine.startPublishingStream(streamId)
+                        isPublishing.set(true)
+                    } catch (pe: Throwable) {
+                        Log.w(TAG, "startPublishingStream non-fatal warning: ${pe.message}")
+                    }
+                }
+
+                Log.d(TAG, "Zego call initiated: safeRoomId=$safeRoomId, hasAudio=$hasAudioPerm, isVideo=$isVideo, isOutgoing=$isOutgoing")
             } catch (e: Throwable) {
                 Log.e(TAG, "Failed to start Zego room session: ${e.message}", e)
                 onError?.invoke(e.message ?: "خطأ في بدء جلسة Zego")

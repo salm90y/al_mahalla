@@ -697,8 +697,6 @@ fun YouTubeRoomScreen(
     LaunchedEffect(roomId, zegoAudioRoomId) {
         try {
             syncSocket.connect()
-            ZegoCallManager.joinWatchParty(context, zegoAudioRoomId, currentUserId, currentUserName)
-            ZegoCallManager.setSpeakerEnabled(context, isIntercomLoudspeaker)
             YouTubeRoomManager.getRoomLatest(context, roomId) { latestRoom ->
                 if (latestRoom != null && latestRoom.videoId.isNotBlank()) {
                     val changed = latestRoom.videoId != currentVideo.id
@@ -717,8 +715,11 @@ fun YouTubeRoomScreen(
                     }
                 }
             }
+            // Defer Zego watch party audio join slightly so WebView & screen composition never freeze on entry
+            delay(450)
+            ZegoCallManager.joinWatchParty(context.applicationContext, zegoAudioRoomId, currentUserId, currentUserName)
             if (!isStealthMode) {
-                delay(700)
+                delay(350)
                 val myRole = roomUsers.find { it.id == currentUserId }?.role ?: if (isHost) "مضيف الغرفة 👑" else "مشاهد"
                 syncSocket.broadcastMemberHello(myRole, isCameraActive, isFrontCamera, isIntercomTalking)
                 if (isHost || isAppOwner) {
@@ -745,10 +746,21 @@ fun YouTubeRoomScreen(
         onDispose {
             try {
                 syncSocket.disconnect()
+            } catch (_: Throwable) {}
+            try {
                 ZegoCallManager.stopPublishingAudio()
-                ZegoCallManager.endCall(context, zegoAudioRoomId)
-                RealVoipEngine.stopVoipSession(context)
-                webViewRef?.destroy()
+                ZegoCallManager.endCall(context.applicationContext, zegoAudioRoomId)
+                RealVoipEngine.stopVoipSession(context.applicationContext)
+            } catch (_: Throwable) {}
+            try {
+                webViewRef?.let { wv ->
+                    wv.stopLoading()
+                    wv.onPause()
+                    wv.loadUrl("about:blank")
+                    (wv.parent as? ViewGroup)?.removeView(wv)
+                    wv.removeAllViews()
+                    wv.destroy()
+                }
                 webViewRef = null
             } catch (_: Throwable) {}
         }

@@ -116,9 +116,13 @@ fun RootAppShell() {
                     )
                 ) { backStackEntry ->
                     val targetUserId = backStackEntry.arguments?.getString("chatId") ?: ""
+                    val resolvedAvatar = remember(targetUserId) {
+                        com.almahala.netplay.network.CloudflareClient.getCachedUserAvatar(context, targetUserId, targetUserId)
+                    }
                     ChatDetailScreen(
                         targetUserId = targetUserId,
                         userName = targetUserId,
+                        avatarUrl = resolvedAvatar,
                         onNavigateBack = { navController.popBackStack() },
                         onOpenProfile = { uid, uname ->
                             val encoded = try { java.net.URLEncoder.encode(uname, "UTF-8") } catch (_: Exception) { uname }
@@ -136,9 +140,13 @@ fun RootAppShell() {
                     val targetUserId = backStackEntry.arguments?.getString("chatId") ?: ""
                     val rawName = backStackEntry.arguments?.getString("chatName") ?: "محادثة"
                     val chatName = try { java.net.URLDecoder.decode(rawName, "UTF-8") } catch (_: Exception) { rawName }
+                    val resolvedAvatar = remember(targetUserId, chatName) {
+                        com.almahala.netplay.network.CloudflareClient.getCachedUserAvatar(context, targetUserId, chatName)
+                    }
                     ChatDetailScreen(
                         targetUserId = targetUserId,
                         userName = chatName,
+                        avatarUrl = resolvedAvatar,
                         onNavigateBack = { navController.popBackStack() },
                         onOpenProfile = { uid, uname ->
                             val encoded = try { java.net.URLEncoder.encode(uname, "UTF-8") } catch (_: Exception) { uname }
@@ -153,9 +161,13 @@ fun RootAppShell() {
                     )
                 ) { backStackEntry ->
                     val userId = backStackEntry.arguments?.getString("userId") ?: ""
+                    val resolvedAvatar = remember(userId) {
+                        com.almahala.netplay.network.CloudflareClient.getCachedUserAvatar(context, userId, userId)
+                    }
                     UserProfileDetailScreen(
                         userId = userId,
                         userName = userId,
+                        avatarUrl = resolvedAvatar,
                         onNavigateBack = { navController.popBackStack() },
                         onOpenChat = { id, name ->
                             val encoded = try { java.net.URLEncoder.encode(name, "UTF-8") } catch (_: Exception) { name }
@@ -173,9 +185,13 @@ fun RootAppShell() {
                     val userId = backStackEntry.arguments?.getString("userId") ?: ""
                     val rawName = backStackEntry.arguments?.getString("userName") ?: userId
                     val userName = try { java.net.URLDecoder.decode(rawName, "UTF-8") } catch (_: Exception) { rawName }
+                    val resolvedAvatar = remember(userId, userName) {
+                        com.almahala.netplay.network.CloudflareClient.getCachedUserAvatar(context, userId, userName)
+                    }
                     UserProfileDetailScreen(
                         userId = userId,
                         userName = userName,
+                        avatarUrl = resolvedAvatar,
                         onNavigateBack = { navController.popBackStack() },
                         onOpenChat = { id, name ->
                             val encoded = try { java.net.URLEncoder.encode(name, "UTF-8") } catch (_: Exception) { name }
@@ -199,6 +215,9 @@ fun RootAppShell() {
                 composable("youtube_lobby") {
                     YouTubeLobbyScreen(
                         onBack = { navController.popBackStack() },
+                        onOpenCreateRoom = {
+                            navController.navigate("youtube_create_room")
+                        },
                         onEnterRoom = { roomId, videoId, roomTitle, roomCode, isStealth ->
                             RoomNavState.setRoom(
                                 roomId = roomId,
@@ -209,6 +228,27 @@ fun RootAppShell() {
                             )
                             try {
                                 navController.navigate("youtube_room")
+                            } catch (e: Exception) {
+                                android.util.Log.e("RootAppShell", "Nav error: ${e.message}", e)
+                            }
+                        }
+                    )
+                }
+                composable("youtube_create_room") {
+                    YouTubeCreateRoomScreen(
+                        onBack = { navController.popBackStack() },
+                        onRoomCreated = { createdRoom, isStealth ->
+                            RoomNavState.setRoom(
+                                roomId = createdRoom.roomId,
+                                videoId = createdRoom.videoId,
+                                roomTitle = createdRoom.title,
+                                roomCode = createdRoom.roomCode,
+                                isStealth = isStealth
+                            )
+                            try {
+                                navController.navigate("youtube_room") {
+                                    popUpTo("youtube_create_room") { inclusive = true }
+                                }
                             } catch (e: Exception) {
                                 android.util.Log.e("RootAppShell", "Nav error: ${e.message}", e)
                             }

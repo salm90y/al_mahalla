@@ -39,6 +39,19 @@ class CallActivity : AppCompatActivity() {
     private var targetUserName: String = ""
     private var targetUserAvatar: String = ""
     private var audioManager: AudioManager? = null
+    private var isEnding: Boolean = false
+
+    private fun terminateCallSafely() {
+        if (isEnding) return
+        isEnding = true
+        isCallActive = false
+        try {
+            CallSignalingManager.endCall(this)
+        } catch (_: Throwable) {}
+        if (!isFinishing && !isDestroyed) {
+            finish()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,11 +111,7 @@ class CallActivity : AppCompatActivity() {
                     callerAvatar = targetUserAvatar,
                     isVideoCall = isVideo,
                     onEndCall = {
-                        isCallActive = false
-                        CallSignalingManager.endCall(this@CallActivity) {
-                            finish()
-                        }
-                        finish()
+                        terminateCallSafely()
                     },
                     onMinimize = {
                         finish()
@@ -145,17 +154,19 @@ class CallActivity : AppCompatActivity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        isCallActive = false
-        CallSignalingManager.endCall(this) {
-            finish()
-        }
-        finish()
+        terminateCallSafely()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         isCallActive = false
         currentActiveRoomId = ""
+        if (!isEnding) {
+            isEnding = true
+            try {
+                CallSignalingManager.endCall(this)
+            } catch (_: Throwable) {}
+        }
         CallSignalingManager.stopAllSounds(this)
         ZegoCallManager.endCall(this, callID)
         RealVoipEngine.stopVoipSession(this)

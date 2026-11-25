@@ -79,9 +79,13 @@ object CallSignalingManager {
     private val handledCallActions = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     private var toneGenerator: ToneGenerator? = null
+    private val toneLock = Any()
+    private val isEndingCall = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val isPollingStatus = java.util.concurrent.atomic.AtomicBoolean(false)
     private var ringbackJob: Job? = null
     private var durationJob: Job? = null
     private var signalingJob: Job? = null
+    private var timeoutJob: Job? = null
     private var globalWatcherJob: Job? = null
     private var incomingRingtone: Ringtone? = null
     private var vibrator: Vibrator? = null
@@ -159,13 +163,18 @@ object CallSignalingManager {
         isVideo: Boolean,
         roomId: String = "call_${System.currentTimeMillis()}"
     ) {
+        isEndingCall.set(false)
         stopAllSounds(context)
+        timeoutJob?.cancel()
+        timeoutJob = null
 
+        val cleanAvatar = CloudflareClient.normalizeAvatarUrl(context, targetUserAvatar)
+            .ifBlank { CloudflareClient.getCachedUserAvatar(context, targetUserId, targetUserName) }
         val session = ActiveCallSession(
             roomId = roomId,
             targetUserId = targetUserId,
             targetUserName = targetUserName,
-            targetUserAvatar = targetUserAvatar,
+            targetUserAvatar = cleanAvatar,
             isVideo = isVideo,
             isOutgoing = true
         )
@@ -205,12 +214,13 @@ object CallSignalingManager {
         )
 
         // Start signaling poll loop
-        startSignalingPoller(context, roomId, targetUserId, isOutgoing = true)
+        startSignalingPoller(context.applicationContext, roomId, targetUserId, isOutgoing = true)
 
         // Start Zego Audio & Video Call Engine
         ZegoCallManager.onRemoteUserJoined = { _ ->
             scope.launch(Dispatchers.Main) {
-                if (callState != CallState.CONNECTED) {
+                if (callState != CallState.CONNECTED && !isEndingCall.get()) {
+                    timeoutJob?.cancel()
                     stopAllSounds(context)
                     callState = CallState.CONNECTED
                     startLiveCallTimer()
@@ -232,16 +242,18 @@ object CallSignalingManager {
             isVideo = isVideo,
             isOutgoing = true,
             onConnected = {
-                // Room joined locally, ensure mic & audio state match CallSignalingManager
                 ZegoCallManager.setMicrophoneMute(isMuted)
                 ZegoCallManager.setSpeakerEnabled(context, isSpeakerOn)
+            },
+            onError = { msg ->
+                Log.w(TAG, "Zego startCall error notice: $msg")
             }
         )
 
         // Set call timeout (40 seconds for no-answer)
-        scope.launch {
+        timeoutJob = scope.launch {
             delay(40000)
-            if (callState == CallState.OUTGOING || callState == CallState.CONNECTING || callState == CallState.RINGING) {
+            if (!isEndingCall.get() && (callState == CallState.OUTGOING || callState == CallState.CONNECTING || callState == CallState.RINGING)) {
                 endCallWithReason(context, CallState.TIMEOUT, "لا يوجد رد")
             }
         }
@@ -263,15 +275,20 @@ object CallSignalingManager {
             return
         }
 
+        isEndingCall.set(false)
+        timeoutJob?.cancel()
+        timeoutJob = null
         stopAllSounds(context)
         dismissCallNotification(context)
         globalIncomingCall = null
 
+        val cleanAvatar = CloudflareClient.normalizeAvatarUrl(context, callerAvatar)
+            .ifBlank { CloudflareClient.getCachedUserAvatar(context, callerId, callerName) }
         val session = ActiveCallSession(
             roomId = roomId,
             targetUserId = callerId,
             targetUserName = callerName,
-            targetUserAvatar = callerAvatar,
+            targetUserAvatar = cleanAvatar,
             isVideo = isVideo,
             isOutgoing = false
         )
@@ -283,7 +300,7 @@ object CallSignalingManager {
         isCameraOn = isVideo
         endCallNoticeMessage = ""
 
-        // Start Zego Call Session immediately
+        // Start Zego Call Session safely
         val myUserId = CloudflareClient.getCurrentUserId(context)
         val myUserName = UserManager.getCurrentUser(context)?.username ?: CloudflareClient.getCurrentUsername(context)
         ZegoCallManager.startCall(
@@ -294,13 +311,15 @@ object CallSignalingManager {
             isVideo = isVideo,
             isOutgoing = false,
             onConnected = {
-                callState = CallState.CONNECTED
-                ZegoCallManager.setMicrophoneMute(isMuted)
-                ZegoCallManager.setSpeakerEnabled(context, isSpeakerOn)
+                if (!isEndingCall.get()) {
+                    callState = CallState.CONNECTED
+                    ZegoCallManager.setMicrophoneMute(isMuted)
+                    ZegoCallManager.setSpeakerEnabled(context, isSpeakerOn)
+                }
             }
         )
 
-        // Start Real VoIP Audio Engine immediately
+        // Start Real VoIP Audio Engine safely
         RealVoipEngine.startVoipSession(
             context = context,
             roomId = roomId,
@@ -325,7 +344,7 @@ object CallSignalingManager {
         startLiveCallTimer()
 
         // Start signaling poller to listen for call_ended
-        startSignalingPoller(context, roomId, callerId, isOutgoing = false)
+        startSignalingPoller(context.applicationContext, roomId, callerId, isOutgoing = false)
     }
 
     /**
@@ -386,9 +405,21 @@ object CallSignalingManager {
      * End active call normally
      */
     fun endCall(context: Context, onComplete: (() -> Unit)? = null) {
+        if (!isEndingCall.compareAndSet(false, true)) {
+            onComplete?.invoke()
+            return
+        }
         val session = currentSession
         val duration = callDurationSeconds
         val formattedTime = formatDuration(duration)
+
+        timeoutJob?.cancel()
+        timeoutJob = null
+        signalingJob?.cancel()
+        signalingJob = null
+        durationJob?.cancel()
+        durationJob = null
+        isPollingStatus.set(false)
 
         stopAllSounds(context)
         dismissCallNotification(context)
@@ -424,17 +455,10 @@ object CallSignalingManager {
         callState = CallState.ENDED
         endCallNoticeMessage = "انتهت المكالمة • $formattedTime"
 
-        signalingJob?.cancel()
-        signalingJob = null
-        durationJob?.cancel()
-        durationJob = null
-        ringbackJob?.cancel()
-        ringbackJob = null
-
         onComplete?.invoke()
 
         scope.launch {
-            delay(1200)
+            delay(800)
             resetCallState()
         }
     }
@@ -443,7 +467,16 @@ object CallSignalingManager {
      * End call with specific reason (No Answer, Declined, Busy)
      */
     fun endCallWithReason(context: Context, reason: CallState, notice: String) {
+        if (!isEndingCall.compareAndSet(false, true)) return
         val session = currentSession
+        timeoutJob?.cancel()
+        timeoutJob = null
+        signalingJob?.cancel()
+        signalingJob = null
+        durationJob?.cancel()
+        durationJob = null
+        isPollingStatus.set(false)
+
         stopAllSounds(context)
         dismissCallNotification(context)
         ZegoCallManager.endCall(context, session?.roomId ?: "")
@@ -461,17 +494,20 @@ object CallSignalingManager {
             )
         }
 
-        // Play busy / disconnect tone
+        // Play busy / disconnect tone safely
         try {
             val tone = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 80)
-            tone.startTone(ToneGenerator.TONE_PROP_BEEP2, 600)
+            tone.startTone(ToneGenerator.TONE_PROP_BEEP2, 500)
             Handler(Looper.getMainLooper()).postDelayed({
-                try { tone.release() } catch (_: Exception) {}
-            }, 700)
-        } catch (_: Exception) {}
+                try {
+                    tone.stopTone()
+                    tone.release()
+                } catch (_: Exception) {}
+            }, 600)
+        } catch (_: Throwable) {}
 
         scope.launch {
-            delay(1500)
+            delay(1200)
             resetCallState()
         }
     }
@@ -495,21 +531,39 @@ object CallSignalingManager {
     private fun startCallerRingbackTone() {
         ringbackJob?.cancel()
         ringbackJob = scope.launch(Dispatchers.IO) {
+            var localTone: ToneGenerator? = null
             try {
-                toneGenerator = ToneGenerator(AudioManager.STREAM_VOICE_CALL, 75)
-                while (isActive && (callState == CallState.OUTGOING || callState == CallState.CONNECTING || callState == CallState.RINGING)) {
-                    // Standard telephone ringback tone: 1.5s tone, 3s silence
-                    toneGenerator?.startTone(ToneGenerator.TONE_SUP_RINGTONE, 1500)
+                localTone = synchronized(toneLock) {
+                    try {
+                        toneGenerator?.stopTone()
+                        toneGenerator?.release()
+                    } catch (_: Exception) {}
+                    ToneGenerator(AudioManager.STREAM_VOICE_CALL, 75).also {
+                        toneGenerator = it
+                    }
+                }
+                while (isActive && !isEndingCall.get() && (callState == CallState.OUTGOING || callState == CallState.CONNECTING || callState == CallState.RINGING)) {
+                    synchronized(toneLock) {
+                        if (toneGenerator === localTone) {
+                            try {
+                                localTone?.startTone(ToneGenerator.TONE_SUP_RINGTONE, 1500)
+                            } catch (_: Throwable) {}
+                        }
+                    }
                     delay(4500)
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.w(TAG, "Tone generator error: ${e.message}")
             } finally {
-                try {
-                    toneGenerator?.stopTone()
-                    toneGenerator?.release()
-                    toneGenerator = null
-                } catch (_: Exception) {}
+                synchronized(toneLock) {
+                    try {
+                        localTone?.stopTone()
+                        localTone?.release()
+                    } catch (_: Exception) {}
+                    if (toneGenerator === localTone) {
+                        toneGenerator = null
+                    }
+                }
             }
         }
     }
@@ -520,11 +574,13 @@ object CallSignalingManager {
     fun stopAllSounds(context: Context) {
         ringbackJob?.cancel()
         ringbackJob = null
-        try {
-            toneGenerator?.stopTone()
-            toneGenerator?.release()
+        synchronized(toneLock) {
+            try {
+                toneGenerator?.stopTone()
+                toneGenerator?.release()
+            } catch (_: Exception) {}
             toneGenerator = null
-        } catch (_: Exception) {}
+        }
 
         try {
             incomingRingtone?.stop()
@@ -580,46 +636,51 @@ object CallSignalingManager {
         isOutgoing: Boolean
     ) {
         signalingJob?.cancel()
+        isPollingStatus.set(false)
         signalingJob = scope.launch(Dispatchers.IO) {
-            while (isActive && currentSession != null) {
-                // 1. Direct active call status polling
-                CloudflareClient.getCallStatus(context, roomId) { status ->
-                    when (status) {
-                        "ringing" -> {
-                            if (callState == CallState.CONNECTING || callState == CallState.OUTGOING) {
-                                callState = CallState.RINGING
+            while (isActive && currentSession != null && !isEndingCall.get()) {
+                if (isPollingStatus.compareAndSet(false, true)) {
+                    CloudflareClient.getCallStatus(context, roomId) { status ->
+                        isPollingStatus.set(false)
+                        if (isEndingCall.get()) return@getCallStatus
+                        when (status) {
+                            "ringing" -> {
+                                if (callState == CallState.CONNECTING || callState == CallState.OUTGOING) {
+                                    callState = CallState.RINGING
+                                }
                             }
-                        }
-                        "calling", "waiting", "unknown" -> {
-                            // Call is pending / waiting for recipient response
-                        }
-                        "connected", "accept" -> {
-                            if (callState != CallState.CONNECTED) {
-                                stopAllSounds(context)
-                                callState = CallState.CONNECTED
-                                startLiveCallTimer()
-                                RealVoipEngine.startVoipSession(
-                                    context = context,
-                                    roomId = roomId,
-                                    isOutgoing = isOutgoing,
-                                    speakerOn = isSpeakerOn
-                                )
+                            "calling", "waiting", "unknown" -> {
+                                // Call is pending / waiting for recipient response
                             }
-                        }
-                        "declined" -> {
-                            if (callState != CallState.ENDED && callState != CallState.DECLINED) {
-                                endCallWithReason(context, CallState.DECLINED, "تم رفض المكالمة")
+                            "connected", "accept" -> {
+                                if (callState != CallState.CONNECTED) {
+                                    timeoutJob?.cancel()
+                                    stopAllSounds(context)
+                                    callState = CallState.CONNECTED
+                                    startLiveCallTimer()
+                                    RealVoipEngine.startVoipSession(
+                                        context = context,
+                                        roomId = roomId,
+                                        isOutgoing = isOutgoing,
+                                        speakerOn = isSpeakerOn
+                                    )
+                                }
                             }
-                        }
-                        "ended" -> {
-                            val elapsed = System.currentTimeMillis() - (currentSession?.startTimeMs ?: 0L)
-                            if (elapsed > 4000L && callState != CallState.ENDED && (callState == CallState.CONNECTED || callState == CallState.RINGING)) {
-                                endCallWithReason(context, CallState.ENDED, "انتهت المكالمة")
+                            "declined" -> {
+                                if (callState != CallState.ENDED && callState != CallState.DECLINED) {
+                                    endCallWithReason(context, CallState.DECLINED, "تم رفض المكالمة")
+                                }
+                            }
+                            "ended" -> {
+                                val elapsed = System.currentTimeMillis() - (currentSession?.startTimeMs ?: 0L)
+                                if (elapsed > 4000L && callState != CallState.ENDED && (callState == CallState.CONNECTED || callState == CallState.RINGING)) {
+                                    endCallWithReason(context, CallState.ENDED, "انتهت المكالمة")
+                                }
                             }
                         }
                     }
                 }
-                delay(500)
+                delay(700)
             }
         }
     }
@@ -712,12 +773,16 @@ object CallSignalingManager {
     }
 
     fun resetCallState() {
+        timeoutJob?.cancel()
+        timeoutJob = null
         signalingJob?.cancel()
         signalingJob = null
         durationJob?.cancel()
         durationJob = null
         ringbackJob?.cancel()
         ringbackJob = null
+        isPollingStatus.set(false)
+        isEndingCall.set(false)
         currentSession = null
         callState = CallState.IDLE
         callDurationSeconds = 0

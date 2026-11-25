@@ -73,6 +73,15 @@ object YouTubeRoomManager {
         .readTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
+    private val createRoomHttpClient = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .writeTimeout(4, TimeUnit.SECONDS)
+        .build()
+    val sharedSyncHttpClient: OkHttpClient = OkHttpClient.Builder()
+        .pingInterval(20, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .build()
 
     // In-memory list of genuine real active rooms (NO fake mock rooms)
     val activeRealRooms = mutableListOf<PublicYouTubeRoom>()
@@ -172,6 +181,17 @@ object YouTubeRoomManager {
         )
 
         saveRoomLocally(context, room)
+        mainHandler.post {
+            activeRealRooms.removeAll { it.roomId == room.roomId || it.roomCode == room.roomCode }
+            activeRealRooms.add(0, room)
+        }
+
+        val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+        fun finishOnce(target: PublicYouTubeRoom) {
+            if (completed.compareAndSet(false, true)) {
+                mainHandler.post { onComplete(Result.success(target)) }
+            }
+        }
 
         val baseUrl = CloudflareClient.getBaseUrl(context)
         val jsonBody = JSONObject().apply {
@@ -188,9 +208,9 @@ object YouTubeRoomManager {
             .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
             .build()
 
-        httpClient.newCall(request).enqueue(object : Callback {
+        createRoomHttpClient.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                mainHandler.post { onComplete(Result.success(room)) }
+                finishOnce(room)
             }
 
             override fun onResponse(call: Call, response: Response) {
@@ -201,16 +221,17 @@ object YouTubeRoomManager {
                         if (obj.optBoolean("success", false)) {
                             val rObj = obj.optJSONObject("room")
                             if (rObj != null) {
+                                val resolvedVid = rObj.optString("videoId", room.videoId).ifBlank { room.videoId }
                                 val serverRoom = PublicYouTubeRoom(
-                                    roomId = rObj.optString("roomId", room.roomId),
-                                    roomCode = rObj.optString("roomCode", room.roomCode),
-                                    title = rObj.optString("title", room.title),
-                                    hostName = rObj.optString("hostName", room.hostName),
-                                    hostId = rObj.optString("hostId", room.hostId),
-                                    hostAvatarBg = Color(0xFF2563EB),
+                                    roomId = rObj.optString("roomId", room.roomId).ifBlank { room.roomId },
+                                    roomCode = rObj.optString("roomCode", room.roomCode).ifBlank { room.roomCode },
+                                    title = rObj.optString("title", room.title).ifBlank { room.title },
+                                    hostName = rObj.optString("hostName", room.hostName).ifBlank { room.hostName },
+                                    hostId = rObj.optString("hostId", room.hostId).ifBlank { room.hostId },
+                                    hostAvatarBg = Color(0xFFDC2626),
                                     currentVideoTitle = rObj.optString("currentVideoTitle", room.currentVideoTitle),
-                                    videoId = rObj.optString("videoId", room.videoId),
-                                    thumbnailUrl = "https://img.youtube.com/vi/${rObj.optString("videoId", room.videoId)}/hqdefault.jpg",
+                                    videoId = resolvedVid,
+                                    thumbnailUrl = "https://img.youtube.com/vi/$resolvedVid/hqdefault.jpg",
                                     viewersCount = rObj.optInt("viewersCount", 1),
                                     isLive = true,
                                     durationText = "مباشر",
@@ -224,13 +245,13 @@ object YouTubeRoomManager {
                                 mainHandler.post {
                                     activeRealRooms.removeAll { it.roomId == room.roomId || it.roomId == serverRoom.roomId }
                                     activeRealRooms.add(0, serverRoom)
-                                    onComplete(Result.success(serverRoom))
                                 }
+                                finishOnce(serverRoom)
                                 return
                             }
                         }
                     } catch (_: Exception) {}
-                    mainHandler.post { onComplete(Result.success(room)) }
+                    finishOnce(room)
                 }
             }
         })
@@ -605,10 +626,7 @@ class YouTubeSyncWebSocket(
     private var isManuallyClosed: Boolean = false
     private var isSocketOpen: Boolean = false
     private var reconnectAttempt: Int = 0
-    private val client = OkHttpClient.Builder()
-        .pingInterval(20, TimeUnit.SECONDS)
-        .connectTimeout(12, TimeUnit.SECONDS)
-        .build()
+    private val client = YouTubeRoomManager.sharedSyncHttpClient
 
     fun connect() {
         isManuallyClosed = false
