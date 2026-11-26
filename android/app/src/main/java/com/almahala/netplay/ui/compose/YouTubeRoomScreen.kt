@@ -235,7 +235,7 @@ fun YouTubeRoomScreen(
     val currentUserName = remember { CloudflareClient.getCurrentUsername(context).ifBlank { "أحمد" } }
     val isAppOwner = remember { YouTubeRoomManager.isAppOwner(context) }
     val isHost = remember(roomId, currentUserId, currentUserName) {
-        val inMemoryMatch = YouTubeRoomManager.activeRealRooms.toList().find { it.roomId == roomId }?.let {
+        val inMemoryMatch = YouTubeRoomManager.getActiveRoomsSnapshot().find { it.roomId == roomId }?.let {
             it.hostId == currentUserId || it.hostName == currentUserName
         } == true
         val localMatch = YouTubeRoomManager.loadRoomsLocally(context).find { it.roomId == roomId }?.let {
@@ -286,17 +286,18 @@ fun YouTubeRoomScreen(
     var lastVolumeBeforeMute by remember { mutableFloatStateOf(1.0f) }
     var currentPositionSec by remember { mutableFloatStateOf(0f) }
     var totalDurationSec by remember { mutableFloatStateOf(100f) }
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    val webViewRefHolder = remember { java.util.concurrent.atomic.AtomicReference<WebView?>(null) }
     var isRoomDisposed by remember { mutableStateOf(false) }
     var isWebViewMounted by remember { mutableStateOf(false) }
     var webViewCrashFallback by remember { mutableStateOf(false) }
+    var hasJoinedZegoAudio by remember { mutableStateOf(false) }
     var lastRemoteSyncAppliedAt by remember { mutableLongStateOf(0L) }
 
     fun safeEvaluateJs(js: String) {
         if (isRoomDisposed) return
         try {
-            val wv = webViewRef ?: return
-            if (wv.isAttachedToWindow) {
+            val wv = webViewRefHolder.get() ?: return
+            if (wv.tag != "wv_destroyed" && wv.isAttachedToWindow) {
                 wv.evaluateJavascript(js, null)
             }
         } catch (_: Throwable) {}
@@ -557,6 +558,17 @@ fun YouTubeRoomScreen(
             },
             onVoiceStateReceived = { uId, uName, isTalking ->
                 upsertRemoteUser(uId = uId, uName = uName, isTalking = isTalking)
+                if (isTalking && !hasJoinedZegoAudio && !isRoomDisposed) {
+                    hasJoinedZegoAudio = true
+                    try {
+                        ZegoCallManager.joinWatchParty(
+                            context.applicationContext,
+                            "yt_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}",
+                            currentUserId,
+                            currentUserName
+                        )
+                    } catch (_: Throwable) {}
+                }
             },
             onCameraStateReceived = { uId, uName, isCamActive, isFront ->
                 upsertRemoteUser(uId = uId, uName = uName, hasCam = isCamActive, isFront = isFront)
@@ -577,7 +589,7 @@ fun YouTubeRoomScreen(
         )
     }
 
-    // REAL ZEGO WALKIE-TALKIE AUDIO ROOM INITIALIZATION IN SAFE AUDIENCE MODE
+    // REAL ZEGO WALKIE-TALKIE AUDIO ROOM INITIALIZATION ON DEMAND (never auto-init on entry)
     val zegoAudioRoomId = remember(roomId) { "yt_room_${roomId.replace(Regex("[^a-zA-Z0-9_]"), "_").take(30)}" }
 
     // Permission launchers
@@ -597,13 +609,16 @@ fun YouTubeRoomScreen(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
+            hasJoinedZegoAudio = true
             isIntercomTalking = true
-            ZegoCallManager.startPublishingAudio(context, zegoAudioRoomId, currentUserId)
-            ZegoCallManager.setMicrophoneMute(false)
-            ZegoCallManager.setSpeakerEnabled(context, isIntercomLoudspeaker)
-            RealVoipEngine.ensureAudioCaptureStarted(context)
-            RealVoipEngine.setMute(false)
-            RealVoipEngine.setSpeaker(context, isIntercomLoudspeaker)
+            try {
+                ZegoCallManager.startPublishingAudio(context.applicationContext, zegoAudioRoomId, currentUserId)
+                ZegoCallManager.setMicrophoneMute(false)
+                ZegoCallManager.setSpeakerEnabled(context.applicationContext, isIntercomLoudspeaker)
+                RealVoipEngine.ensureAudioCaptureStarted(context.applicationContext)
+                RealVoipEngine.setMute(false)
+                RealVoipEngine.setSpeaker(context.applicationContext, isIntercomLoudspeaker)
+            } catch (_: Throwable) {}
             syncSocket.broadcastVoiceState(true)
             Toast.makeText(context, "تم تفعيل الميكروفون 🎙️", Toast.LENGTH_SHORT).show()
         } else {
@@ -622,21 +637,23 @@ fun YouTubeRoomScreen(
                     if (bytes != null && bytes.isNotEmpty()) {
                         val fileName = "yt_img_${System.currentTimeMillis()}.jpg"
                         CloudflareClient.uploadMediaFile(context, bytes, fileName, "image/jpeg") { ok, r2Url ->
-                            isSendingImage = false
-                            if (ok && !r2Url.isNullOrBlank()) {
-                                chatMessages.add(
-                                    YouTubeChatMessage(
-                                        id = "ytm_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
-                                        sender = currentUserName,
-                                        text = "📷 صورة",
-                                        time = "الآن",
-                                        isMe = true,
-                                        imageUrl = r2Url
+                            coroutineScope.launch(Dispatchers.Main) {
+                                isSendingImage = false
+                                if (ok && !r2Url.isNullOrBlank()) {
+                                    chatMessages.add(
+                                        YouTubeChatMessage(
+                                            id = "ytm_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
+                                            sender = currentUserName,
+                                            text = "📷 صورة",
+                                            time = "الآن",
+                                            isMe = true,
+                                            imageUrl = r2Url
+                                        )
                                     )
-                                )
-                                syncSocket.broadcastChatMessage("[IMAGE]:$r2Url")
-                            } else {
-                                Toast.makeText(context, "تعذر رفع الصورة: تحقق من الاتصال", Toast.LENGTH_SHORT).show()
+                                    syncSocket.broadcastChatMessage("[IMAGE]:$r2Url")
+                                } else {
+                                    Toast.makeText(context, "تعذر رفع الصورة: تحقق من الاتصال", Toast.LENGTH_SHORT).show()
+                                }
                             }
                         }
                     } else {
@@ -679,23 +696,30 @@ fun YouTubeRoomScreen(
         if (talk) {
             val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
             if (hasPerm) {
+                hasJoinedZegoAudio = true
                 isIntercomTalking = true
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                ZegoCallManager.startPublishingAudio(context, zegoAudioRoomId, currentUserId)
-                ZegoCallManager.setMicrophoneMute(false)
-                ZegoCallManager.setSpeakerEnabled(context, isIntercomLoudspeaker)
-                RealVoipEngine.ensureAudioCaptureStarted(context)
-                RealVoipEngine.setMute(false)
-                RealVoipEngine.setSpeaker(context, isIntercomLoudspeaker)
+                try {
+                    ZegoCallManager.startPublishingAudio(context.applicationContext, zegoAudioRoomId, currentUserId)
+                    ZegoCallManager.setMicrophoneMute(false)
+                    ZegoCallManager.setSpeakerEnabled(context.applicationContext, isIntercomLoudspeaker)
+                    RealVoipEngine.ensureAudioCaptureStarted(context.applicationContext)
+                    RealVoipEngine.setMute(false)
+                    RealVoipEngine.setSpeaker(context.applicationContext, isIntercomLoudspeaker)
+                } catch (_: Throwable) {}
                 syncSocket.broadcastVoiceState(true)
             } else {
                 audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
             }
         } else {
             isIntercomTalking = false
-            ZegoCallManager.stopPublishingAudio()
-            ZegoCallManager.setMicrophoneMute(true)
-            RealVoipEngine.setMute(true)
+            if (hasJoinedZegoAudio) {
+                try {
+                    ZegoCallManager.stopPublishingAudio()
+                    ZegoCallManager.setMicrophoneMute(true)
+                    RealVoipEngine.setMute(true)
+                } catch (_: Throwable) {}
+            }
             syncSocket.broadcastVoiceState(false)
         }
     }
@@ -704,7 +728,7 @@ fun YouTubeRoomScreen(
         setIntercomTalkingState(!isIntercomTalking)
     }
 
-    // Connect WebSocket, join Zego Watch Party audience audio, and fetch authoritative initial state
+    // Connect WebSocket and fetch authoritative initial state (Zego is joined lazily only on voice use)
     LaunchedEffect(roomId, zegoAudioRoomId) {
         try {
             // Allow NavHost route transition to finish settling before attaching WebView surface
@@ -731,13 +755,6 @@ fun YouTubeRoomScreen(
                         applyVideoInWebView(latestRoom.videoId, autoPlay = true, seekSec = 0f)
                     }
                 }
-            }
-            // Defer Zego watch party audio join slightly so WebView & screen composition never freeze or collide on entry
-            delay(550)
-            if (!isRoomDisposed) {
-                try {
-                    ZegoCallManager.joinWatchParty(context.applicationContext, zegoAudioRoomId, currentUserId, currentUserName)
-                } catch (_: Throwable) {}
             }
             if (!isStealthMode && !isRoomDisposed) {
                 delay(350)
@@ -766,15 +783,17 @@ fun YouTubeRoomScreen(
     DisposableEffect(roomId, zegoAudioRoomId) {
         onDispose {
             isRoomDisposed = true
-            webViewRef = null
+            webViewRefHolder.set(null)
             try {
                 syncSocket.disconnect()
             } catch (_: Throwable) {}
-            try {
-                ZegoCallManager.stopPublishingAudio()
-                ZegoCallManager.endCall(context.applicationContext, zegoAudioRoomId)
-                RealVoipEngine.stopVoipSession(context.applicationContext)
-            } catch (_: Throwable) {}
+            if (hasJoinedZegoAudio || isIntercomTalking) {
+                try {
+                    ZegoCallManager.stopPublishingAudio()
+                    ZegoCallManager.endCall(context.applicationContext, zegoAudioRoomId)
+                    RealVoipEngine.stopVoipSession(context.applicationContext)
+                } catch (_: Throwable) {}
+            }
         }
     }
 
@@ -1158,13 +1177,9 @@ fun YouTubeRoomScreen(
                                 webViewClient = object : WebViewClient() {
                                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
                                     override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                                        if (webViewRef === view) {
-                                            webViewRef = null
+                                        if (view != null) {
+                                            webViewRefHolder.compareAndSet(view, null)
                                         }
-                                        try {
-                                            (view?.parent as? ViewGroup)?.removeView(view)
-                                            view?.destroy()
-                                        } catch (_: Throwable) {}
                                         webViewCrashFallback = true
                                         return true
                                     }
@@ -1479,6 +1494,7 @@ fun YouTubeRoomScreen(
                                     </body>
                                     </html>
                                 """.trimIndent()
+                                webViewRefHolder.set(this)
                                 loadDataWithBaseURL("https://www.youtube-nocookie.com", playerHtml, "text/html", "UTF-8", null)
                             }
                         } catch (_: Throwable) {
@@ -1488,22 +1504,23 @@ fun YouTubeRoomScreen(
                         }
                     },
                     update = { webView ->
-                        if (!isRoomDisposed && webView is WebView && webViewRef !== webView) {
-                            webViewRef = webView
+                        if (!isRoomDisposed && webView is WebView && webView.tag != "wv_destroyed") {
+                            webViewRefHolder.set(webView)
                         }
                     },
                     onRelease = { view ->
                         try {
-                            if (webViewRef === view) {
-                                webViewRef = null
-                            }
-                            (view as? WebView)?.let { wv ->
-                                wv.stopLoading()
-                                wv.onPause()
-                                wv.loadUrl("about:blank")
-                                (wv.parent as? ViewGroup)?.removeView(wv)
-                                wv.removeAllViews()
-                                wv.destroy()
+                            if (view is WebView) {
+                                webViewRefHolder.compareAndSet(view, null)
+                                if (view.tag != "wv_destroyed") {
+                                    view.tag = "wv_destroyed"
+                                    view.stopLoading()
+                                    view.onPause()
+                                    view.loadUrl("about:blank")
+                                    (view.parent as? ViewGroup)?.removeView(view)
+                                    view.removeAllViews()
+                                    view.destroy()
+                                }
                             }
                         } catch (_: Throwable) {}
                     },
@@ -3806,8 +3823,12 @@ fun YouTubeRoomScreen(
                                             YouTubeRoomManager.deleteRoomLocally(context, roomId)
                                         }
                                         syncSocket.disconnect()
-                                        ZegoCallManager.stopPublishingAudio()
-                                        ZegoCallManager.endCall(context, zegoAudioRoomId)
+                                        if (hasJoinedZegoAudio || isIntercomTalking) {
+                                            try {
+                                                ZegoCallManager.stopPublishingAudio()
+                                                ZegoCallManager.endCall(context.applicationContext, zegoAudioRoomId)
+                                            } catch (_: Throwable) {}
+                                        }
                                         onBack()
                                     },
                                     modifier = Modifier

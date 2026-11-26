@@ -84,8 +84,23 @@ object YouTubeRoomManager {
         .connectTimeout(12, TimeUnit.SECONDS)
         .build()
 
+    private val roomsLock = Any()
+
     // In-memory list of genuine real active rooms (Thread-safe for UI & background updates)
     val activeRealRooms = CopyOnWriteArrayList<PublicYouTubeRoom>()
+
+    private fun removeMatchingActiveRooms(predicate: (PublicYouTubeRoom) -> Boolean) {
+        synchronized(roomsLock) {
+            val toRemove = activeRealRooms.filter(predicate)
+            if (toRemove.isNotEmpty()) {
+                activeRealRooms.removeAll(toRemove.toSet())
+            }
+        }
+    }
+
+    fun getActiveRoomsSnapshot(): List<PublicYouTubeRoom> {
+        return synchronized(roomsLock) { activeRealRooms.toList() }
+    }
 
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -111,7 +126,7 @@ object YouTubeRoomManager {
         val thumb = "https://img.youtube.com/vi/$videoId/hqdefault.jpg"
 
         // 1. In-memory thread-safe update
-        synchronized(activeRealRooms) {
+        synchronized(roomsLock) {
             val inMemIndex = activeRealRooms.indexOfFirst { it.roomId == roomId }
             if (inMemIndex >= 0) {
                 val r = activeRealRooms[inMemIndex]
@@ -185,8 +200,14 @@ object YouTubeRoomManager {
 
         saveRoomLocally(context, room)
         mainHandler.post {
-            activeRealRooms.removeAll { it.roomId == room.roomId || it.roomCode == room.roomCode }
-            activeRealRooms.add(0, room)
+            try {
+                synchronized(roomsLock) {
+                    removeMatchingActiveRooms { it.roomId == room.roomId || it.roomCode == room.roomCode }
+                    activeRealRooms.add(0, room)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Non-fatal activeRealRooms local add warning: ${t.message}")
+            }
         }
 
         val completed = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -241,13 +262,26 @@ object YouTubeRoomManager {
                                     privacyMode = privacyMode,
                                     createdAt = rObj.optLong("createdAt", System.currentTimeMillis())
                                 )
-                                val existingList = loadRoomsLocally(context).toMutableList()
-                                existingList.removeAll { it.roomId == room.roomId || it.roomCode == room.roomCode }
-                                saveRoomsListLocally(context, existingList)
-                                saveRoomLocally(context, serverRoom)
+                                synchronized(roomsLock) {
+                                    val existingList = loadRoomsLocally(context).toMutableList()
+                                    existingList.removeAll { it.roomId == room.roomId || it.roomCode == room.roomCode }
+                                    saveRoomsListLocally(context, existingList)
+                                    saveRoomLocally(context, serverRoom)
+                                }
                                 mainHandler.post {
-                                    activeRealRooms.removeAll { it.roomId == room.roomId || it.roomId == serverRoom.roomId }
-                                    activeRealRooms.add(0, serverRoom)
+                                    try {
+                                        synchronized(roomsLock) {
+                                            removeMatchingActiveRooms {
+                                                it.roomId == room.roomId ||
+                                                    it.roomId == serverRoom.roomId ||
+                                                    it.roomCode == room.roomCode ||
+                                                    it.roomCode == serverRoom.roomCode
+                                            }
+                                            activeRealRooms.add(0, serverRoom)
+                                        }
+                                    } catch (t: Throwable) {
+                                        Log.w(TAG, "Non-fatal activeRealRooms server update warning: ${t.message}")
+                                    }
                                 }
                                 finishOnce(serverRoom)
                                 return
@@ -331,8 +365,10 @@ object YouTubeRoomManager {
                     resultList.forEach { saveRoomLocally(context, it) }
 
                     mainHandler.post {
-                        activeRealRooms.clear()
-                        activeRealRooms.addAll(resultList)
+                        synchronized(roomsLock) {
+                            activeRealRooms.clear()
+                            activeRealRooms.addAll(resultList)
+                        }
                         onComplete(resultList)
                     }
                 }
@@ -491,70 +527,76 @@ object YouTubeRoomManager {
     }
 
     private fun saveRoomsListLocally(context: Context, list: List<PublicYouTubeRoom>) {
-        try {
-            val arr = JSONArray()
-            list.take(30).forEach { r ->
-                val o = JSONObject().apply {
-                    put("roomId", r.roomId)
-                    put("roomCode", r.roomCode)
-                    put("title", r.title)
-                    put("hostName", r.hostName)
-                    put("hostId", r.hostId)
-                    put("currentVideoTitle", r.currentVideoTitle)
-                    put("videoId", r.videoId)
-                    put("thumbnailUrl", r.thumbnailUrl)
-                    put("viewersCount", r.viewersCount)
-                    put("privacyMode", r.privacyMode.name)
-                    put("createdAt", r.createdAt)
+        synchronized(roomsLock) {
+            try {
+                val arr = JSONArray()
+                list.take(30).forEach { r ->
+                    val o = JSONObject().apply {
+                        put("roomId", r.roomId)
+                        put("roomCode", r.roomCode)
+                        put("title", r.title)
+                        put("hostName", r.hostName)
+                        put("hostId", r.hostId)
+                        put("currentVideoTitle", r.currentVideoTitle)
+                        put("videoId", r.videoId)
+                        put("thumbnailUrl", r.thumbnailUrl)
+                        put("viewersCount", r.viewersCount)
+                        put("privacyMode", r.privacyMode.name)
+                        put("createdAt", r.createdAt)
+                    }
+                    arr.put(o)
                 }
-                arr.put(o)
-            }
-            getPrefs(context).edit().putString(KEY_LOCAL_ROOMS, arr.toString()).apply()
-        } catch (_: Exception) {}
+                getPrefs(context).edit().putString(KEY_LOCAL_ROOMS, arr.toString()).apply()
+            } catch (_: Exception) {}
+        }
     }
 
     private fun saveRoomLocally(context: Context, room: PublicYouTubeRoom) {
-        try {
-            val list = loadRoomsLocally(context).toMutableList()
-            list.removeAll { it.roomId == room.roomId || it.roomCode == room.roomCode }
-            list.add(0, room)
-            saveRoomsListLocally(context, list)
-        } catch (_: Exception) {}
+        synchronized(roomsLock) {
+            try {
+                val list = loadRoomsLocally(context).toMutableList()
+                list.removeAll { it.roomId == room.roomId || it.roomCode == room.roomCode }
+                list.add(0, room)
+                saveRoomsListLocally(context, list)
+            } catch (_: Exception) {}
+        }
     }
 
     fun loadRoomsLocally(context: Context): List<PublicYouTubeRoom> {
-        val result = mutableListOf<PublicYouTubeRoom>()
-        try {
-            val raw = getPrefs(context).getString(KEY_LOCAL_ROOMS, null) ?: return emptyList()
-            val arr = JSONArray(raw)
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                val pMode = try {
-                    RoomPrivacyMode.valueOf(o.optString("privacyMode", "PUBLIC"))
-                } catch (_: Exception) {
-                    RoomPrivacyMode.PUBLIC
-                }
-                result.add(
-                    PublicYouTubeRoom(
-                        roomId = o.optString("roomId"),
-                        roomCode = o.optString("roomCode"),
-                        title = o.optString("title"),
-                        hostName = o.optString("hostName"),
-                        hostId = o.optString("hostId"),
-                        hostAvatarBg = Color(0xFF2563EB),
-                        currentVideoTitle = o.optString("currentVideoTitle"),
-                        videoId = o.optString("videoId"),
-                        thumbnailUrl = o.optString("thumbnailUrl"),
-                        viewersCount = o.optInt("viewersCount", 1),
-                        isLive = true,
-                        durationText = "مباشر",
-                        privacyMode = pMode,
-                        createdAt = o.optLong("createdAt", System.currentTimeMillis())
+        return synchronized(roomsLock) {
+            val result = mutableListOf<PublicYouTubeRoom>()
+            try {
+                val raw = getPrefs(context).getString(KEY_LOCAL_ROOMS, null) ?: return@synchronized emptyList()
+                val arr = JSONArray(raw)
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val pMode = try {
+                        RoomPrivacyMode.valueOf(o.optString("privacyMode", "PUBLIC"))
+                    } catch (_: Exception) {
+                        RoomPrivacyMode.PUBLIC
+                    }
+                    result.add(
+                        PublicYouTubeRoom(
+                            roomId = o.optString("roomId"),
+                            roomCode = o.optString("roomCode"),
+                            title = o.optString("title"),
+                            hostName = o.optString("hostName"),
+                            hostId = o.optString("hostId"),
+                            hostAvatarBg = Color(0xFF2563EB),
+                            currentVideoTitle = o.optString("currentVideoTitle"),
+                            videoId = o.optString("videoId"),
+                            thumbnailUrl = o.optString("thumbnailUrl"),
+                            viewersCount = o.optInt("viewersCount", 1),
+                            isLive = true,
+                            durationText = "مباشر",
+                            privacyMode = pMode,
+                            createdAt = o.optLong("createdAt", System.currentTimeMillis())
+                        )
                     )
-                )
-            }
-        } catch (_: Exception) {}
-        return result
+                }
+            } catch (_: Exception) {}
+            result
+        }
     }
 
     /**
@@ -562,27 +604,12 @@ object YouTubeRoomManager {
      */
     fun deleteRoomLocally(context: Context, roomId: String) {
         try {
-            activeRealRooms.removeAll { it.roomId == roomId }
-            val list = loadRoomsLocally(context).toMutableList()
-            list.removeAll { it.roomId == roomId }
-            val arr = JSONArray()
-            list.forEach { r ->
-                val o = JSONObject().apply {
-                    put("roomId", r.roomId)
-                    put("roomCode", r.roomCode)
-                    put("title", r.title)
-                    put("hostName", r.hostName)
-                    put("hostId", r.hostId)
-                    put("currentVideoTitle", r.currentVideoTitle)
-                    put("videoId", r.videoId)
-                    put("thumbnailUrl", r.thumbnailUrl)
-                    put("viewersCount", r.viewersCount)
-                    put("privacyMode", r.privacyMode.name)
-                    put("createdAt", r.createdAt)
-                }
-                arr.put(o)
+            synchronized(roomsLock) {
+                removeMatchingActiveRooms { it.roomId == roomId }
+                val list = loadRoomsLocally(context).toMutableList()
+                list.removeAll { it.roomId == roomId }
+                saveRoomsListLocally(context, list)
             }
-            getPrefs(context).edit().putString(KEY_LOCAL_ROOMS, arr.toString()).apply()
 
             // Delete remotely on Cloudflare Worker if connected
             val baseUrl = CloudflareClient.getBaseUrl(context)

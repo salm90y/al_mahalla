@@ -65,6 +65,13 @@ fun YouTubeCreateRoomScreen(
     var selectedPrivacy by remember { mutableStateOf(RoomPrivacyMode.PUBLIC) }
     var isStealthMode by remember { mutableStateOf(false) }
     var isCreating by remember { mutableStateOf(false) }
+    var isScreenActive by remember { mutableStateOf(true) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            isScreenActive = false
+        }
+    }
 
     val extractedVideoId = remember(videoUrlInput) {
         extractCreateRoomVideoId(videoUrlInput)
@@ -222,6 +229,7 @@ fun YouTubeCreateRoomScreen(
                                     initialVideoId = initialVideoId,
                                     initialVideoTitle = initialVideoTitle
                                 ) { result ->
+                                    if (!isScreenActive) return@createRealRoom
                                     isCreating = false
                                     result.onSuccess { createdRoom ->
                                         try {
@@ -231,7 +239,9 @@ fun YouTubeCreateRoomScreen(
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         } catch (_: Throwable) {}
-                                        onRoomCreated(createdRoom, isStealthMode)
+                                        try {
+                                            onRoomCreated(createdRoom, isStealthMode)
+                                        } catch (_: Throwable) {}
                                     }.onFailure { err ->
                                         try {
                                             Toast.makeText(
