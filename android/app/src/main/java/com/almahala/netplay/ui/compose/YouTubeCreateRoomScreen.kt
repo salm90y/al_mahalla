@@ -205,7 +205,10 @@ fun YouTubeCreateRoomScreen(
                             onClick = {
                                 if (isCreating) return@Button
                                 isCreating = true
-                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                try {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                } catch (_: Throwable) {}
+                                val appCtx = context.applicationContext
                                 val initialVideoId = extractedVideoId ?: "jfKfPfyJRdk"
                                 val initialVideoTitle = if (extractedVideoId != null) {
                                     "فيديو يوتيوب مختار"
@@ -213,7 +216,7 @@ fun YouTubeCreateRoomScreen(
                                     "بث يوتيوب تفاعلي مباشر"
                                 }
                                 YouTubeRoomManager.createRealRoom(
-                                    context = context,
+                                    context = appCtx,
                                     title = roomTitle,
                                     privacyMode = selectedPrivacy,
                                     initialVideoId = initialVideoId,
@@ -221,18 +224,22 @@ fun YouTubeCreateRoomScreen(
                                 ) { result ->
                                     isCreating = false
                                     result.onSuccess { createdRoom ->
-                                        Toast.makeText(
-                                            context,
-                                            "تم إنشاء الغرفة بنجاح (${createdRoom.roomCode})",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
+                                        try {
+                                            Toast.makeText(
+                                                appCtx,
+                                                "تم إنشاء الغرفة بنجاح (${createdRoom.roomCode})",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        } catch (_: Throwable) {}
                                         onRoomCreated(createdRoom, isStealthMode)
                                     }.onFailure { err ->
-                                        Toast.makeText(
-                                            context,
-                                            err.message ?: "تعذر إنشاء الغرفة",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
+                                        try {
+                                            Toast.makeText(
+                                                appCtx,
+                                                err.message ?: "تعذر إنشاء الغرفة",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        } catch (_: Throwable) {}
                                     }
                                 }
                             },

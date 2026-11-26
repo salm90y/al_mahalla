@@ -16,6 +16,10 @@ export interface Env {
   ZEGO_APP_SIGN?: string;
   DOMAIN?: string;
   API_DOMAIN?: string;
+  WHATSAPP_PHONE_NUMBER_ID?: string;
+  WHATSAPP_ACCESS_TOKEN?: string;
+  WHATSAPP_OTP_TEMPLATE?: string;
+  WHATSAPP_SENDER_NUMBER?: string;
 }
 
 // Durable Object for Real-Time Chat & Signaling
@@ -238,6 +242,14 @@ async function ensureAllTables(db: any) {
       user_id TEXT NOT NULL,
       expiry INTEGER NOT NULL,
       created_at INTEGER NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS whatsapp_otps (
+      phone TEXT PRIMARY KEY,
+      otp_hash TEXT NOT NULL,
+      display_name TEXT DEFAULT '',
+      expires_at INTEGER NOT NULL,
+      attempts_left INTEGER DEFAULT 5,
+      last_sent_at INTEGER NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS friendships (
       id TEXT PRIMARY KEY,
@@ -657,6 +669,276 @@ export default {
         return json({ success: true, user });
       }
 
+      // POST /auth/whatsapp/send-otp or /api/auth/whatsapp/send-otp
+      if ((url.pathname === "/auth/whatsapp/send-otp" || url.pathname === "/api/auth/whatsapp/send-otp") && method === "POST") {
+        const body = await request.json<any>().catch(() => ({}));
+        let rawPhone = String(body.phone || "").trim().replace(/[^0-9+]/g, "");
+        if (rawPhone.startsWith("00")) rawPhone = rawPhone.slice(2);
+        const digits = rawPhone.replace(/\+/g, "");
+        const displayName = String(body.display_name || body.displayName || "").trim().slice(0, 60);
+
+        if (digits.length < 8 || digits.length > 15) {
+          return json({ error: "يرجى إدخال رقم واتساب صحيح مع رمز الدولة (مثال: +9647701234567)" }, 400);
+        }
+
+        const waPhoneNumberId = (env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
+        const waAccessToken = (env.WHATSAPP_ACCESS_TOKEN || "").trim();
+        if (!waPhoneNumberId || !waAccessToken) {
+          return json({
+            error: "خدمة إرسال رسائل واتساب غير مفعّلة على الخادم بعد. يرجى إضافة WHATSAPP_PHONE_NUMBER_ID و WHATSAPP_ACCESS_TOKEN في إعدادات Cloudflare Worker."
+          }, 503);
+        }
+
+        if (env.DB) {
+          await ensureAllTables(env.DB);
+        }
+
+        const now = Date.now();
+        // Check 30-second cooldown
+        try {
+          let existingOtp: any = null;
+          if (env.SESSIONS) {
+            const rawKv = await env.SESSIONS.get(`wa_otp:${digits}`);
+            if (rawKv) existingOtp = JSON.parse(rawKv);
+          } else if (env.DB) {
+            existingOtp = await env.DB.prepare("SELECT last_sent_at FROM whatsapp_otps WHERE phone = ?").bind(digits).first<any>();
+          }
+          if (existingOtp && existingOtp.last_sent_at && (now - Number(existingOtp.last_sent_at)) < 30000) {
+            const waitSec = Math.ceil((30000 - (now - Number(existingOtp.last_sent_at))) / 1000);
+            return json({ error: `يرجى الانتظار ${waitSec} ثانية قبل طلب رمز جديد.` }, 429);
+          }
+        } catch (_) {}
+
+        // Cryptographically random 6-digit OTP
+        const randArr = new Uint32Array(1);
+        crypto.getRandomValues(randArr);
+        const otpCode = String(100000 + (randArr[0] % 900000));
+        const expiresAt = now + (3 * 60 * 1000); // Strictly 3 minutes
+        const otpHash = await hashPassword(`AlMahalla_WA_OTP_v1:${digits}:${otpCode}:${jwtSecret}`);
+
+        // Deliver OTP directly to user's WhatsApp from our app's dedicated WhatsApp Business number
+        const graphUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(waPhoneNumberId)}/messages`;
+        const templateName = (env.WHATSAPP_OTP_TEMPLATE || "").trim();
+        const waPayload: any = templateName
+          ? {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to: digits,
+              type: "template",
+              template: {
+                name: templateName,
+                language: { code: "ar" },
+                components: [
+                  {
+                    type: "body",
+                    parameters: [{ type: "text", text: otpCode }]
+                  }
+                ]
+              }
+            }
+          : {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to: digits,
+              type: "text",
+              text: {
+                preview_url: false,
+                body: `🔐 رمز التحقق الخاص بك لتطبيق المحلة هو: ${otpCode}\n⏳ صلاحية الرمز: 3 دقائق فقط.\nلا تشارك هذا الرمز مع أي شخص.`
+              }
+            };
+
+        let waRes: Response;
+        try {
+          waRes = await fetch(graphUrl, {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${waAccessToken}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(waPayload)
+          });
+        } catch (netErr: any) {
+          return json({ error: `تعذر الاتصال بخدمة واتساب: ${netErr?.message || "خطأ شبكة"}` }, 502);
+        }
+
+        if (!waRes.ok) {
+          let errDetail = "";
+          try {
+            const errBody: any = await waRes.json();
+            errDetail = errBody?.error?.message || "";
+          } catch (_) {}
+          return json({
+            error: errDetail
+              ? `فشل إرسال رسالة واتساب (${waRes.status}): ${errDetail}`
+              : `تعذر إرسال رمز واتساب من رقم التطبيق (رمز الخطأ ${waRes.status}).`
+          }, 502);
+        }
+
+        const record = {
+          phone: digits,
+          otp_hash: otpHash,
+          display_name: displayName,
+          expires_at: expiresAt,
+          attempts_left: 5,
+          last_sent_at: now
+        };
+
+        if (env.SESSIONS) {
+          await env.SESSIONS.put(`wa_otp:${digits}`, JSON.stringify(record), { expirationTtl: 180 });
+        }
+        if (env.DB) {
+          try {
+            await env.DB.prepare(
+              `INSERT INTO whatsapp_otps (phone, otp_hash, display_name, expires_at, attempts_left, last_sent_at)
+               VALUES (?, ?, ?, ?, 5, ?)
+               ON CONFLICT(phone) DO UPDATE SET
+                 otp_hash = excluded.otp_hash,
+                 display_name = excluded.display_name,
+                 expires_at = excluded.expires_at,
+                 attempts_left = 5,
+                 last_sent_at = excluded.last_sent_at`
+            ).bind(digits, otpHash, displayName, expiresAt, now).run();
+          } catch (_) {}
+        }
+
+        return json({
+          success: true,
+          phone: `+${digits}`,
+          sender_number: (env.WHATSAPP_SENDER_NUMBER || "").trim(),
+          expires_in_seconds: 180,
+          expires_at: expiresAt
+        });
+      }
+
+      // POST /auth/whatsapp/verify-otp or /api/auth/whatsapp/verify-otp
+      if ((url.pathname === "/auth/whatsapp/verify-otp" || url.pathname === "/api/auth/whatsapp/verify-otp") && method === "POST") {
+        if (!env.DB) return json({ error: "قاعدة البيانات غير متصلة بالسيرفر" }, 500);
+        await ensureAllTables(env.DB);
+
+        const body = await request.json<any>().catch(() => ({}));
+        let rawPhone = String(body.phone || "").trim().replace(/[^0-9+]/g, "");
+        if (rawPhone.startsWith("00")) rawPhone = rawPhone.slice(2);
+        const digits = rawPhone.replace(/\+/g, "");
+        const enteredCode = String(body.otp || body.code || "").trim().replace(/[^0-9]/g, "");
+        const fallbackName = String(body.display_name || body.displayName || "").trim().slice(0, 60);
+
+        if (digits.length < 8 || digits.length > 15) {
+          return json({ error: "رقم الهاتف غير صالح" }, 400);
+        }
+        if (enteredCode.length !== 6) {
+          return json({ error: "يرجى إدخال رمز التحقق المكون من 6 أرقام" }, 400);
+        }
+
+        let record: any = null;
+        if (env.SESSIONS) {
+          try {
+            const rawKv = await env.SESSIONS.get(`wa_otp:${digits}`);
+            if (rawKv) record = JSON.parse(rawKv);
+          } catch (_) {}
+        }
+        if (!record) {
+          record = await env.DB.prepare("SELECT * FROM whatsapp_otps WHERE phone = ?").bind(digits).first<any>();
+        }
+
+        const clearOtpRecord = async () => {
+          if (env.SESSIONS) {
+            try { await env.SESSIONS.delete(`wa_otp:${digits}`); } catch (_) {}
+          }
+          try { await env.DB.prepare("DELETE FROM whatsapp_otps WHERE phone = ?").bind(digits).run(); } catch (_) {}
+        };
+
+        if (!record) {
+          return json({ error: "لا يوجد رمز تحقق نشط لهذا الرقم. يرجى طلب رمز جديد." }, 410);
+        }
+
+        const now = Date.now();
+        if (now > Number(record.expires_at || 0)) {
+          await clearOtpRecord();
+          return json({ error: "انتهت صلاحية رمز التحقق (تجاوزت 3 دقائق). يرجى إرسال رمز جديد." }, 410);
+        }
+
+        const candidateHash = await hashPassword(`AlMahalla_WA_OTP_v1:${digits}:${enteredCode}:${jwtSecret}`);
+        if (candidateHash !== record.otp_hash) {
+          const nextAttempts = Math.max(0, Number(record.attempts_left || 1) - 1);
+          if (nextAttempts <= 0) {
+            await clearOtpRecord();
+            return json({ error: "تم استنفاد جميع المحاولات المسموحة. يرجى طلب رمز جديد." }, 410);
+          }
+          record.attempts_left = nextAttempts;
+          const remainingTtl = Math.max(10, Math.ceil((Number(record.expires_at) - now) / 1000));
+          if (env.SESSIONS) {
+            await env.SESSIONS.put(`wa_otp:${digits}`, JSON.stringify(record), { expirationTtl: remainingTtl });
+          }
+          try {
+            await env.DB.prepare("UPDATE whatsapp_otps SET attempts_left = ? WHERE phone = ?").bind(nextAttempts, digits).run();
+          } catch (_) {}
+          return json({ error: `رمز التحقق غير صحيح (المتبقي ${nextAttempts} محاولات).` }, 401);
+        }
+
+        // Single-use OTP verified — consume immediately
+        await clearOtpRecord();
+
+        const formattedPhone = `+${digits}`;
+        let user = await env.DB.prepare(
+          "SELECT id, username, email, phone, avatar_url, status, created_at, last_seen FROM users WHERE phone = ? OR phone = ? LIMIT 1"
+        ).bind(formattedPhone, digits).first<any>();
+
+        if (!user) {
+          const baseUsername = `wa_${digits.slice(-10)}`;
+          let candidateUsername = baseUsername;
+          const taken = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(candidateUsername).first<any>();
+          if (taken) {
+            candidateUsername = `wa_${digits.slice(-6)}_${crypto.randomUUID().slice(0, 4)}`;
+          }
+          const userId = crypto.randomUUID();
+          const randomSecretHash = await hashPassword(`wa_verified:${digits}:${crypto.randomUUID()}`);
+          await env.DB.prepare(
+            "INSERT INTO users (id, username, email, phone, password_hash, avatar_url, status, created_at, last_seen, livekit_identity) VALUES (?, ?, NULL, ?, ?, '', 'online', ?, ?, ?)"
+          ).bind(userId, candidateUsername, formattedPhone, randomSecretHash, now, now, userId).run();
+
+          user = {
+            id: userId,
+            username: candidateUsername,
+            email: "",
+            phone: formattedPhone,
+            avatar_url: "",
+            status: "online",
+            created_at: now,
+            last_seen: now
+          };
+        } else {
+          await env.DB.prepare("UPDATE users SET status = 'online', last_seen = ?, phone = COALESCE(phone, ?) WHERE id = ?")
+            .bind(now, formattedPhone, user.id).run();
+        }
+
+        const token = await signJwt({ id: user.id, username: user.username }, jwtSecret);
+        const expiry = now + (30 * 24 * 3600 * 1000);
+        await env.DB.prepare(
+          "INSERT OR REPLACE INTO sessions (token, user_id, expiry, created_at) VALUES (?, ?, ?, ?)"
+        ).bind(token, user.id, expiry, now).run();
+
+        if (env.SESSIONS) {
+          await env.SESSIONS.put(`session:${token}`, JSON.stringify({ id: user.id, username: user.username }), { expirationTtl: 30 * 86400 });
+        }
+
+        const resolvedName = String(record.display_name || fallbackName || user.username).trim();
+        return json({
+          success: true,
+          token,
+          user: {
+            id: user.id,
+            username: user.username,
+            full_name: resolvedName,
+            email: user.email || "",
+            phone: user.phone || formattedPhone,
+            avatar_url: user.avatar_url || "",
+            status: "online",
+            created_at: user.created_at,
+            last_seen: now
+          }
+        });
+      }
+
       // Admin: POST /api/admin/users
       if (url.pathname === "/api/admin/users" && method === "POST") {
         const auth = await getAuthUser();
@@ -922,13 +1204,13 @@ export default {
               env.DB.prepare(
                 `INSERT INTO private_messages 
                  (id, conversation_id, sender_id, receiver_id, type, content, media_url, file_name, file_size, duration, location_lat, location_lng, created_at, is_read, is_delivered)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1]`
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)`
               ).bind(
                 messageId, canonicalConvId, senderId, receiverId, type, content, media_url, file_name, file_size, duration, location_lat, location_lng, now
               ),
               env.DB.prepare(
                 `INSERT INTO conversations (id, user1_id, user2_id, last_message_id, last_message_text, last_message_at, unread_count_user1, unread_count_user2)
-                 VALUES (?, ?, ?, ?, ?, ?, 0, 1]
+                 VALUES (?, ?, ?, ?, ?, ?, 0, 1)
                  ON CONFLICT(id) DO UPDATE SET
                    last_message_id = excluded.last_message_id,
                    last_message_text = excluded.last_message_text,
@@ -1189,7 +1471,7 @@ export default {
             const callMsgContent = signalType === "call_init" ? (isVideo ? "مكالمة فيديو واردة" : "مكالمة صوتية واردة") : signalType;
             await env.DB.prepare(
               `INSERT INTO private_messages (id, conversation_id, sender_id, receiver_id, type, content, media_url, file_name, created_at, is_read, is_delivered)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1]`
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1)`
             ).bind(crypto.randomUUID(), convId, senderId, receiverId, callMsgType, callMsgContent, roomId, extra || senderName, now).run();
           } catch (callErr) {
             console.error("Call signaling error:", callErr);
@@ -1330,7 +1612,7 @@ export default {
                   COALESCE(u.username, CASE WHEN LOWER(c.user1_id) IN (${placeholders}) THEN c.user2_id ELSE c.user1_id END) as other_username,
                   COALESCE(u.avatar_url, '') as other_avatar,
                   COALESCE(u.status, 'offline') as other_status,
-                  COALESCE(u.last_seen, 0] as other_last_seen
+                  COALESCE(u.last_seen, 0) as other_last_seen
            FROM conversations c
            LEFT JOIN users u ON (LOWER(u.id) = LOWER(CASE WHEN LOWER(c.user1_id) IN (${placeholders}) THEN c.user2_id ELSE c.user1_id END)
                                  OR LOWER(u.username) = LOWER(CASE WHEN LOWER(c.user1_id) IN (${placeholders}) THEN c.user2_id ELSE c.user1_id END))

@@ -133,12 +133,16 @@ object ZegoCallManager {
                             extendedData: JSONObject?
                         ) {
                             Log.d(TAG, "Zego room state changed: room=$roomID, reason=$reason, code=$errorCode")
-                            if (errorCode == 0 && reason == ZegoRoomStateChangedReason.LOGINED) {
-                                onCallConnected?.invoke()
-                            } else if (reason == ZegoRoomStateChangedReason.LOGOUT) {
-                                onCallDisconnected?.invoke("تم إنهاء جلسة Zego")
-                            } else if (errorCode != 0) {
-                                Log.w(TAG, "Zego room error: $errorCode")
+                            runOnMain {
+                                try {
+                                    if (errorCode == 0 && reason == ZegoRoomStateChangedReason.LOGINED) {
+                                        onCallConnected?.invoke()
+                                    } else if (reason == ZegoRoomStateChangedReason.LOGOUT) {
+                                        onCallDisconnected?.invoke("تم إنهاء جلسة Zego")
+                                    } else if (errorCode != 0) {
+                                        Log.w(TAG, "Zego room error: $errorCode")
+                                    }
+                                } catch (_: Throwable) {}
                             }
                         }
 
@@ -150,18 +154,24 @@ object ZegoCallManager {
                         ) {
                             if (streamList == null) return
                             for (stream in streamList) {
+                                val streamId = stream?.streamID ?: continue
+                                val remoteUserId = stream.user?.userID ?: continue
                                 if (updateType == ZegoUpdateType.ADD) {
-                                    Log.d(TAG, "Remote Zego stream added: ${stream.streamID}")
+                                    Log.d(TAG, "Remote Zego stream added: $streamId")
                                     try {
-                                        zegoEngine?.startPlayingStream(stream.streamID)
+                                        zegoEngine?.startPlayingStream(streamId)
                                     } catch (_: Throwable) {}
-                                    onRemoteUserJoined?.invoke(stream.user.userID)
+                                    runOnMain {
+                                        try { onRemoteUserJoined?.invoke(remoteUserId) } catch (_: Throwable) {}
+                                    }
                                 } else if (updateType == ZegoUpdateType.DELETE) {
-                                    Log.d(TAG, "Remote Zego stream removed: ${stream.streamID}")
+                                    Log.d(TAG, "Remote Zego stream removed: $streamId")
                                     try {
-                                        zegoEngine?.stopPlayingStream(stream.streamID)
+                                        zegoEngine?.stopPlayingStream(streamId)
                                     } catch (_: Throwable) {}
-                                    onRemoteUserLeft?.invoke(stream.user.userID)
+                                    runOnMain {
+                                        try { onRemoteUserLeft?.invoke(remoteUserId) } catch (_: Throwable) {}
+                                    }
                                 }
                             }
                         }
@@ -466,7 +476,7 @@ object ZegoCallManager {
         isMicMuted.set(muted)
         try {
             zegoEngine?.muteMicrophone(muted)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.w(TAG, "setMicrophoneMute error: ${e.message}")
         }
     }
@@ -481,7 +491,7 @@ object ZegoCallManager {
             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager
             audioManager?.mode = android.media.AudioManager.MODE_IN_COMMUNICATION
             audioManager?.isSpeakerphoneOn = enabled
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.w(TAG, "setSpeakerEnabled error: ${e.message}")
         }
     }
@@ -493,7 +503,7 @@ object ZegoCallManager {
         isCameraOn.set(enabled)
         try {
             zegoEngine?.enableCamera(enabled)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.w(TAG, "setCameraEnabled error: ${e.message}")
         }
     }
@@ -506,7 +516,7 @@ object ZegoCallManager {
         isFrontCamera.set(next)
         try {
             zegoEngine?.useFrontCamera(next)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.w(TAG, "switchCamera error: ${e.message}")
         }
     }
@@ -529,7 +539,7 @@ object ZegoCallManager {
                     engine.logoutRoom(targetRoom)
                 }
             }
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.w(TAG, "Error leaving Zego room: ${e.message}")
         } finally {
             isPublishing.set(false)

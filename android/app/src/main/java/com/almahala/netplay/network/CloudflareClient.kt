@@ -617,6 +617,182 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
             }
         }
     }
+
+    /**
+     * Requests a 6-digit OTP code delivered directly from the app's official WhatsApp Business number
+     * to the user's WhatsApp app (valid for 3 minutes).
+     */
+    fun requestWhatsAppOtp(
+        context: Context,
+        rawPhone: String,
+        displayName: String = "",
+        callback: (Boolean, String, Int, String, String?) -> Unit
+    ) {
+        val digits = WhatsAppOtpManager.normalizePhoneDigits(rawPhone)
+        if (digits.length < 8 || digits.length > 15) {
+            mainHandler.post {
+                callback(false, "", 0, "", "يرجى إدخال رقم واتساب صحيح مع رمز الدولة (مثال: +9647701234567)")
+            }
+            return
+        }
+
+        val currentBase = getBaseUrl(context)
+        performRequestWhatsAppOtp(context, currentBase, digits, displayName) { ok, phoneOut, expSec, senderHint, err ->
+            if (!ok && currentBase == DEFAULT_BASE_URL && (err?.contains("404") == true || err?.contains("تعذر الاتصال") == true)) {
+                performRequestWhatsAppOtp(context, FALLBACK_BASE_URL, digits, displayName) { fOk, fPhone, fExp, fSender, fErr ->
+                    if (fOk) setBaseUrl(context, FALLBACK_BASE_URL)
+                    callback(fOk, fPhone, fExp, fSender, fErr)
+                }
+            } else {
+                callback(ok, phoneOut, expSec, senderHint, err)
+            }
+        }
+    }
+
+    private fun performRequestWhatsAppOtp(
+        context: Context,
+        baseUrl: String,
+        digits: String,
+        displayName: String,
+        callback: (Boolean, String, Int, String, String?) -> Unit
+    ) {
+        val url = "$baseUrl/auth/whatsapp/send-otp"
+        val bodyObj = JSONObject().apply {
+            put("phone", "+$digits")
+            if (displayName.isNotBlank()) put("display_name", displayName.trim())
+        }
+        val requestBody = bodyObj.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
+        val request = Request.Builder().url(url).post(requestBody).build()
+
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                mainHandler.post {
+                    callback(false, "", 0, "", "تعذر الاتصال بالخادم لإرسال رسالة واتساب: ${e.message}")
+                }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    val respStr = resp.body?.string() ?: "{}"
+                    try {
+                        val json = JSONObject(respStr)
+                        if (resp.isSuccessful && json.optBoolean("success", false)) {
+                            val cleanPhone = json.optString("phone", "+$digits")
+                            val expiresIn = json.optInt("expires_in_seconds", 180)
+                            val senderNum = json.optString("sender_number", "")
+                            WhatsAppOtpManager.savePendingSession(context, cleanPhone, displayName, expiresIn)
+                            mainHandler.post { callback(true, cleanPhone, expiresIn, senderNum, null) }
+                            return
+                        }
+                        val errMsg = json.optString("error", "تعذر إرسال رمز واتساب (${resp.code})")
+                        mainHandler.post { callback(false, "", 0, "", errMsg) }
+                    } catch (_: Exception) {
+                        mainHandler.post { callback(false, "", 0, "", "تعذر معالجة استجابة الخادم (${resp.code})") }
+                    }
+                }
+            }
+        })
+    }
+
+    /**
+     * Verifies the 6-digit WhatsApp OTP on the backend (strict 3-minute TTL) and issues an auth session.
+     */
+    fun verifyWhatsAppOtp(
+        context: Context,
+        rawPhone: String,
+        otpCode: String,
+        displayName: String = "",
+        callback: (Boolean, String?, com.almahala.netplay.UserProfile?) -> Unit
+    ) {
+        val digits = WhatsAppOtpManager.normalizePhoneDigits(rawPhone)
+        val cleanOtp = otpCode.trim().replace(Regex("[^0-9]"), "")
+        if (digits.length < 8 || cleanOtp.length != 6) {
+            mainHandler.post { callback(false, "يرجى إدخال رمز التحقق المكون من 6 أرقام", null) }
+            return
+        }
+
+        val currentBase = getBaseUrl(context)
+        performVerifyWhatsAppOtp(context, currentBase, digits, cleanOtp, displayName) { ok, err, user ->
+            if (!ok && currentBase == DEFAULT_BASE_URL && (err?.contains("404") == true || err?.contains("تعذر الاتصال") == true)) {
+                performVerifyWhatsAppOtp(context, FALLBACK_BASE_URL, digits, cleanOtp, displayName) { fOk, fErr, fUser ->
+                    if (fOk) setBaseUrl(context, FALLBACK_BASE_URL)
+                    callback(fOk, fErr, fUser)
+                }
+            } else {
+                callback(ok, err, user)
+            }
+        }
+    }
+
+    private fun performVerifyWhatsAppOtp(
+        context: Context,
+        baseUrl: String,
+        digits: String,
+        cleanOtp: String,
+        displayName: String,
+        callback: (Boolean, String?, com.almahala.netplay.UserProfile?) -> Unit
+    ) {
+        val url = "$baseUrl/auth/whatsapp/verify-otp"
+        val bodyObj = JSONObject().apply {
+            put("phone", "+$digits")
+            put("otp", cleanOtp)
+            if (displayName.isNotBlank()) put("display_name", displayName.trim())
+        }
+        val requestBody = bodyObj.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
+        val request = Request.Builder().url(url).post(requestBody).build()
+
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                mainHandler.post { callback(false, "تعذر الاتصال بالسيرفر: ${e.message}", null) }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    val respStr = resp.body?.string() ?: "{}"
+                    if (resp.isSuccessful) {
+                        try {
+                            val json = JSONObject(respStr)
+                            val token = json.optString("token")
+                            val userObj = json.optJSONObject("user")
+                            if (token.isNotEmpty() && userObj != null) {
+                                WhatsAppOtpManager.clearPendingOtp(context)
+                                saveAuthToken(context, token)
+                                val uname = userObj.optString("username")
+                                val friendlyName = userObj.optString("full_name", "")
+                                    .ifBlank { displayName.trim() }
+                                    .ifBlank { "+$digits" }
+                                val profile = com.almahala.netplay.UserProfile(
+                                    id = userObj.optString("id"),
+                                    username = uname,
+                                    isAdmin = uname.lowercase() == "ahmed",
+                                    createdAt = userObj.optLong("created_at", System.currentTimeMillis()),
+                                    fullName = friendlyName,
+                                    role = if (uname.lowercase() == "ahmed") "مشرف" else "عضو",
+                                    avatar = normalizeAvatarUrl(context, userObj.optString("avatar_url", "")),
+                                    email = userObj.optString("email", "")
+                                )
+                                cacheUserAvatar(context, profile.id, profile.username, profile.avatarUrl)
+                                UserManager.saveAuthenticatedSession(context, profile, token)
+                                com.almahala.netplay.AppSettingsManager.setUserName(context, friendlyName)
+                                com.almahala.netplay.AppSettingsManager.setUserPhone(context, "+$digits")
+                                mainHandler.post { callback(true, null, profile) }
+                                return
+                            }
+                        } catch (_: Exception) {
+                            mainHandler.post { callback(false, "خطأ في معالجة استجابة السيرفر", null) }
+                            return
+                        }
+                    }
+                    var errMsg = "رمز التحقق غير صحيح أو منتهي الصلاحية"
+                    try {
+                        val errJson = JSONObject(respStr)
+                        if (errJson.has("error")) errMsg = errJson.getString("error")
+                    } catch (_: Exception) {}
+                    mainHandler.post { callback(false, errMsg, null) }
+                }
+            }
+        })
+    }
     /**
      * Validates JWT token with GET /auth/me
      */

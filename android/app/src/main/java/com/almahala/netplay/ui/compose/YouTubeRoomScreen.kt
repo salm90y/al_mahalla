@@ -12,6 +12,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -285,15 +287,25 @@ fun YouTubeRoomScreen(
     var currentPositionSec by remember { mutableFloatStateOf(0f) }
     var totalDurationSec by remember { mutableFloatStateOf(100f) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var isRoomDisposed by remember { mutableStateOf(false) }
+    var isWebViewMounted by remember { mutableStateOf(false) }
+    var webViewCrashFallback by remember { mutableStateOf(false) }
     var lastRemoteSyncAppliedAt by remember { mutableLongStateOf(0L) }
+
+    fun safeEvaluateJs(js: String) {
+        if (isRoomDisposed) return
+        try {
+            val wv = webViewRef ?: return
+            if (wv.isAttachedToWindow) {
+                wv.evaluateJavascript(js, null)
+            }
+        } catch (_: Throwable) {}
+    }
 
     // Instant volume sync to player
     LaunchedEffect(videoVolume) {
         val volInt = (videoVolume * 100).toInt().coerceIn(0, 100)
-        webViewRef?.evaluateJavascript(
-            "if (typeof setPlayerVolume === 'function') { setPlayerVolume($volInt); }",
-            null
-        )
+        safeEvaluateJs("if (typeof setPlayerVolume === 'function') { setPlayerVolume($volInt); }")
     }
 
     // Search Bar & Exit Dialog States
@@ -366,9 +378,11 @@ fun YouTubeRoomScreen(
     val chatListState = rememberLazyListState()
     var chatInputText by remember { mutableStateOf("") }
 
-    LaunchedEffect(chatMessages.size) {
-        if (chatMessages.isNotEmpty()) {
-            chatListState.animateScrollToItem(chatMessages.size - 1)
+    LaunchedEffect(chatMessages.size, activeSubTab) {
+        if (activeSubTab == YouTubeRoomSubTab.CHAT && chatMessages.isNotEmpty()) {
+            try {
+                chatListState.animateScrollToItem(chatMessages.size - 1)
+            } catch (_: Throwable) {}
         }
     }
 
@@ -384,7 +398,7 @@ fun YouTubeRoomScreen(
                 } catch(e) {}
             })();
         """.trimIndent()
-        webViewRef?.evaluateJavascript(js, null)
+        safeEvaluateJs(js)
     }
 
     fun upsertRemoteUser(
@@ -456,20 +470,14 @@ fun YouTubeRoomScreen(
                 lastRemoteSyncAppliedAt = System.currentTimeMillis()
                 if (pos >= 0f && kotlin.math.abs(currentPositionSec - pos) > 1.8f) {
                     currentPositionSec = pos
-                    webViewRef?.evaluateJavascript("if (typeof seekTo === 'function') { seekTo($pos); }", null)
+                    safeEvaluateJs("if (typeof seekTo === 'function') { seekTo($pos); }")
                 }
                 if (playState && !isPlaying) {
                     isPlaying = true
-                    webViewRef?.evaluateJavascript(
-                        "if (typeof playVideo === 'function') { playVideo(); }",
-                        null
-                    )
+                    safeEvaluateJs("if (typeof playVideo === 'function') { playVideo(); }")
                 } else if (!playState && isPlaying) {
                     isPlaying = false
-                    webViewRef?.evaluateJavascript(
-                        "if (typeof pauseVideo === 'function') { pauseVideo(); }",
-                        null
-                    )
+                    safeEvaluateJs("if (typeof pauseVideo === 'function') { pauseVideo(); }")
                 }
             },
             onChatMessageReceived = { newMsg ->
@@ -699,8 +707,14 @@ fun YouTubeRoomScreen(
     // Connect WebSocket, join Zego Watch Party audience audio, and fetch authoritative initial state
     LaunchedEffect(roomId, zegoAudioRoomId) {
         try {
+            // Allow NavHost route transition to finish settling before attaching WebView surface
+            delay(180)
+            if (!isRoomDisposed) {
+                isWebViewMounted = true
+            }
             syncSocket.connect()
-            YouTubeRoomManager.getRoomLatest(context, roomId) { latestRoom ->
+            YouTubeRoomManager.getRoomLatest(context.applicationContext, roomId) { latestRoom ->
+                if (isRoomDisposed) return@getRoomLatest
                 if (latestRoom != null && latestRoom.videoId.isNotBlank()) {
                     val changed = latestRoom.videoId != currentVideo.id
                     currentVideo = YouTubeVideoItem(
@@ -718,10 +732,14 @@ fun YouTubeRoomScreen(
                     }
                 }
             }
-            // Defer Zego watch party audio join slightly so WebView & screen composition never freeze on entry
-            delay(450)
-            ZegoCallManager.joinWatchParty(context.applicationContext, zegoAudioRoomId, currentUserId, currentUserName)
-            if (!isStealthMode) {
+            // Defer Zego watch party audio join slightly so WebView & screen composition never freeze or collide on entry
+            delay(550)
+            if (!isRoomDisposed) {
+                try {
+                    ZegoCallManager.joinWatchParty(context.applicationContext, zegoAudioRoomId, currentUserId, currentUserName)
+                } catch (_: Throwable) {}
+            }
+            if (!isStealthMode && !isRoomDisposed) {
                 delay(350)
                 val myRole = roomUsers.find { it.id == currentUserId }?.role ?: if (isHost) "مضيف الغرفة 👑" else "مشاهد"
                 syncSocket.broadcastMemberHello(myRole, isCameraActive, isFrontCamera, isIntercomTalking)
@@ -738,7 +756,7 @@ fun YouTubeRoomScreen(
         if ((isHost || isAppOwner) && isPlaying) {
             while (true) {
                 delay(5000)
-                if (isPlaying) {
+                if (isPlaying && !isRoomDisposed) {
                     syncSocket.broadcastPlaybackState(true, currentPositionSec)
                 }
             }
@@ -747,6 +765,8 @@ fun YouTubeRoomScreen(
 
     DisposableEffect(roomId, zegoAudioRoomId) {
         onDispose {
+            isRoomDisposed = true
+            webViewRef = null
             try {
                 syncSocket.disconnect()
             } catch (_: Throwable) {}
@@ -755,7 +775,6 @@ fun YouTubeRoomScreen(
                 ZegoCallManager.endCall(context.applicationContext, zegoAudioRoomId)
                 RealVoipEngine.stopVoipSession(context.applicationContext)
             } catch (_: Throwable) {}
-            webViewRef = null
         }
     }
 
@@ -770,7 +789,7 @@ fun YouTubeRoomScreen(
         val safeTarget = targetSeconds.coerceIn(0f, totalDurationSec.coerceAtLeast(1f))
         lastRemoteSyncAppliedAt = System.currentTimeMillis()
         currentPositionSec = safeTarget
-        webViewRef?.evaluateJavascript("if (typeof seekTo === 'function') { seekTo($safeTarget); }", null)
+        safeEvaluateJs("if (typeof seekTo === 'function') { seekTo($safeTarget); }")
         syncSocket.broadcastPlaybackState(isPlaying, safeTarget)
     }
 
@@ -785,9 +804,9 @@ fun YouTubeRoomScreen(
         lastRemoteSyncAppliedAt = System.currentTimeMillis()
         isPlaying = nextPlay
         if (nextPlay) {
-            webViewRef?.evaluateJavascript("if (typeof playVideo === 'function') { playVideo(); }", null)
+            safeEvaluateJs("if (typeof playVideo === 'function') { playVideo(); }")
         } else {
-            webViewRef?.evaluateJavascript("if (typeof pauseVideo === 'function') { pauseVideo(); }", null)
+            safeEvaluateJs("if (typeof pauseVideo === 'function') { pauseVideo(); }")
         }
         syncSocket.broadcastPlaybackState(nextPlay, currentPositionSec)
     }
@@ -1081,6 +1100,34 @@ fun YouTubeRoomScreen(
                         .border(1.5.dp, if (isDark) DarkBorder else Color(0xFFCBD5E1), RoundedCornerShape(16.dp)),
                     contentAlignment = Alignment.Center
                 ) {
+                    if (webViewCrashFallback) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.padding(16.dp)
+                        ) {
+                            Text(
+                                text = "توقف مشغل الفيديو مؤقتاً",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = TajawalFontFamily,
+                                color = Color.White
+                            )
+                            Button(
+                                onClick = { webViewCrashFallback = false },
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                                shape = RoundedCornerShape(12.dp)
+                            ) {
+                                Text("إعادة تشغيل المشغل", fontFamily = TajawalFontFamily, color = Color.White)
+                            }
+                        }
+                    } else if (!isWebViewMounted) {
+                        CircularProgressIndicator(
+                            color = Color(0xFFEF4444),
+                            strokeWidth = 2.5.dp,
+                            modifier = Modifier.size(28.dp)
+                        )
+                    } else {
                     AndroidView(
                         factory = { ctx ->
                             try {
@@ -1110,6 +1157,17 @@ fun YouTubeRoomScreen(
                                 webChromeClient = WebChromeClient()
                                 webViewClient = object : WebViewClient() {
                                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+                                    override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                                        if (webViewRef === view) {
+                                            webViewRef = null
+                                        }
+                                        try {
+                                            (view?.parent as? ViewGroup)?.removeView(view)
+                                            view?.destroy()
+                                        } catch (_: Throwable) {}
+                                        webViewCrashFallback = true
+                                        return true
+                                    }
                                 }
                                 val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
                                 addJavascriptInterface(
@@ -1430,12 +1488,15 @@ fun YouTubeRoomScreen(
                         }
                     },
                     update = { webView ->
-                        if (webView is WebView && webViewRef !== webView) {
+                        if (!isRoomDisposed && webView is WebView && webViewRef !== webView) {
                             webViewRef = webView
                         }
                     },
                     onRelease = { view ->
                         try {
+                            if (webViewRef === view) {
+                                webViewRef = null
+                            }
                             (view as? WebView)?.let { wv ->
                                 wv.stopLoading()
                                 wv.onPause()
@@ -1444,13 +1505,11 @@ fun YouTubeRoomScreen(
                                 wv.removeAllViews()
                                 wv.destroy()
                             }
-                            if (webViewRef === view) {
-                                webViewRef = null
-                            }
                         } catch (_: Throwable) {}
                     },
                     modifier = Modifier.fillMaxSize()
                     )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(6.dp))
@@ -1844,7 +1903,10 @@ fun YouTubeRoomScreen(
                                         .fillMaxWidth(),
                                     verticalArrangement = Arrangement.spacedBy(6.dp)
                                 ) {
-                                    items(videoCatalog) { video ->
+                                    itemsIndexed(
+                                        items = videoCatalog,
+                                        key = { index, video -> "${video.id}_$index" }
+                                    ) { _, video ->
                                         val isCurrent = video.id == currentVideo.id
                                         Surface(
                                             onClick = { playSelectedVideo(video) },
@@ -3128,10 +3190,7 @@ fun YouTubeRoomScreen(
                                                 onValueChange = { newVol ->
                                                     videoVolume = newVol
                                                     val volInt = (newVol * 100).toInt().coerceIn(0, 100)
-                                                    webViewRef?.evaluateJavascript(
-                                                        "if (typeof setPlayerVolume === 'function') { setPlayerVolume($volInt); }",
-                                                        null
-                                                    )
+                                                    safeEvaluateJs("if (typeof setPlayerVolume === 'function') { setPlayerVolume($volInt); }")
                                                 },
                                                 valueRange = 0f..1f,
                                                 colors = SliderDefaults.colors(

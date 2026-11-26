@@ -216,7 +216,13 @@ fun RootAppShell() {
                     YouTubeLobbyScreen(
                         onBack = { navController.popBackStack() },
                         onOpenCreateRoom = {
-                            navController.navigate("youtube_create_room")
+                            try {
+                                navController.navigate("youtube_create_room") {
+                                    launchSingleTop = true
+                                }
+                            } catch (e: Throwable) {
+                                android.util.Log.e("RootAppShell", "Nav error: ${e.message}", e)
+                            }
                         },
                         onEnterRoom = { roomId, videoId, roomTitle, roomCode, isStealth ->
                             RoomNavState.setRoom(
@@ -227,8 +233,10 @@ fun RootAppShell() {
                                 isStealth = isStealth
                             )
                             try {
-                                navController.navigate("youtube_room")
-                            } catch (e: Exception) {
+                                navController.navigate("youtube_room") {
+                                    launchSingleTop = true
+                                }
+                            } catch (e: Throwable) {
                                 android.util.Log.e("RootAppShell", "Nav error: ${e.message}", e)
                             }
                         }
@@ -247,9 +255,10 @@ fun RootAppShell() {
                             )
                             try {
                                 navController.navigate("youtube_room") {
+                                    launchSingleTop = true
                                     popUpTo("youtube_create_room") { inclusive = true }
                                 }
-                            } catch (e: Exception) {
+                            } catch (e: Throwable) {
                                 android.util.Log.e("RootAppShell", "Nav error: ${e.message}", e)
                             }
                         }

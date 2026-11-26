@@ -37,9 +37,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -91,24 +96,27 @@ fun LoginScreen(
     var isLoading by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
-    // Google Fallback Email Dialog State
+    // Google Account Picker & Warnings Dialog State
     var showGoogleEmailDialog by remember { mutableStateOf(false) }
+    var deviceGoogleEmails by remember { mutableStateOf<List<String>>(emptyList()) }
     var manualGoogleEmail by remember { mutableStateOf("") }
     var manualGoogleName by remember { mutableStateOf("") }
+    var googleWarningsAccepted by remember { mutableStateOf(false) }
     var googleDialogError by remember { mutableStateOf<String?>(null) }
 
-    // WhatsApp 3-Minute OTP Dialog State
+    // WhatsApp 3-Minute Server OTP Dialog State
     var showWhatsAppDialog by remember { mutableStateOf(false) }
     var waStep by remember { mutableStateOf(1) } // 1 = enter phone, 2 = verify OTP
     var waCountryCode by remember { mutableStateOf("+964") }
     var waPhoneInput by remember { mutableStateOf("") }
     var waDisplayName by remember { mutableStateOf("") }
     var waSentPhoneDisplay by remember { mutableStateOf("") }
+    var waSenderHint by remember { mutableStateOf("") }
     var waOtpInput by remember { mutableStateOf("") }
     var waDialogError by remember { mutableStateOf<String?>(null) }
     var waRemainingSeconds by remember { mutableStateOf(0) }
     var waOtpNonce by remember { mutableStateOf(0) }
-    var waOpenedExternal by remember { mutableStateOf(true) }
+    var waBusy by remember { mutableStateOf(false) }
 
     val handleGoogleSignInEmail: (String, String?) -> Unit = { email, displayName ->
         errorMessage = null
@@ -133,25 +141,36 @@ fun LoginScreen(
         if (result.resultCode == Activity.RESULT_OK) {
             val selectedEmail = result.data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
             if (!selectedEmail.isNullOrBlank()) {
-                handleGoogleSignInEmail(selectedEmail, null)
-            } else {
-                showGoogleEmailDialog = true
-            }
-        } else {
-            // If device has no Google account configured, allow manual Google email entry
-            val existingGoogleAccounts = try {
-                AccountManager.get(context).getAccountsByType("com.google")
-            } catch (_: Exception) {
-                emptyArray()
-            }
-            if (existingGoogleAccounts.isEmpty()) {
-                showGoogleEmailDialog = true
+                manualGoogleEmail = selectedEmail.trim()
+                if (manualGoogleEmail !in deviceGoogleEmails) {
+                    deviceGoogleEmails = listOf(manualGoogleEmail) + deviceGoogleEmails
+                }
+                googleDialogError = null
             }
         }
+        showGoogleEmailDialog = true
     }
 
-    val launchGoogleSignIn = {
+    val openGooglePickerWithWarnings = {
         errorMessage = null
+        val foundAccounts = try {
+            AccountManager.get(context).getAccountsByType("com.google")
+                .mapNotNull { it.name?.trim() }
+                .filter { it.contains("@") }
+                .distinct()
+        } catch (_: Exception) {
+            emptyList()
+        }
+        deviceGoogleEmails = foundAccounts
+        if (manualGoogleEmail.isBlank() && foundAccounts.isNotEmpty()) {
+            manualGoogleEmail = foundAccounts.first()
+        }
+        googleWarningsAccepted = false
+        googleDialogError = null
+        showGoogleEmailDialog = true
+    }
+
+    val launchDeviceGoogleChooser = {
         try {
             @Suppress("DEPRECATION")
             val intent = AccountManager.newChooseAccountIntent(
@@ -166,9 +185,9 @@ fun LoginScreen(
             )
             googleAccountLauncher.launch(intent)
         } catch (_: ActivityNotFoundException) {
-            showGoogleEmailDialog = true
+            googleDialogError = "يرجى كتابة بريد Gmail يدوياً في الحقل أدناه."
         } catch (_: Exception) {
-            showGoogleEmailDialog = true
+            googleDialogError = "يرجى كتابة بريد Gmail يدوياً في الحقل أدناه."
         }
     }
 
@@ -596,91 +615,144 @@ fun LoginScreen(
 
                         Spacer(modifier = Modifier.height(14.dp))
 
-                        // Google Account Sign-In Button
-                        OutlinedButton(
-                            onClick = { if (!isLoading) launchGoogleSignIn() },
-                            enabled = !isLoading,
-                            shape = RoundedCornerShape(24.dp),
-                            border = BorderStroke(1.2.dp, Color(0xFFCBD5E1)),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = Color(0xFFF8FAFC),
-                                contentColor = Color(0xFF0F172A)
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
+                        // Compact, Sleek Icon-Only Social Sign-In Buttons (Google + WhatsApp)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(22.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center
+                            // Authentic 4-Color Google Icon Badge
+                            Surface(
+                                onClick = { if (!isLoading) openGooglePickerWithWarnings() },
+                                enabled = !isLoading,
+                                shape = RoundedCornerShape(18.dp),
+                                color = Color.White,
+                                border = BorderStroke(1.2.dp, Color(0xFFE2E8F0)),
+                                shadowElevation = 3.dp,
+                                modifier = Modifier.size(56.dp)
                             ) {
-                                // Google Colored "G" Emblem
-                                Box(
-                                    modifier = Modifier
-                                        .size(24.dp)
-                                        .clip(CircleShape)
-                                        .background(Color.White)
-                                        .border(1.dp, Color(0xFFE2E8F0), CircleShape),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "G",
-                                        fontSize = 15.sp,
-                                        fontWeight = FontWeight.ExtraBold,
-                                        color = Color(0xFFEA4335)
-                                    )
+                                Box(contentAlignment = Alignment.Center) {
+                                    Canvas(modifier = Modifier.size(26.dp)) {
+                                        val strokeWidth = size.minDimension * 0.20f
+                                        val inset = strokeWidth / 2f
+                                        val arcSize = Size(size.width - strokeWidth, size.height - strokeWidth)
+                                        val topLeft = Offset(inset, inset)
+                                        // Red top arc
+                                        drawArc(
+                                            color = Color(0xFFEA4335),
+                                            startAngle = -145f,
+                                            sweepAngle = 105f,
+                                            useCenter = false,
+                                            topLeft = topLeft,
+                                            size = arcSize,
+                                            style = Stroke(width = strokeWidth, cap = StrokeCap.Butt)
+                                        )
+                                        // Yellow left arc
+                                        drawArc(
+                                            color = Color(0xFFFBBC05),
+                                            startAngle = 150f,
+                                            sweepAngle = 65f,
+                                            useCenter = false,
+                                            topLeft = topLeft,
+                                            size = arcSize,
+                                            style = Stroke(width = strokeWidth, cap = StrokeCap.Butt)
+                                        )
+                                        // Green bottom arc
+                                        drawArc(
+                                            color = Color(0xFF34A853),
+                                            startAngle = 45f,
+                                            sweepAngle = 105f,
+                                            useCenter = false,
+                                            topLeft = topLeft,
+                                            size = arcSize,
+                                            style = Stroke(width = strokeWidth, cap = StrokeCap.Butt)
+                                        )
+                                        // Blue right arc
+                                        drawArc(
+                                            color = Color(0xFF4285F4),
+                                            startAngle = -5f,
+                                            sweepAngle = 52f,
+                                            useCenter = false,
+                                            topLeft = topLeft,
+                                            size = arcSize,
+                                            style = Stroke(width = strokeWidth, cap = StrokeCap.Butt)
+                                        )
+                                        // Blue horizontal bar
+                                        drawLine(
+                                            color = Color(0xFF4285F4),
+                                            start = Offset(size.width * 0.50f, size.height * 0.50f),
+                                            end = Offset(size.width - inset * 0.6f, size.height * 0.50f),
+                                            strokeWidth = strokeWidth,
+                                            cap = StrokeCap.Butt
+                                        )
+                                    }
                                 }
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(
-                                    text = "الدخول أو التسجيل بحساب جوجل (Google)",
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = TajawalFontFamily,
-                                    color = Color(0xFF0F172A)
-                                )
                             }
-                        }
 
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        // WhatsApp 3-Minute Verification Button
-                        Button(
-                            onClick = {
-                                if (!isLoading) {
-                                    waStep = 1
-                                    waOtpInput = ""
-                                    waDialogError = null
-                                    showWhatsAppDialog = true
-                                }
-                            },
-                            enabled = !isLoading,
-                            shape = RoundedCornerShape(24.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = Color(0xFF16A34A),
-                                contentColor = Color.White
-                            ),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.Center
+                            // Crisp WhatsApp Icon Badge
+                            Surface(
+                                onClick = {
+                                    if (!isLoading) {
+                                        waStep = 1
+                                        waOtpInput = ""
+                                        waDialogError = null
+                                        waSenderHint = ""
+                                        waBusy = false
+                                        showWhatsAppDialog = true
+                                    }
+                                },
+                                enabled = !isLoading,
+                                shape = RoundedCornerShape(18.dp),
+                                color = Color(0xFF25D366),
+                                border = BorderStroke(1.2.dp, Color(0xFF16A34A)),
+                                shadowElevation = 3.dp,
+                                modifier = Modifier.size(56.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.MarkChatRead,
-                                    contentDescription = "واتساب",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Text(
-                                    text = "التسجيل عبر رسالة واتساب (صلاحية 3 دقائق)",
-                                    fontSize = 13.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = TajawalFontFamily,
-                                    color = Color.White
-                                )
+                                Box(contentAlignment = Alignment.Center) {
+                                    Canvas(modifier = Modifier.size(28.dp)) {
+                                        val w = size.width
+                                        val h = size.height
+                                        val r = w * 0.36f
+                                        val cx = w * 0.52f
+                                        val cy = h * 0.48f
+                                        // Outer WhatsApp speech-bubble ring
+                                        drawCircle(
+                                            color = Color.White,
+                                            radius = r,
+                                            center = Offset(cx, cy),
+                                            style = Stroke(width = w * 0.11f)
+                                        )
+                                        // Bubble tail (bottom-left)
+                                        val tail = Path().apply {
+                                            moveTo(cx - r * 0.65f, cy + r * 0.65f)
+                                            lineTo(w * 0.14f, h * 0.86f)
+                                            lineTo(cx - r * 0.18f, cy + r * 0.90f)
+                                            close()
+                                        }
+                                        drawPath(path = tail, color = Color.White)
+                                        // Handset inside bubble
+                                        val phonePath = Path().apply {
+                                            moveTo(cx - r * 0.36f, cy - r * 0.36f)
+                                            quadraticBezierTo(
+                                                cx - r * 0.48f, cy + r * 0.08f,
+                                                cx + r * 0.05f, cy + r * 0.38f
+                                            )
+                                            quadraticBezierTo(
+                                                cx + r * 0.34f, cy + r * 0.42f,
+                                                cx + r * 0.40f, cy + r * 0.22f
+                                            )
+                                        }
+                                        drawPath(
+                                            path = phonePath,
+                                            color = Color.White,
+                                            style = Stroke(
+                                                width = w * 0.105f,
+                                                cap = StrokeCap.Round,
+                                                join = StrokeJoin.Round
+                                            )
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
@@ -722,46 +794,150 @@ fun LoginScreen(
             }
         }
 
-        // Google Email Confirmation / Fallback Dialog (when device has no signed-in Google account)
+        // Google Account Picker & Warnings Dialog (ALWAYS shown before account creation/login)
         if (showGoogleEmailDialog) {
             AlertDialog(
                 onDismissRequest = { showGoogleEmailDialog = false },
                 containerColor = Color.White,
-                shape = RoundedCornerShape(22.dp),
+                shape = RoundedCornerShape(24.dp),
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(
                             modifier = Modifier
-                                .size(28.dp)
+                                .size(32.dp)
                                 .clip(CircleShape)
-                                .background(Color(0xFFFEE2E2)),
+                                .background(Color(0xFFEFF6FF))
+                                .border(1.dp, Color(0xFFBFDBFE), CircleShape),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = "G",
                                 fontWeight = FontWeight.ExtraBold,
-                                color = Color(0xFFEA4335),
+                                color = Color(0xFF2563EB),
                                 fontSize = 16.sp
                             )
                         }
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "التسجيل بحساب جوجل",
+                            text = "اختيار حساب جوجل والتحذيرات",
                             fontFamily = TajawalFontFamily,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 17.sp,
+                            fontSize = 16.5.sp,
                             color = Color(0xFF0F172A)
                         )
                     }
                 },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            text = "أدخل بريدك الإلكتروني في Google لإتمام التسجيل أو الدخول مباشرة:",
-                            fontFamily = TajawalFontFamily,
-                            fontSize = 13.sp,
-                            color = Color(0xFF64748B)
-                        )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        // Explicit Warnings & Notices Box
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color(0xFFFFFBEB),
+                            border = BorderStroke(1.dp, Color(0xFFFCD34D))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        imageVector = Icons.Default.WarningAmber,
+                                        contentDescription = null,
+                                        tint = Color(0xFFD97706),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "تحذيرات وتنبيهات هامة قبل التسجيل",
+                                        fontFamily = TajawalFontFamily,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = Color(0xFF92400E)
+                                    )
+                                }
+                                Text(
+                                    text = "• سيتم إنشاء حساب جديد أو ربط دخولك تلقائياً على خوادم المحلة بالبريد الذي تختاره.\n• تأكد أن البريد يعود لك شخصياً ولا تستخدم بريداً عاماً أو مشتركاً لحماية رسائلك وخصوصيتك.\n• تجنّب مشاركة بيانات حسابك مع أي طرف خارجي.",
+                                    fontFamily = TajawalFontFamily,
+                                    fontSize = 11.5.sp,
+                                    lineHeight = 17.sp,
+                                    color = Color(0xFF78350F)
+                                )
+                            }
+                        }
+
+                        // Device Google Emails Selector
+                        if (deviceGoogleEmails.isNotEmpty()) {
+                            Text(
+                                text = "حسابات جوجل المتوفرة على جهازك:",
+                                fontFamily = TajawalFontFamily,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 12.5.sp,
+                                color = Color(0xFF1E293B)
+                            )
+                            deviceGoogleEmails.forEach { acctEmail ->
+                                val selected = manualGoogleEmail.trim().equals(acctEmail, ignoreCase = true)
+                                Surface(
+                                    onClick = {
+                                        manualGoogleEmail = acctEmail
+                                        googleDialogError = null
+                                    },
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (selected) Color(0xFFEFF6FF) else Color(0xFFF8FAFC),
+                                    border = BorderStroke(
+                                        1.2.dp,
+                                        if (selected) Color(0xFF2563EB) else Color(0xFFE2E8F0)
+                                    ),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = acctEmail,
+                                            fontSize = 13.sp,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                            color = Color(0xFF0F172A)
+                                        )
+                                        Icon(
+                                            imageVector = if (selected) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                                            contentDescription = null,
+                                            tint = if (selected) Color(0xFF2563EB) else Color(0xFF94A3B8),
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        OutlinedButton(
+                            onClick = { launchDeviceGoogleChooser() },
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, Color(0xFFCBD5E1)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AccountCircle,
+                                contentDescription = null,
+                                tint = Color(0xFF2563EB),
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "استعراض حسابات جوجل من الجهاز",
+                                fontFamily = TajawalFontFamily,
+                                fontSize = 12.5.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF1E293B)
+                            )
+                        }
+
                         OutlinedTextField(
                             value = manualGoogleEmail,
                             onValueChange = {
@@ -783,6 +959,36 @@ fun LoginScreen(
                             shape = RoundedCornerShape(14.dp),
                             modifier = Modifier.fillMaxWidth()
                         )
+
+                        // Explicit Warning Acknowledgement Row
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable {
+                                    googleWarningsAccepted = !googleWarningsAccepted
+                                    googleDialogError = null
+                                }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = googleWarningsAccepted,
+                                onCheckedChange = {
+                                    googleWarningsAccepted = it
+                                    googleDialogError = null
+                                },
+                                colors = CheckboxDefaults.colors(checkedColor = Color(0xFF2563EB))
+                            )
+                            Text(
+                                text = "قرأت التحذيرات وأوافق على اختيار هذا البريد للمتابعة",
+                                fontFamily = TajawalFontFamily,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF1E293B)
+                            )
+                        }
+
                         if (googleDialogError != null) {
                             Text(
                                 text = googleDialogError!!,
@@ -798,7 +1004,9 @@ fun LoginScreen(
                         onClick = {
                             val cleanEmail = manualGoogleEmail.trim()
                             if (!cleanEmail.contains("@") || !cleanEmail.contains(".")) {
-                                googleDialogError = "يرجى إدخال بريد جوجل صحيح"
+                                googleDialogError = "يرجى اختيار أو إدخال بريد جوجل صحيح"
+                            } else if (!googleWarningsAccepted) {
+                                googleDialogError = "يرجى تأكيد الموافقة على التحذيرات أولاً"
                             } else {
                                 showGoogleEmailDialog = false
                                 handleGoogleSignInEmail(cleanEmail, manualGoogleName.trim().ifEmpty { null })
@@ -818,11 +1026,39 @@ fun LoginScreen(
             )
         }
 
-        // WhatsApp 2-Step Verification Dialog (Strict 3-Minute Expiry)
+        // WhatsApp 2-Step Verification Dialog (Real Server Delivery + Strict 3-Minute Expiry)
         if (showWhatsAppDialog) {
+            val dispatchWhatsAppCode: (String) -> Unit = { targetPhone ->
+                waBusy = true
+                waDialogError = null
+                CloudflareClient.requestWhatsAppOtp(
+                    context = context,
+                    rawPhone = targetPhone,
+                    displayName = waDisplayName
+                ) { ok, cleanPhone, expiresInSec, senderHint, err ->
+                    waBusy = false
+                    if (ok) {
+                        waSentPhoneDisplay = cleanPhone
+                        waSenderHint = senderHint
+                        waRemainingSeconds = expiresInSec
+                        waOtpInput = ""
+                        waDialogError = null
+                        waStep = 2
+                        waOtpNonce++
+                        Toast.makeText(
+                            context,
+                            "تم إرسال رمز التحقق إلى واتسابك (صالح 3 دقائق)",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        waDialogError = err ?: "تعذر إرسال رمز واتساب، تحقق من الرقم والاتصال."
+                    }
+                }
+            }
+
             AlertDialog(
                 onDismissRequest = {
-                    if (!isLoading) showWhatsAppDialog = false
+                    if (!isLoading && !waBusy) showWhatsAppDialog = false
                 },
                 containerColor = Color.White,
                 shape = RoundedCornerShape(24.dp),
@@ -844,7 +1080,7 @@ fun LoginScreen(
                         }
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = if (waStep == 1) "التسجيل عبر واتساب" else "تأكيد رمز واتساب",
+                            text = if (waStep == 1) "التسجيل عبر واتساب" else "أدخل رمز التحقق",
                             fontFamily = TajawalFontFamily,
                             fontWeight = FontWeight.Bold,
                             fontSize = 17.sp,
@@ -859,7 +1095,7 @@ fun LoginScreen(
                     ) {
                         if (waStep == 1) {
                             Text(
-                                text = "أدخل رقم هاتفك المرتبط بواتساب. سيتم إرسال رسالة تحتوي على رمز تحقق من 6 أرقام صالح لمدة 3 دقائق فقط.",
+                                text = "أدخل رقم هاتفك في واتساب؛ سيصلك كود مكوّن من 6 أرقام مباشرةً في تطبيق واتساب من رقم التطبيق الرسمي (صلاحيته 3 دقائق).",
                                 fontFamily = TajawalFontFamily,
                                 fontSize = 13.sp,
                                 color = Color(0xFF475569)
@@ -883,8 +1119,10 @@ fun LoginScreen(
                                             if (selected) Color(0xFF16A34A) else Color(0xFFE2E8F0)
                                         ),
                                         modifier = Modifier.clickable {
-                                            waCountryCode = code
-                                            waDialogError = null
+                                            if (!waBusy) {
+                                                waCountryCode = code
+                                                waDialogError = null
+                                            }
                                         }
                                     ) {
                                         Text(
@@ -904,6 +1142,7 @@ fun LoginScreen(
                                     waPhoneInput = it
                                     waDialogError = null
                                 },
+                                enabled = !waBusy,
                                 label = {
                                     Text(
                                         if (waCountryCode.isNotEmpty()) "رقم الهاتف ($waCountryCode)" else "الرقم مع رمز الدولة",
@@ -922,6 +1161,7 @@ fun LoginScreen(
                             OutlinedTextField(
                                 value = waDisplayName,
                                 onValueChange = { waDisplayName = it },
+                                enabled = !waBusy,
                                 label = { Text("الاسم الكامل (اختياري)", fontFamily = TajawalFontFamily) },
                                 singleLine = true,
                                 shape = RoundedCornerShape(14.dp),
@@ -944,21 +1184,34 @@ fun LoginScreen(
                                 else -> Color(0xFF15803D)
                             }
 
-                            Text(
-                                text = "تم تجهيز رسالة واتساب إلى الرقم: $waSentPhoneDisplay",
-                                fontFamily = TajawalFontFamily,
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF0F172A)
-                            )
-
-                            if (!waOpenedExternal) {
-                                Text(
-                                    text = "لم يُفتح تطبيق واتساب تلقائياً؛ تأكد من تثبيت واتساب على الجهاز.",
-                                    fontFamily = TajawalFontFamily,
-                                    fontSize = 12.sp,
-                                    color = Color(0xFFD97706)
-                                )
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color(0xFFF0FDF4),
+                                border = BorderStroke(1.dp, Color(0xFFBBF7D0))
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Text(
+                                        text = "تم إرسال رسالة إلى تطبيق واتساب على الرقم: $waSentPhoneDisplay",
+                                        fontFamily = TajawalFontFamily,
+                                        fontSize = 12.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF166534)
+                                    )
+                                    val senderLine = if (waSenderHint.isNotBlank()) {
+                                        "افتح تطبيق واتساب لديك وستجد رسالة الكود مرسلة من رقم التطبيق ($waSenderHint)."
+                                    } else {
+                                        "افتح تطبيق واتساب لديك الآن لقراءة الكود المرسل من رقم التطبيق الرسمي."
+                                    }
+                                    Text(
+                                        text = senderLine,
+                                        fontFamily = TajawalFontFamily,
+                                        fontSize = 11.5.sp,
+                                        color = Color(0xFF15803D)
+                                    )
+                                }
                             }
 
                             // Countdown Timer Banner
@@ -1002,8 +1255,8 @@ fun LoginScreen(
                                     waOtpInput = digitsOnly
                                     waDialogError = null
                                 },
-                                enabled = !isExpired,
-                                label = { Text("رمز التحقق (6 أرقام)", fontFamily = TajawalFontFamily) },
+                                enabled = !isExpired && !waBusy,
+                                label = { Text("كود التحقق (6 أرقام)", fontFamily = TajawalFontFamily) },
                                 placeholder = { Text("000000") },
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -1012,23 +1265,8 @@ fun LoginScreen(
                             )
 
                             TextButton(
-                                onClick = {
-                                    val dispatch = WhatsAppOtpManager.sendOtpViaWhatsApp(
-                                        context,
-                                        waSentPhoneDisplay,
-                                        waDisplayName
-                                    )
-                                    if (dispatch.success) {
-                                        waOtpInput = ""
-                                        waDialogError = null
-                                        waOpenedExternal = dispatch.openedWhatsApp
-                                        waRemainingSeconds = WhatsAppOtpManager.getRemainingSeconds(context)
-                                        waOtpNonce++
-                                        Toast.makeText(context, "تم إنشاء رمز جديد صالح لـ 3 دقائق", Toast.LENGTH_SHORT).show()
-                                    } else {
-                                        waDialogError = dispatch.errorMessage
-                                    }
-                                },
+                                enabled = !waBusy,
+                                onClick = { dispatchWhatsAppCode(waSentPhoneDisplay) },
                                 modifier = Modifier.align(Alignment.Start)
                             ) {
                                 Icon(
@@ -1039,7 +1277,7 @@ fun LoginScreen(
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = "إعادة إرسال رمز جديد عبر واتساب",
+                                    text = "إعادة إرسال الكود عبر واتساب",
                                     fontFamily = TajawalFontFamily,
                                     fontSize = 12.5.sp,
                                     fontWeight = FontWeight.Bold,
@@ -1062,6 +1300,7 @@ fun LoginScreen(
                 confirmButton = {
                     if (waStep == 1) {
                         Button(
+                            enabled = !waBusy,
                             onClick = {
                                 val rawLocal = waPhoneInput.trim()
                                 val combined = if (waCountryCode.isNotEmpty() && !rawLocal.startsWith("+") && !rawLocal.startsWith("00")) {
@@ -1069,86 +1308,94 @@ fun LoginScreen(
                                 } else {
                                     rawLocal
                                 }
-                                val dispatch = WhatsAppOtpManager.sendOtpViaWhatsApp(
-                                    context,
-                                    combined,
-                                    waDisplayName
-                                )
-                                if (dispatch.success) {
-                                    waSentPhoneDisplay = dispatch.cleanPhone
-                                    waOpenedExternal = dispatch.openedWhatsApp
-                                    waRemainingSeconds = WhatsAppOtpManager.getRemainingSeconds(context)
-                                    waOtpInput = ""
-                                    waDialogError = null
-                                    waStep = 2
-                                    waOtpNonce++
-                                } else {
-                                    waDialogError = dispatch.errorMessage
-                                }
+                                dispatchWhatsAppCode(combined)
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF16A34A)),
                             shape = RoundedCornerShape(12.dp)
                         ) {
-                            Text("إرسال عبر واتساب", fontFamily = TajawalFontFamily, color = Color.White)
+                            if (waBusy) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+                            Text(
+                                text = if (waBusy) "جاري الإرسال..." else "إرسال الكود",
+                                fontFamily = TajawalFontFamily,
+                                color = Color.White
+                            )
                         }
                     } else {
                         val isExpired = waRemainingSeconds <= 0
                         Button(
                             onClick = {
-                                when (val res = WhatsAppOtpManager.verifyOtp(context, waSentPhoneDisplay, waOtpInput)) {
-                                    is WhatsAppOtpManager.OtpVerifyResult.Success -> {
+                                waBusy = true
+                                waDialogError = null
+                                CloudflareClient.verifyWhatsAppOtp(
+                                    context = context,
+                                    rawPhone = waSentPhoneDisplay,
+                                    otpCode = waOtpInput,
+                                    displayName = waDisplayName
+                                ) { ok, errMsg, user ->
+                                    waBusy = false
+                                    if (ok && user != null) {
                                         showWhatsAppDialog = false
-                                        isLoading = true
-                                        CloudflareClient.loginOrRegisterWithWhatsApp(
+                                        Toast.makeText(
                                             context,
-                                            res.cleanPhone,
-                                            res.displayName
-                                        ) { ok, errMsg, user ->
-                                            isLoading = false
-                                            if (ok && user != null) {
-                                                Toast.makeText(
-                                                    context,
-                                                    "تم التحقق بنجاح، أهلاً ${user.fullName.ifEmpty { user.username }}!",
-                                                    Toast.LENGTH_SHORT
-                                                ).show()
-                                                onLoginSuccess(user)
-                                            } else {
-                                                errorMessage = errMsg ?: "تعذر الدخول برقم الواتساب"
-                                                Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
-                                            }
+                                            "تم التحقق بنجاح، أهلاً ${user.fullName.ifEmpty { user.username }}!",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                        onLoginSuccess(user)
+                                    } else {
+                                        if (errMsg?.contains("انتهت صلاحية") == true) {
+                                            waRemainingSeconds = 0
                                         }
-                                    }
-                                    is WhatsAppOtpManager.OtpVerifyResult.Expired -> {
-                                        waRemainingSeconds = 0
-                                        waDialogError = res.message
-                                    }
-                                    is WhatsAppOtpManager.OtpVerifyResult.Invalid -> {
-                                        waDialogError = res.message
+                                        waDialogError = errMsg ?: "رمز التحقق غير صحيح"
                                     }
                                 }
                             },
-                            enabled = !isExpired && waOtpInput.length == 6 && !isLoading,
+                            enabled = !isExpired && waOtpInput.length == 6 && !isLoading && !waBusy,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFF16A34A),
                                 disabledContainerColor = Color(0xFFCBD5E1)
                             ),
                             shape = RoundedCornerShape(12.dp)
                         ) {
-                            Text("تأكيد الرمز والدخول", fontFamily = TajawalFontFamily, color = Color.White)
+                            if (waBusy) {
+                                CircularProgressIndicator(
+                                    color = Color.White,
+                                    strokeWidth = 2.dp,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+                            Text(
+                                text = if (waBusy) "جاري التحقق..." else "تأكيد الكود والدخول",
+                                fontFamily = TajawalFontFamily,
+                                color = Color.White
+                            )
                         }
                     }
                 },
                 dismissButton = {
                     if (waStep == 2) {
-                        TextButton(onClick = {
-                            WhatsAppOtpManager.clearPendingOtp(context)
-                            waStep = 1
-                            waDialogError = null
-                        }) {
+                        TextButton(
+                            enabled = !waBusy,
+                            onClick = {
+                                WhatsAppOtpManager.clearPendingOtp(context)
+                                waStep = 1
+                                waDialogError = null
+                            }
+                        ) {
                             Text("تغيير الرقم", fontFamily = TajawalFontFamily, color = Color(0xFF64748B))
                         }
                     } else {
-                        TextButton(onClick = { showWhatsAppDialog = false }) {
+                        TextButton(
+                            enabled = !waBusy,
+                            onClick = { showWhatsAppDialog = false }
+                        ) {
                             Text("إلغاء", fontFamily = TajawalFontFamily, color = Color(0xFF64748B))
                         }
                     }
