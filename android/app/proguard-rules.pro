@@ -32,10 +32,23 @@
 # Keep attributes and annotations for JNI and WebView reflection
 -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,JavascriptInterface
 
-# Zego Express Video & Audio Calling Engine (Full SDK protection for JNI)
+# Zego Express Video & Audio Calling Engine (Full SDK protection for JNI & R8 Full Mode)
+-keep class **.zego.** { *; }
+-keepclassmembers class **.zego.** { *; }
+-dontwarn **.zego.**
 -keep class im.zego.** { *; }
 -keepclassmembers class im.zego.** { *; }
 -dontwarn im.zego.**
+-keep class com.zego.** { *; }
+-keepclassmembers class com.zego.** { *; }
+-dontwarn com.zego.**
+-keep class org.webrtc.** { *; }
+-keepclassmembers class org.webrtc.** { *; }
+-dontwarn org.webrtc.**
+-keepclassmembers public class * extends java.lang.Enum {
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}
 
 # Android WebView & JavaScript Interface
 -keepclassmembers class * {

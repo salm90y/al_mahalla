@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.net.Uri
+import android.os.Build
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
@@ -326,6 +327,7 @@ fun YouTubeRoomScreen(
     var isAutoGainControlEnabled by remember { mutableStateOf(true) }
     var micSensitivity by remember { mutableFloatStateOf(0.85f) }
     var isPushToTalkMode by remember { mutableStateOf(false) }
+    var hasRequestedBtConnectThisSession by remember { mutableStateOf(false) }
 
     // Cameras Configuration & State: Small by default as requested!
     var isCameraActive by remember { mutableStateOf(false) }
@@ -606,22 +608,25 @@ fun YouTubeRoomScreen(
     }
 
     val audioPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            hasJoinedZegoAudio = true
-            isIntercomTalking = true
-            try {
-                ZegoCallManager.startPublishingAudio(context.applicationContext, zegoAudioRoomId, currentUserId)
-                ZegoCallManager.setMicrophoneMute(false)
-                ZegoCallManager.setSpeakerEnabled(context.applicationContext, isIntercomLoudspeaker)
-                RealVoipEngine.ensureAudioCaptureStarted(context.applicationContext)
-                RealVoipEngine.setMute(false)
-                RealVoipEngine.setSpeaker(context.applicationContext, isIntercomLoudspeaker)
-            } catch (_: Throwable) {}
-            syncSocket.broadcastVoiceState(true)
-            Toast.makeText(context, "تم تفعيل الميكروفون 🎙️", Toast.LENGTH_SHORT).show()
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        val micGranted = grants[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (micGranted) {
+            if (isPushToTalkMode) {
+                Toast.makeText(context, "تم تفعيل إذن الميكروفون، اضغط مطولاً للتحدث 🎙️", Toast.LENGTH_SHORT).show()
+            } else {
+                hasJoinedZegoAudio = true
+                isIntercomTalking = true
+                try {
+                    ZegoCallManager.setSpeakerEnabled(context.applicationContext, isIntercomLoudspeaker)
+                    ZegoCallManager.startPublishingAudio(context.applicationContext, zegoAudioRoomId, currentUserId)
+                } catch (_: Throwable) {}
+                syncSocket.broadcastVoiceState(true)
+                Toast.makeText(context, "تم تفعيل الميكروفون 🎙️", Toast.LENGTH_SHORT).show()
+            }
         } else {
+            isIntercomTalking = false
             Toast.makeText(context, "يرجى منح إذن الميكروفون للمتابعة 🔒", Toast.LENGTH_SHORT).show()
         }
     }
@@ -694,30 +699,37 @@ fun YouTubeRoomScreen(
             return
         }
         if (talk) {
-            val hasPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-            if (hasPerm) {
-                hasJoinedZegoAudio = true
-                isIntercomTalking = true
-                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                try {
-                    ZegoCallManager.startPublishingAudio(context.applicationContext, zegoAudioRoomId, currentUserId)
-                    ZegoCallManager.setMicrophoneMute(false)
-                    ZegoCallManager.setSpeakerEnabled(context.applicationContext, isIntercomLoudspeaker)
-                    RealVoipEngine.ensureAudioCaptureStarted(context.applicationContext)
-                    RealVoipEngine.setMute(false)
-                    RealVoipEngine.setSpeaker(context.applicationContext, isIntercomLoudspeaker)
-                } catch (_: Throwable) {}
-                syncSocket.broadcastVoiceState(true)
-            } else {
-                audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            val hasMicPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            val hasBtConnectPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            } else true
+
+            if (!hasMicPerm || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !hasBtConnectPerm && !hasRequestedBtConnectThisSession)) {
+                val needed = mutableListOf<String>()
+                if (!hasMicPerm) needed.add(Manifest.permission.RECORD_AUDIO)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !hasBtConnectPerm && !hasRequestedBtConnectThisSession) {
+                    needed.add(Manifest.permission.BLUETOOTH_CONNECT)
+                    hasRequestedBtConnectThisSession = true
+                }
+                audioPermissionLauncher.launch(needed.toTypedArray())
+                return
             }
+
+            hasJoinedZegoAudio = true
+            isIntercomTalking = true
+            try {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            } catch (_: Throwable) {}
+            try {
+                ZegoCallManager.setSpeakerEnabled(context.applicationContext, isIntercomLoudspeaker)
+                ZegoCallManager.startPublishingAudio(context.applicationContext, zegoAudioRoomId, currentUserId)
+            } catch (_: Throwable) {}
+            syncSocket.broadcastVoiceState(true)
         } else {
             isIntercomTalking = false
             if (hasJoinedZegoAudio) {
                 try {
                     ZegoCallManager.stopPublishingAudio()
-                    ZegoCallManager.setMicrophoneMute(true)
-                    RealVoipEngine.setMute(true)
                 } catch (_: Throwable) {}
             }
             syncSocket.broadcastVoiceState(false)
@@ -970,138 +982,170 @@ fun YouTubeRoomScreen(
                 )
 
                 // ====================================================
-                // 0. COMPACT SMART ROOM HEADER BAR (Clean Info & Quick Sync Above Player)
+                // 0. SLEEK UNIFIED ROOM HEADER BAR (Organized, Symmetrical & Refined)
                 // ====================================================
-                Row(
+                Surface(
+                    shape = RoundedCornerShape(18.dp),
+                    color = if (isDark) DarkSurface else Color.White,
+                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
+                    shadowElevation = 2.dp,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 6.dp, start = 2.dp, end = 2.dp, bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        .padding(top = 4.dp, bottom = 6.dp)
                 ) {
-                    // Back / Exit Room Button
-                    Surface(
-                        onClick = { isExitConfirmDialogOpen = true },
-                        shape = CircleShape,
-                        color = if (isDark) DarkSurface else Color.White,
-                        border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0)),
-                        modifier = Modifier.size(34.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 7.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Default.ArrowForward,
-                                contentDescription = "رجوع",
-                                tint = if (isDark) DarkTextPrimary else Color(0xFF0F172A),
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-
-                    // Room Title + Live Viewers & Room Code Pill
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = roomTitle,
-                            fontSize = 13.5.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = TajawalFontFamily,
-                            color = if (isDark) DarkTextPrimary else Color(0xFF0F172A),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        // Back / Exit Room Button (Elevated Rounded Tile)
+                        Surface(
+                            onClick = { isExitConfirmDialogOpen = true },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9),
+                            border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0)),
+                            modifier = Modifier.size(38.dp)
                         ) {
-                            // Copyable Room Code Pill
-                            Surface(
-                                onClick = {
-                                    try {
-                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                        cm?.setPrimaryClip(ClipData.newPlainText("RoomCode", roomCode))
-                                        Toast.makeText(context, "تم نسخ كود الغرفة: $roomCode", Toast.LENGTH_SHORT).show()
-                                    } catch (_: Exception) {}
-                                },
-                                shape = RoundedCornerShape(6.dp),
-                                color = if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.4f) else Color(0xFFEFF6FF)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
-                                ) {
-                                    Text(
-                                        text = roomCode,
-                                        fontSize = 9.5.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB)
-                                    )
-                                    Icon(
-                                        imageVector = Icons.Default.ContentCopy,
-                                        contentDescription = "نسخ الكود",
-                                        tint = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB),
-                                        modifier = Modifier.size(10.dp)
-                                    )
-                                }
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.ArrowForward,
+                                    contentDescription = "رجوع",
+                                    tint = if (isDark) DarkTextPrimary else Color(0xFF0F172A),
+                                    modifier = Modifier.size(19.dp)
+                                )
                             }
-
-                            // Viewers Badge
-                            Text(
-                                text = "• ${roomUsers.size.coerceAtLeast(1)} مشاهد",
-                                fontSize = 10.sp,
-                                fontFamily = TajawalFontFamily,
-                                color = if (isDark) DarkTextSecondary else Color(0xFF64748B)
-                            )
                         }
-                    }
 
-                    // Live Sync Status Pill + Quick Resync Action
-                    Surface(
-                        onClick = { resyncRoomNow() },
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (isSyncConnected) {
-                            if (isDark) Color(0xFF052E16) else Color(0xFFECFDF5)
-                        } else {
-                            if (isDark) Color(0xFF451A03) else Color(0xFFFFFBEB)
-                        },
-                        border = BorderStroke(
-                            1.dp,
-                            if (isSyncConnected) Color(0xFF10B981).copy(alpha = 0.4f) else Color(0xFFF59E0B).copy(alpha = 0.5f)
-                        )
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        // Room Title + Clean Metadata Chips (Code & Viewers)
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(3.dp)
                         ) {
-                            Box(
-                                modifier = Modifier
-                                    .size(7.dp)
-                                    .background(
-                                        if (isSyncConnected) Color(0xFF10B981) else Color(0xFFF59E0B),
-                                        CircleShape
-                                    )
-                            )
                             Text(
-                                text = if (isSyncConnected) "متزامن" else "مزامنة...",
-                                fontSize = 10.sp,
+                                text = roomTitle,
+                                fontSize = 13.5.sp,
                                 fontWeight = FontWeight.Bold,
                                 fontFamily = TajawalFontFamily,
-                                color = if (isSyncConnected) {
-                                    if (isDark) Color(0xFF6EE7B7) else Color(0xFF047857)
-                                } else {
-                                    if (isDark) Color(0xFFFCD34D) else Color(0xFFB45309)
+                                color = if (isDark) DarkTextPrimary else Color(0xFF0F172A),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Surface(
+                                    onClick = {
+                                        try {
+                                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                            cm?.setPrimaryClip(ClipData.newPlainText("RoomCode", roomCode))
+                                            Toast.makeText(context, "تم نسخ كود الغرفة: $roomCode", Toast.LENGTH_SHORT).show()
+                                        } catch (_: Exception) {}
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.45f) else Color(0xFFEFF6FF),
+                                    border = BorderStroke(0.5.dp, if (isDark) Color(0xFF3B82F6).copy(alpha = 0.4f) else Color(0xFFBFDBFE))
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Text(
+                                            text = roomCode,
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB)
+                                        )
+                                        Icon(
+                                            imageVector = Icons.Default.ContentCopy,
+                                            contentDescription = "نسخ الكود",
+                                            tint = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB),
+                                            modifier = Modifier.size(10.dp)
+                                        )
+                                    }
                                 }
-                            )
-                            Icon(
-                                imageVector = Icons.Default.Sync,
-                                contentDescription = "مزامنة الآن",
-                                tint = if (isSyncConnected) {
-                                    if (isDark) Color(0xFF6EE7B7) else Color(0xFF047857)
-                                } else {
-                                    if (isDark) Color(0xFFFCD34D) else Color(0xFFB45309)
-                                },
-                                modifier = Modifier.size(13.dp)
-                            )
+
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isDark) DarkSurfaceVariant else Color(0xFFF8FAFC),
+                                    border = BorderStroke(0.5.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0))
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Visibility,
+                                            contentDescription = null,
+                                            tint = if (isDark) DarkTextSecondary else Color(0xFF64748B),
+                                            modifier = Modifier.size(11.dp)
+                                        )
+                                        Text(
+                                            text = "${roomUsers.size.coerceAtLeast(1)} مشاهد",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            fontFamily = TajawalFontFamily,
+                                            color = if (isDark) DarkTextSecondary else Color(0xFF475569)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        // Live Sync Status Action Button (Symmetrical 38dp height)
+                        Surface(
+                            onClick = { resyncRoomNow() },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isSyncConnected) {
+                                if (isDark) Color(0xFF064E3B).copy(alpha = 0.7f) else Color(0xFFECFDF5)
+                            } else {
+                                if (isDark) Color(0xFF78350F).copy(alpha = 0.6f) else Color(0xFFFFFBEB)
+                            },
+                            border = BorderStroke(
+                                1.dp,
+                                if (isSyncConnected) Color(0xFF10B981).copy(alpha = 0.45f) else Color(0xFFF59E0B).copy(alpha = 0.55f)
+                            ),
+                            modifier = Modifier.height(38.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(7.dp)
+                                        .background(
+                                            if (isSyncConnected) Color(0xFF10B981) else Color(0xFFF59E0B),
+                                            CircleShape
+                                        )
+                                )
+                                Text(
+                                    text = if (isSyncConnected) "متزامن" else "مزامنة",
+                                    fontSize = 10.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = TajawalFontFamily,
+                                    color = if (isSyncConnected) {
+                                        if (isDark) Color(0xFF6EE7B7) else Color(0xFF047857)
+                                    } else {
+                                        if (isDark) Color(0xFFFCD34D) else Color(0xFFB45309)
+                                    }
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.Sync,
+                                    contentDescription = "مزامنة الآن",
+                                    tint = if (isSyncConnected) {
+                                        if (isDark) Color(0xFF6EE7B7) else Color(0xFF047857)
+                                    } else {
+                                        if (isDark) Color(0xFFFCD34D) else Color(0xFFB45309)
+                                    },
+                                    modifier = Modifier.size(14.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -1532,56 +1576,33 @@ fun YouTubeRoomScreen(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 // ====================================================
-                // 2. SMART COMPACT PLAYBACK & SCRUBBER STRIP (Outside video so video stays 100% clean)
+                // 2. ERGONOMIC TWO-TIER PLAYBACK & SCRUBBER DECK
                 // ====================================================
                 Surface(
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(16.dp),
                     color = if (isDark) DarkSurface else Color.White,
                     border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
+                    shadowElevation = 1.5.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        // Top Tier: Full-width Scrubber + Clean Timestamps
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            // Play / Pause quick button
-                            Surface(
-                                onClick = { togglePlayback() },
-                                shape = CircleShape,
-                                color = if (isPlaying) Color(0xFFDC2626) else Color(0xFF10B981),
-                                modifier = Modifier.size(30.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                        contentDescription = if (isPlaying) "إيقاف" else "تشغيل",
-                                        tint = Color.White,
-                                        modifier = Modifier.size(18.dp)
-                                    )
-                                }
-                            }
-
-                            // Rewind 10s
-                            IconButton(
-                                onClick = { performSeek(currentPositionSec - 10f) },
-                                modifier = Modifier.size(26.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Replay10,
-                                    contentDescription = "-10ث",
-                                    tint = if (isDark) DarkTextSecondary else Color(0xFF475569),
-                                    modifier = Modifier.size(17.dp)
-                                )
-                            }
-
-                            // Slim Progress Slider
+                            Text(
+                                text = formatTime(currentPositionSec),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB)
+                            )
                             Slider(
                                 value = currentPositionSec.coerceIn(0f, totalDurationSec.coerceAtLeast(1f)),
                                 onValueChange = { currentPositionSec = it },
@@ -1596,30 +1617,146 @@ fun YouTubeRoomScreen(
                                     inactiveTrackColor = if (isDark) DarkBorder else Color(0xFFE2E8F0)
                                 )
                             )
+                            Text(
+                                text = formatTime(totalDurationSec),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (isDark) DarkTextSecondary else Color(0xFF64748B)
+                            )
+                        }
 
-                            // Forward 10s
-                            IconButton(
-                                onClick = { performSeek(currentPositionSec + 10f) },
-                                modifier = Modifier.size(26.dp)
+                        // Bottom Tier: Balanced, Stylish Media Transport Buttons
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            // Expand / Compact Player Height
+                            Surface(
+                                onClick = { isPlayerExpanded = !isPlayerExpanded },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isPlayerExpanded) {
+                                    if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.5f) else Color(0xFFEFF6FF)
+                                } else {
+                                    if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isPlayerExpanded) Color(0xFF3B82F6).copy(alpha = 0.5f) else (if (isDark) DarkBorder else Color(0xFFE2E8F0))
+                                ),
+                                modifier = Modifier.size(34.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Forward10,
-                                    contentDescription = "+10ث",
-                                    tint = if (isDark) DarkTextSecondary else Color(0xFF475569),
-                                    modifier = Modifier.size(17.dp)
-                                )
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = if (isPlayerExpanded) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                        contentDescription = "حجم المشغل",
+                                        tint = if (isPlayerExpanded) Color(0xFF2563EB) else (if (isDark) DarkTextSecondary else Color(0xFF475569)),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
                             }
 
-                            // Video Time Text
-                            Text(
-                                text = "${formatTime(currentPositionSec)}/${formatTime(totalDurationSec)}",
-                                fontSize = 9.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB)
-                            )
+                            // Rewind 10s
+                            Surface(
+                                onClick = { performSeek(currentPositionSec - 10f) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9),
+                                border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0)),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Replay10,
+                                        contentDescription = "-10ث",
+                                        tint = if (isDark) DarkTextPrimary else Color(0xFF334155),
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                    Text(
+                                        text = "10ث",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = TajawalFontFamily,
+                                        color = if (isDark) DarkTextSecondary else Color(0xFF475569)
+                                    )
+                                }
+                            }
+
+                            // Primary Play / Pause Pill Button (Vibrant Gradient)
+                            Surface(
+                                onClick = { togglePlayback() },
+                                shape = RoundedCornerShape(12.dp),
+                                color = Color.Transparent,
+                                shadowElevation = 3.dp,
+                                modifier = Modifier.height(36.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .background(
+                                            Brush.horizontalGradient(
+                                                if (isPlaying) listOf(Color(0xFFEF4444), Color(0xFFDC2626))
+                                                else listOf(Color(0xFF10B981), Color(0xFF059669))
+                                            ),
+                                            RoundedCornerShape(12.dp)
+                                        )
+                                        .padding(horizontal = 18.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                            contentDescription = if (isPlaying) "إيقاف" else "تشغيل",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Text(
+                                            text = if (isPlaying) "إيقاف" else "تشغيل",
+                                            fontSize = 11.5.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = TajawalFontFamily,
+                                            color = Color.White
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Forward 10s
+                            Surface(
+                                onClick = { performSeek(currentPositionSec + 10f) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9),
+                                border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0)),
+                                modifier = Modifier.height(34.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                                ) {
+                                    Text(
+                                        text = "10ث",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = TajawalFontFamily,
+                                        color = if (isDark) DarkTextSecondary else Color(0xFF475569)
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Default.Forward10,
+                                        contentDescription = "+10ث",
+                                        tint = if (isDark) DarkTextPrimary else Color(0xFF334155),
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
+                            }
 
                             // Mute / Unmute Video Sound
-                            IconButton(
+                            Surface(
                                 onClick = {
                                     if (videoVolume > 0f) {
                                         lastVolumeBeforeMute = videoVolume
@@ -1628,27 +1765,26 @@ fun YouTubeRoomScreen(
                                         videoVolume = if (lastVolumeBeforeMute > 0.05f) lastVolumeBeforeMute else 1.0f
                                     }
                                 },
-                                modifier = Modifier.size(26.dp)
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (videoVolume <= 0f) {
+                                    if (isDark) Color(0xFF450A0A) else Color(0xFFFEF2F2)
+                                } else {
+                                    if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.45f) else Color(0xFFEFF6FF)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (videoVolume <= 0f) Color(0xFFEF4444).copy(alpha = 0.45f) else Color(0xFF2563EB).copy(alpha = 0.35f)
+                                ),
+                                modifier = Modifier.size(34.dp)
                             ) {
-                                Icon(
-                                    imageVector = if (videoVolume <= 0f) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                                    contentDescription = "صوت الفيديو",
-                                    tint = if (videoVolume <= 0f) Color(0xFFEF4444) else Color(0xFF2563EB),
-                                    modifier = Modifier.size(16.dp)
-                                )
-                            }
-
-                            // Expand / Compact Player Height
-                            IconButton(
-                                onClick = { isPlayerExpanded = !isPlayerExpanded },
-                                modifier = Modifier.size(26.dp)
-                            ) {
-                                Icon(
-                                    imageVector = if (isPlayerExpanded) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                                    contentDescription = "حجم المشغل",
-                                    tint = if (isDark) DarkTextSecondary else Color(0xFF64748B),
-                                    modifier = Modifier.size(17.dp)
-                                )
+                                Box(contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        imageVector = if (videoVolume <= 0f) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                        contentDescription = "صوت الفيديو",
+                                        tint = if (videoVolume <= 0f) Color(0xFFEF4444) else Color(0xFF2563EB),
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1660,21 +1796,21 @@ fun YouTubeRoomScreen(
                 // 3. SMART SEGMENTED SUB-TABS DOCK BAR (Labeled & Badged)
                 // ====================================================
                 Surface(
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(16.dp),
                     color = if (isDark) DarkSurface else Color.White,
                     border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
-                    shadowElevation = 0.5.dp,
+                    shadowElevation = 1.5.dp,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(50.dp)
+                        .height(58.dp)
                 ) {
                     val activeCameraCount = roomUsers.count { it.hasCameraActive }
                     val anySpeaking = isIntercomTalking || roomUsers.any { it.isSpeaking }
                     Row(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(horizontal = 4.dp, vertical = 3.dp),
-                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                            .padding(horizontal = 5.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
@@ -1820,30 +1956,43 @@ fun YouTubeRoomScreen(
                                             }
                                         }
 
-                                        // Modern Search Action Button
+                                        // Modern Gradient Search Action Button
                                         Surface(
                                             onClick = { executeSearch(searchQuery) },
-                                            shape = RoundedCornerShape(10.dp),
-                                            color = Color(0xFF2563EB)
+                                            shape = RoundedCornerShape(11.dp),
+                                            color = Color.Transparent,
+                                            shadowElevation = 2.dp,
+                                            modifier = Modifier.height(32.dp)
                                         ) {
-                                            Row(
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                                verticalAlignment = Alignment.CenterVertically,
-                                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                            Box(
+                                                modifier = Modifier
+                                                    .background(
+                                                        Brush.horizontalGradient(
+                                                            listOf(Color(0xFF2563EB), Color(0xFF1D4ED8))
+                                                        ),
+                                                        RoundedCornerShape(11.dp)
+                                                    )
+                                                    .padding(horizontal = 12.dp),
+                                                contentAlignment = Alignment.Center
                                             ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Search,
-                                                    contentDescription = null,
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(13.dp)
-                                                )
-                                                Text(
-                                                    text = "بحث",
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontFamily = TajawalFontFamily,
-                                                    color = Color.White
-                                                )
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Search,
+                                                        contentDescription = null,
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(14.dp)
+                                                    )
+                                                    Text(
+                                                        text = "بحث",
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontFamily = TajawalFontFamily,
+                                                        color = Color.White
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -1854,22 +2003,22 @@ fun YouTubeRoomScreen(
                                     val quickTopics = listOf("قرآن كريم", "وثائقيات", "كرة قدم", "تقنية", "ألعاب", "طبيعة 4K")
                                     LazyRow(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(7.dp)
                                     ) {
                                         items(quickTopics) { topic ->
                                             Surface(
                                                 onClick = { executeSearch(topic) },
-                                                shape = RoundedCornerShape(16.dp),
-                                                color = if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9),
-                                                border = BorderStroke(0.5.dp, if (isDark) DarkBorder else Color(0xFFCBD5E1))
+                                                shape = RoundedCornerShape(12.dp),
+                                                color = if (isDark) DarkSurface else Color.White,
+                                                border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFDBEAFE))
                                             ) {
                                                 Text(
                                                     text = topic,
-                                                    fontSize = 10.sp,
-                                                    fontWeight = FontWeight.Medium,
+                                                    fontSize = 10.5.sp,
+                                                    fontWeight = FontWeight.Bold,
                                                     fontFamily = TajawalFontFamily,
-                                                    color = if (isDark) DarkTextPrimary else Color(0xFF334155),
-                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                                    color = if (isDark) DarkTextPrimary else Color(0xFF1E3A8A),
+                                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                                                 )
                                             }
                                         }
@@ -2155,19 +2304,19 @@ fun YouTubeRoomScreen(
 
                                 // Integrated Compact Message Input Bar
                                 Surface(
-                                    shape = RoundedCornerShape(22.dp),
+                                    shape = RoundedCornerShape(24.dp),
                                     color = if (isDark) DarkSurface else Color.White,
-                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0)),
-                                    shadowElevation = 1.dp,
+                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
+                                    shadowElevation = 2.dp,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(top = 2.dp, bottom = 2.dp)
+                                        .padding(top = 3.dp, bottom = 2.dp)
                                 ) {
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .height(42.dp)
-                                            .padding(horizontal = 8.dp),
+                                            .height(48.dp)
+                                            .padding(horizontal = 7.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
@@ -2176,13 +2325,18 @@ fun YouTubeRoomScreen(
 
                                         // Attach Image button (uploads to Cloudflare R2)
                                         if (isSendingImage) {
-                                            CircularProgressIndicator(
-                                                modifier = Modifier.size(20.dp),
-                                                strokeWidth = 2.dp,
-                                                color = Color(0xFF2563EB)
-                                            )
+                                            Box(
+                                                modifier = Modifier.size(34.dp),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                CircularProgressIndicator(
+                                                    modifier = Modifier.size(20.dp),
+                                                    strokeWidth = 2.dp,
+                                                    color = Color(0xFF2563EB)
+                                                )
+                                            }
                                         } else {
-                                            IconButton(
+                                            Surface(
                                                 onClick = {
                                                     if (!isChatMuted) {
                                                         imagePickerLauncher.launch("image/*")
@@ -2190,29 +2344,44 @@ fun YouTubeRoomScreen(
                                                         Toast.makeText(context, "تم تقييد الدردشة لك 🔇", Toast.LENGTH_SHORT).show()
                                                     }
                                                 },
-                                                modifier = Modifier.size(28.dp),
-                                                enabled = !isChatMuted
+                                                shape = CircleShape,
+                                                color = if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9),
+                                                modifier = Modifier.size(34.dp)
                                             ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Image,
-                                                    contentDescription = "صورة",
-                                                    tint = if (isDark) Color(0xFF94A3B8) else Color(0xFF64748B),
-                                                    modifier = Modifier.size(17.dp)
-                                                )
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Image,
+                                                        contentDescription = "صورة",
+                                                        tint = if (isDark) Color(0xFF94A3B8) else Color(0xFF475569),
+                                                        modifier = Modifier.size(18.dp)
+                                                    )
+                                                }
                                             }
                                         }
 
-                                        // Intercom / Voice button
-                                        IconButton(
+                                        // Intercom / Walkie-Talkie quick button
+                                        Surface(
                                             onClick = { toggleIntercomWithPermission() },
-                                            modifier = Modifier.size(28.dp)
+                                            shape = CircleShape,
+                                            color = if (isIntercomTalking) {
+                                                Color(0xFF10B981)
+                                            } else {
+                                                if (isDark) DarkSurfaceVariant else Color(0xFFEFF6FF)
+                                            },
+                                            border = BorderStroke(
+                                                1.dp,
+                                                if (isIntercomTalking) Color(0xFF059669) else (if (isDark) DarkBorder else Color(0xFFBFDBFE))
+                                            ),
+                                            modifier = Modifier.size(34.dp)
                                         ) {
-                                            Icon(
-                                                imageVector = if (isIntercomTalking) Icons.Default.Mic else Icons.Default.MicNone,
-                                                contentDescription = "صوت",
-                                                tint = if (isIntercomTalking) Color(0xFF10B981) else (if (isDark) Color(0xFF94A3B8) else Color(0xFF64748B)),
-                                                modifier = Modifier.size(17.dp)
-                                            )
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = if (isIntercomTalking) Icons.Default.Mic else Icons.Default.MicNone,
+                                                    contentDescription = "صوت",
+                                                    tint = if (isIntercomTalking) Color.White else Color(0xFF2563EB),
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                            }
                                         }
 
                                         // Message Input Field
@@ -2260,9 +2429,9 @@ fun YouTubeRoomScreen(
                                             )
                                         }
 
-                                        // Compact Send Button (reduced size as requested)
+                                        // Sleek Send Button
                                         AnimatedVisibility(visible = chatInputText.trim().isNotEmpty()) {
-                                            IconButton(
+                                            Surface(
                                                 onClick = {
                                                     val text = chatInputText.trim()
                                                     if (text.isNotEmpty() && !isChatMuted) {
@@ -2279,17 +2448,19 @@ fun YouTubeRoomScreen(
                                                         chatInputText = ""
                                                     }
                                                 },
-                                                modifier = Modifier
-                                                    .size(28.dp)
-                                                    .background(Color(0xFF2563EB), CircleShape),
-                                                enabled = !isChatMuted
+                                                shape = CircleShape,
+                                                color = Color(0xFF2563EB),
+                                                shadowElevation = 2.dp,
+                                                modifier = Modifier.size(34.dp)
                                             ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.Send,
-                                                    contentDescription = "إرسال",
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(13.dp)
-                                                )
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Send,
+                                                        contentDescription = "إرسال",
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(16.dp)
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -2424,21 +2595,30 @@ fun YouTubeRoomScreen(
                                                 // When Camera is OFF: Sleek ON Button right inside the box
                                                 Column(
                                                     horizontalAlignment = Alignment.CenterHorizontally,
-                                                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(5.dp),
                                                     modifier = Modifier.padding(4.dp)
                                                 ) {
                                                     Surface(
                                                         onClick = { toggleCameraWithPermission() },
                                                         shape = CircleShape,
-                                                        color = Color(0xFF10B981),
-                                                        modifier = Modifier.size(30.dp)
+                                                        color = Color.Transparent,
+                                                        shadowElevation = 4.dp,
+                                                        modifier = Modifier.size(34.dp)
                                                     ) {
-                                                        Box(contentAlignment = Alignment.Center) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .fillMaxSize()
+                                                                .background(
+                                                                    Brush.linearGradient(listOf(Color(0xFF10B981), Color(0xFF059669))),
+                                                                    CircleShape
+                                                                ),
+                                                            contentAlignment = Alignment.Center
+                                                        ) {
                                                             Icon(
                                                                 imageVector = Icons.Default.Videocam,
                                                                 contentDescription = "تشغيل الكاميرا",
                                                                 tint = Color.White,
-                                                                modifier = Modifier.size(16.dp)
+                                                                modifier = Modifier.size(17.dp)
                                                             )
                                                         }
                                                     }
@@ -2447,7 +2627,7 @@ fun YouTubeRoomScreen(
                                                         fontSize = 9.sp,
                                                         fontFamily = TajawalFontFamily,
                                                         fontWeight = FontWeight.Bold,
-                                                        color = if (isDark) DarkTextPrimary else Color(0xFF475569)
+                                                        color = if (isDark) DarkTextPrimary else Color(0xFF334155)
                                                     )
                                                 }
                                             }
@@ -2577,11 +2757,11 @@ fun YouTubeRoomScreen(
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .verticalScroll(rememberScrollState())
-                                    .padding(vertical = 8.dp),
+                                    .padding(vertical = 6.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.spacedBy(12.dp)
                             ) {
-                                // Quick Mode & Speakerphone Control Strip
+                                // Stylish Mode & Speakerphone Toggle Cards
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -2592,27 +2772,46 @@ fun YouTubeRoomScreen(
                                             if (isPushToTalkMode && isIntercomTalking) {
                                                 setIntercomTalkingState(false)
                                             }
-                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            try {
+                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            } catch (_: Throwable) {}
                                         },
-                                        shape = RoundedCornerShape(12.dp),
-                                        color = if (isDark) DarkSurface else Color.White,
-                                        border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
-                                        modifier = Modifier.weight(1f)
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = if (isPushToTalkMode) {
+                                            if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.45f) else Color(0xFFEFF6FF)
+                                        } else {
+                                            if (isDark) DarkSurface else Color.White
+                                        },
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isPushToTalkMode) Color(0xFF2563EB) else (if (isDark) DarkBorder else Color(0xFFE2EAFD))
+                                        ),
+                                        shadowElevation = 1.dp,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(46.dp)
                                     ) {
                                         Row(
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                            modifier = Modifier.padding(horizontal = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.Center
                                         ) {
-                                            Icon(
-                                                imageVector = if (isPushToTalkMode) Icons.Default.TouchApp else Icons.Default.Mic,
-                                                contentDescription = null,
-                                                tint = Color(0xFF2563EB),
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(26.dp)
+                                                    .background(Color(0xFF2563EB).copy(alpha = 0.14f), CircleShape),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isPushToTalkMode) Icons.Default.TouchApp else Icons.Default.Mic,
+                                                    contentDescription = null,
+                                                    tint = Color(0xFF2563EB),
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(7.dp))
                                             Text(
-                                                text = if (isPushToTalkMode) "وضع: اضغط باستمرار" else "وضع: مايك مفتوح",
+                                                text = if (isPushToTalkMode) "اضغط باستمرار" else "مايك مفتوح",
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 fontFamily = TajawalFontFamily,
@@ -2624,64 +2823,84 @@ fun YouTubeRoomScreen(
                                     Surface(
                                         onClick = {
                                             isIntercomLoudspeaker = !isIntercomLoudspeaker
-                                            ZegoCallManager.setSpeakerEnabled(context, isIntercomLoudspeaker)
-                                            RealVoipEngine.setSpeaker(context, isIntercomLoudspeaker)
-                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            try {
+                                                ZegoCallManager.setSpeakerEnabled(context.applicationContext, isIntercomLoudspeaker)
+                                            } catch (_: Throwable) {}
+                                            try {
+                                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            } catch (_: Throwable) {}
                                         },
-                                        shape = RoundedCornerShape(12.dp),
+                                        shape = RoundedCornerShape(14.dp),
                                         color = if (isIntercomLoudspeaker) {
-                                            if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.45f) else Color(0xFFEFF6FF)
+                                            if (isDark) Color(0xFF064E3B).copy(alpha = 0.5f) else Color(0xFFECFDF5)
                                         } else {
                                             if (isDark) DarkSurface else Color.White
                                         },
                                         border = BorderStroke(
                                             1.dp,
-                                            if (isIntercomLoudspeaker) Color(0xFF2563EB) else (if (isDark) DarkBorder else Color(0xFFE2EAFD))
+                                            if (isIntercomLoudspeaker) Color(0xFF10B981) else (if (isDark) DarkBorder else Color(0xFFE2EAFD))
                                         ),
-                                        modifier = Modifier.weight(1f)
+                                        shadowElevation = 1.dp,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(46.dp)
                                     ) {
                                         Row(
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                            modifier = Modifier.padding(horizontal = 10.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.Center
                                         ) {
-                                            Icon(
-                                                imageVector = if (isIntercomLoudspeaker) Icons.Default.VolumeUp else Icons.Default.Hearing,
-                                                contentDescription = null,
-                                                tint = if (isIntercomLoudspeaker) Color(0xFF2563EB) else (if (isDark) DarkTextSecondary else Color(0xFF64748B)),
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(26.dp)
+                                                    .background(
+                                                        (if (isIntercomLoudspeaker) Color(0xFF10B981) else Color(0xFF64748B)).copy(alpha = 0.14f),
+                                                        CircleShape
+                                                    ),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isIntercomLoudspeaker) Icons.Default.VolumeUp else Icons.Default.Hearing,
+                                                    contentDescription = null,
+                                                    tint = if (isIntercomLoudspeaker) Color(0xFF10B981) else (if (isDark) DarkTextSecondary else Color(0xFF64748B)),
+                                                    modifier = Modifier.size(15.dp)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(7.dp))
                                             Text(
-                                                text = if (isIntercomLoudspeaker) "مكبر الصوت: نشط" else "سماعة الأذن",
+                                                text = if (isIntercomLoudspeaker) "مكبر الصوت" else "سماعة الأذن",
                                                 fontSize = 11.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 fontFamily = TajawalFontFamily,
-                                                color = if (isIntercomLoudspeaker) Color(0xFF2563EB) else (if (isDark) DarkTextPrimary else Color(0xFF0F172A))
+                                                color = if (isIntercomLoudspeaker) (if (isDark) Color(0xFF6EE7B7) else Color(0xFF047857)) else (if (isDark) DarkTextPrimary else Color(0xFF0F172A))
                                             )
                                         }
                                     }
                                 }
 
-                                Spacer(modifier = Modifier.height(6.dp))
-
-                                // Animated Radar Rings + Intercom Mic Button
+                                // Animated Radar Rings + Centerpiece Walkie-Talkie Button
                                 Box(
-                                    modifier = Modifier.size(168.dp),
+                                    modifier = Modifier.size(164.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     if (isIntercomTalking && !isMutedByMod) {
                                         Box(
                                             modifier = Modifier
-                                                .size(135.dp)
+                                                .size(134.dp)
                                                 .scale(pulseScale)
                                                 .background(Color(0xFF10B981).copy(alpha = 0.18f), CircleShape)
                                         )
                                         Box(
                                             modifier = Modifier
-                                                .size(152.dp)
+                                                .size(150.dp)
                                                 .scale(pulseScale * 0.96f)
                                                 .border(2.dp, Color(0xFF10B981).copy(alpha = 0.35f), CircleShape)
+                                        )
+                                    } else if (!isMutedByMod) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(136.dp)
+                                                .border(1.5.dp, Color(0xFF2563EB).copy(alpha = 0.18f), CircleShape)
                                         )
                                     }
 
@@ -2708,46 +2927,82 @@ fun YouTubeRoomScreen(
                                         }
                                     }
 
+                                    val micGradient = when {
+                                        isMutedByMod -> listOf(Color(0xFF64748B), Color(0xFF475569))
+                                        isIntercomTalking -> listOf(Color(0xFF10B981), Color(0xFF059669))
+                                        else -> listOf(Color(0xFF3B82F6), Color(0xFF1D4ED8))
+                                    }
+
                                     Box(
                                         modifier = Modifier
-                                            .size(126.dp)
+                                            .size(120.dp)
+                                            .shadow(12.dp, CircleShape)
                                             .clip(CircleShape)
-                                            .background(
-                                                if (isMutedByMod) Color(0xFF64748B)
-                                                else if (isIntercomTalking) Color(0xFF10B981)
-                                                else Color(0xFF2563EB),
-                                                CircleShape
-                                            )
+                                            .background(Brush.linearGradient(micGradient), CircleShape)
                                             .border(4.dp, if (isDark) DarkSurface else Color.White, CircleShape)
-                                            .shadow(10.dp, CircleShape)
                                             .then(micModifier),
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        Icon(
-                                            imageVector = if (isMutedByMod) Icons.Default.MicOff else if (isIntercomTalking) Icons.Default.Mic else Icons.Default.MicNone,
-                                            contentDescription = "تحدث",
-                                            tint = Color.White,
-                                            modifier = Modifier.size(50.dp)
-                                        )
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = if (isMutedByMod) Icons.Default.MicOff else if (isIntercomTalking) Icons.Default.Mic else Icons.Default.MicNone,
+                                                contentDescription = "تحدث",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(44.dp)
+                                            )
+                                            Text(
+                                                text = when {
+                                                    isMutedByMod -> "مكتوم"
+                                                    isIntercomTalking -> "يبث الآن"
+                                                    isPushToTalkMode -> "اضغط"
+                                                    else -> "تحدث"
+                                                },
+                                                fontSize = 10.5.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                fontFamily = TajawalFontFamily,
+                                                color = Color.White.copy(alpha = 0.92f)
+                                            )
+                                        }
                                     }
                                 }
 
-                                Text(
-                                    text = when {
-                                        isMutedByMod -> "المايك مكتوم من قبل المشرف 🔇"
-                                        isIntercomTalking -> "البث الصوتي المباشر نشط الآن 🎙️"
-                                        isPushToTalkMode -> "اضغط مطولاً على الميكروفون للتحدث"
-                                        else -> "اضغط لفتح الميكروفون والتحدث مع الجميع"
-                                    },
-                                    fontSize = 12.5.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = TajawalFontFamily,
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
                                     color = when {
-                                        isMutedByMod -> Color(0xFFEF4444)
-                                        isIntercomTalking -> Color(0xFF10B981)
-                                        else -> if (isDark) DarkTextPrimary else Color(0xFF1E3A8A)
-                                    }
-                                )
+                                        isMutedByMod -> if (isDark) Color(0xFF450A0A) else Color(0xFFFEF2F2)
+                                        isIntercomTalking -> if (isDark) Color(0xFF064E3B).copy(alpha = 0.6f) else Color(0xFFECFDF5)
+                                        else -> if (isDark) DarkSurface else Color.White
+                                    },
+                                    border = BorderStroke(
+                                        1.dp,
+                                        when {
+                                            isMutedByMod -> Color(0xFFEF4444).copy(alpha = 0.4f)
+                                            isIntercomTalking -> Color(0xFF10B981).copy(alpha = 0.5f)
+                                            else -> if (isDark) DarkBorder else Color(0xFFE2EAFD)
+                                        }
+                                    )
+                                ) {
+                                    Text(
+                                        text = when {
+                                            isMutedByMod -> "المايك مكتوم من قبل المشرف 🔇"
+                                            isIntercomTalking -> "البث الصوتي المباشر نشط الآن 🎙️"
+                                            isPushToTalkMode -> "اضغط مطولاً على الميكروفون للتحدث"
+                                            else -> "اضغط لفتح الميكروفون والتحدث مع الجميع"
+                                        },
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        fontFamily = TajawalFontFamily,
+                                        color = when {
+                                            isMutedByMod -> Color(0xFFEF4444)
+                                            isIntercomTalking -> if (isDark) Color(0xFF6EE7B7) else Color(0xFF047857)
+                                            else -> if (isDark) DarkTextPrimary else Color(0xFF1E3A8A)
+                                        },
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                                    )
+                                }
 
                                 // Active Speakers Live Chips
                                 if (activeSpeakers.isNotEmpty()) {
@@ -3400,7 +3655,7 @@ fun YouTubeRoomScreen(
                                             )
                                         }
 
-                                        // Camera toggle button
+                                        // Camera toggle & flip buttons
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -3410,29 +3665,44 @@ fun YouTubeRoomScreen(
                                                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                                     toggleCameraWithPermission()
                                                 },
-                                                shape = RoundedCornerShape(10.dp),
-                                                color = if (isCameraActive) Color(0xFFEF4444) else Color(0xFF10B981),
-                                                modifier = Modifier.weight(1f)
+                                                shape = RoundedCornerShape(13.dp),
+                                                color = Color.Transparent,
+                                                shadowElevation = 2.dp,
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(42.dp)
                                             ) {
-                                                Row(
-                                                    modifier = Modifier.padding(vertical = 8.dp),
-                                                    horizontalArrangement = Arrangement.Center,
-                                                    verticalAlignment = Alignment.CenterVertically
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxSize()
+                                                        .background(
+                                                            Brush.horizontalGradient(
+                                                                if (isCameraActive) listOf(Color(0xFFEF4444), Color(0xFFDC2626))
+                                                                else listOf(Color(0xFF10B981), Color(0xFF059669))
+                                                            ),
+                                                            RoundedCornerShape(13.dp)
+                                                        ),
+                                                    contentAlignment = Alignment.Center
                                                 ) {
-                                                    Icon(
-                                                        imageVector = if (isCameraActive) Icons.Default.VideocamOff else Icons.Default.Videocam,
-                                                        contentDescription = null,
-                                                        tint = Color.White,
-                                                        modifier = Modifier.size(15.dp)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(6.dp))
-                                                    Text(
-                                                        text = if (isCameraActive) "إيقاف كاميرتي" else "فتح كاميرتي",
-                                                        fontSize = 11.sp,
-                                                        fontFamily = TajawalFontFamily,
-                                                        fontWeight = FontWeight.Bold,
-                                                        color = Color.White
-                                                    )
+                                                    Row(
+                                                        horizontalArrangement = Arrangement.Center,
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = if (isCameraActive) Icons.Default.VideocamOff else Icons.Default.Videocam,
+                                                            contentDescription = null,
+                                                            tint = Color.White,
+                                                            modifier = Modifier.size(16.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Text(
+                                                            text = if (isCameraActive) "إيقاف كاميرتي" else "فتح كاميرتي",
+                                                            fontSize = 11.5.sp,
+                                                            fontFamily = TajawalFontFamily,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = Color.White
+                                                        )
+                                                    }
                                                 }
                                             }
 
@@ -3447,13 +3717,15 @@ fun YouTubeRoomScreen(
                                                         Toast.makeText(context, "يرجى فتح الكاميرا أولاً", Toast.LENGTH_SHORT).show()
                                                     }
                                                 },
-                                                shape = RoundedCornerShape(10.dp),
-                                                color = if (isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9),
-                                                border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFCBD5E1)),
-                                                modifier = Modifier.weight(1f)
+                                                shape = RoundedCornerShape(13.dp),
+                                                color = if (isDark) DarkSurfaceVariant else Color(0xFFF8FAFC),
+                                                border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0)),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(42.dp)
                                             ) {
                                                 Row(
-                                                    modifier = Modifier.padding(vertical = 8.dp),
+                                                    modifier = Modifier.fillMaxSize(),
                                                     horizontalArrangement = Arrangement.Center,
                                                     verticalAlignment = Alignment.CenterVertically
                                                 ) {
@@ -3461,12 +3733,12 @@ fun YouTubeRoomScreen(
                                                         imageVector = Icons.Default.FlipCameraAndroid,
                                                         contentDescription = null,
                                                         tint = if (isDark) DarkTextPrimary else Color(0xFF334155),
-                                                        modifier = Modifier.size(15.dp)
+                                                        modifier = Modifier.size(16.dp)
                                                     )
                                                     Spacer(modifier = Modifier.width(6.dp))
                                                     Text(
                                                         text = if (isFrontCamera) "أمامية 🤳" else "خلفية 📸",
-                                                        fontSize = 11.sp,
+                                                        fontSize = 11.5.sp,
                                                         fontFamily = TajawalFontFamily,
                                                         fontWeight = FontWeight.Bold,
                                                         color = if (isDark) DarkTextPrimary else Color(0xFF334155)
@@ -3482,7 +3754,7 @@ fun YouTubeRoomScreen(
                                             verticalAlignment = Alignment.CenterVertically
                                         ) {
                                             Text(
-                                                text = "شكل إطار مربعات الكاميرات:",
+                                                text = "شكل إطار الكاميرات:",
                                                 fontSize = 11.sp,
                                                 fontFamily = TajawalFontFamily,
                                                 color = if (isDark) DarkTextPrimary else Color(0xFF0F172A)
@@ -3492,9 +3764,9 @@ fun YouTubeRoomScreen(
                                                     val isShapeSelected = cameraBoxShape == shape
                                                     Surface(
                                                         onClick = { cameraBoxShape = shape },
-                                                        shape = RoundedCornerShape(8.dp),
-                                                        color = if (isShapeSelected) Color(0xFF2563EB) else (if (isDark) Color(0xFF1E293B) else Color(0xFFF1F5F9)),
-                                                        border = BorderStroke(1.dp, if (isShapeSelected) Color(0xFF2563EB) else (if (isDark) DarkBorder else Color(0xFFCBD5E1)))
+                                                        shape = RoundedCornerShape(10.dp),
+                                                        color = if (isShapeSelected) Color(0xFF2563EB) else (if (isDark) DarkSurfaceVariant else Color(0xFFF8FAFC)),
+                                                        border = BorderStroke(1.dp, if (isShapeSelected) Color(0xFF2563EB) else (if (isDark) DarkBorder else Color(0xFFE2E8F0)))
                                                     ) {
                                                         Text(
                                                             text = when (shape) {
@@ -3503,9 +3775,10 @@ fun YouTubeRoomScreen(
                                                                 CameraBoxShape.CIRCLE -> "دائري"
                                                             },
                                                             fontSize = 10.sp,
+                                                            fontWeight = if (isShapeSelected) FontWeight.Bold else FontWeight.Medium,
                                                             fontFamily = TajawalFontFamily,
                                                             color = if (isShapeSelected) Color.White else (if (isDark) DarkTextPrimary else Color(0xFF334155)),
-                                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
                                                         )
                                                     }
                                                 }
@@ -3552,29 +3825,41 @@ fun YouTubeRoomScreen(
 
                                         Surface(
                                             onClick = { isExitConfirmDialogOpen = true },
-                                            shape = RoundedCornerShape(12.dp),
-                                            color = Color(0xFFDC2626),
-                                            modifier = Modifier.fillMaxWidth()
+                                            shape = RoundedCornerShape(13.dp),
+                                            color = Color.Transparent,
+                                            shadowElevation = 2.dp,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .height(44.dp)
                                         ) {
-                                            Row(
-                                                modifier = Modifier.padding(vertical = 10.dp),
-                                                horizontalArrangement = Arrangement.Center,
-                                                verticalAlignment = Alignment.CenterVertically
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .background(
+                                                        Brush.horizontalGradient(listOf(Color(0xFFEF4444), Color(0xFFB91C1C))),
+                                                        RoundedCornerShape(13.dp)
+                                                    ),
+                                                contentAlignment = Alignment.Center
                                             ) {
-                                                Icon(
-                                                    imageVector = Icons.Default.ExitToApp,
-                                                    contentDescription = null,
-                                                    tint = Color.White,
-                                                    modifier = Modifier.size(16.dp)
-                                                )
-                                                Spacer(modifier = Modifier.width(6.dp))
-                                                Text(
-                                                    text = if (isHost) "إنهاء الغرفة وإغلاقها للجميع 🚪" else "مغادرة الغرفة الآن 🚪",
-                                                    fontSize = 12.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    fontFamily = TajawalFontFamily,
-                                                    color = Color.White
-                                                )
+                                                Row(
+                                                    horizontalArrangement = Arrangement.Center,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.ExitToApp,
+                                                        contentDescription = null,
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(17.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text(
+                                                        text = if (isHost) "إنهاء الغرفة وإغلاقها للجميع 🚪" else "مغادرة الغرفة الآن 🚪",
+                                                        fontSize = 12.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        fontFamily = TajawalFontFamily,
+                                                        color = Color.White
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -3869,24 +4154,26 @@ private fun InlinePermissionChip(
 ) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(8.dp),
-        color = color.copy(alpha = 0.08f),
-        border = BorderStroke(1.dp, color.copy(alpha = 0.3f)),
-        modifier = modifier
+        shape = RoundedCornerShape(11.dp),
+        color = color.copy(alpha = 0.1f),
+        border = BorderStroke(1.dp, color.copy(alpha = 0.35f)),
+        modifier = modifier.heightIn(min = 36.dp)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
-            Icon(imageVector = icon, contentDescription = null, tint = color, modifier = Modifier.size(13.dp))
-            Spacer(modifier = Modifier.width(4.dp))
+            Icon(imageVector = icon, contentDescription = null, tint = color, modifier = Modifier.size(14.dp))
+            Spacer(modifier = Modifier.width(5.dp))
             Text(
                 text = label,
-                fontSize = 10.sp,
+                fontSize = 10.5.sp,
                 fontWeight = FontWeight.Bold,
                 fontFamily = TajawalFontFamily,
-                color = color
+                color = color,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -3903,18 +4190,26 @@ private fun YouTubeDockIconButton(
     onClick: () -> Unit
 ) {
     val activeBg = if (isActive) {
-        if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.5f) else Color(0xFFEFF6FF)
+        if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.55f) else Color(0xFFEFF6FF)
     } else Color.Transparent
-    val tintColor = if (isActive) Color(0xFF2563EB) else (if (isDark) Color(0xFF94A3B8) else Color(0xFF64748B))
+    val activeBorder = if (isActive) {
+        if (isDark) Color(0xFF3B82F6).copy(alpha = 0.45f) else Color(0xFFBFDBFE)
+    } else Color.Transparent
+    val tintColor = if (isActive) {
+        if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB)
+    } else {
+        if (isDark) Color(0xFF94A3B8) else Color(0xFF64748B)
+    }
 
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
             .fillMaxSize()
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(12.dp))
             .background(activeBg)
+            .border(if (isActive) 1.dp else 0.dp, activeBorder, RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 2.dp, vertical = 2.dp)
+            .padding(horizontal = 2.dp, vertical = 3.dp)
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -3930,14 +4225,16 @@ private fun YouTubeDockIconButton(
                 if (showLiveDot) {
                     Box(
                         modifier = Modifier
-                            .size(7.dp)
+                            .size(8.dp)
                             .align(Alignment.TopEnd)
                             .offset(x = 4.dp, y = (-2).dp)
                             .background(Color(0xFF10B981), CircleShape)
+                            .border(1.dp, if (isDark) DarkSurface else Color.White, CircleShape)
                     )
                 }
             }
             if (label.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(1.dp))
                 Text(
                     text = label,
                     fontSize = 8.5.sp,
@@ -3948,18 +4245,28 @@ private fun YouTubeDockIconButton(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+            if (isActive) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Box(
+                    modifier = Modifier
+                        .width(16.dp)
+                        .height(2.5.dp)
+                        .background(tintColor, RoundedCornerShape(2.dp))
+                )
+            }
         }
         if (badgeCount != null && badgeCount > 0) {
             Surface(
                 shape = CircleShape,
                 color = Color(0xFFDC2626),
+                border = BorderStroke(1.dp, if (isDark) DarkSurface else Color.White),
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(top = 1.dp, end = 2.dp)
             ) {
                 Text(
                     text = if (badgeCount > 99) "99+" else "$badgeCount",
-                    fontSize = 8.sp,
+                    fontSize = 7.5.sp,
                     fontWeight = FontWeight.Bold,
                     fontFamily = TajawalFontFamily,
                     color = Color.White,
@@ -3978,29 +4285,34 @@ private fun PlaybackControlButton(
     isLarge: Boolean = false,
     onClick: () -> Unit
 ) {
+    val isDark = isAppInDarkTheme()
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(2.dp)
+        verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        IconButton(
+        Surface(
             onClick = onClick,
-            modifier = Modifier
-                .size(if (isLarge) 46.dp else 36.dp)
-                .background(color.copy(alpha = 0.12f), CircleShape)
+            shape = RoundedCornerShape(if (isLarge) 16.dp else 13.dp),
+            color = if (isLarge) color else color.copy(alpha = 0.12f),
+            border = if (isLarge) null else BorderStroke(1.dp, color.copy(alpha = 0.28f)),
+            shadowElevation = if (isLarge) 3.dp else 0.dp,
+            modifier = Modifier.size(if (isLarge) 48.dp else 38.dp)
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = color,
-                modifier = Modifier.size(if (isLarge) 28.dp else 20.dp)
-            )
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = label,
+                    tint = if (isLarge) Color.White else color,
+                    modifier = Modifier.size(if (isLarge) 26.dp else 20.dp)
+                )
+            }
         }
         Text(
             text = label,
-            fontSize = 9.sp,
-            fontWeight = FontWeight.Medium,
+            fontSize = 9.5.sp,
+            fontWeight = FontWeight.Bold,
             fontFamily = TajawalFontFamily,
-            color = Color(0xFF64748B)
+            color = if (isDark) DarkTextSecondary else Color(0xFF475569)
         )
     }
 }
