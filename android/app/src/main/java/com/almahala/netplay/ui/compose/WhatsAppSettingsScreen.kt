@@ -124,10 +124,10 @@ fun WhatsAppSettingsScreen(
 
     val scope = rememberCoroutineScope()
 
-    // Profile
-    val currentUser = remember { UserManager.getCurrentUser(context) }
+    // Profile (Personal account shown strictly in Settings)
+    var currentUser by remember { mutableStateOf(UserManager.getCurrentUser(context)) }
     val accountUsername = currentUser?.username.orEmpty()
-    var userName by remember { mutableStateOf(currentUser?.fullName?.ifEmpty { currentUser.username } ?: "مستخدم المحلة") }
+    var userName by remember { mutableStateOf(currentUser?.fullName?.ifEmpty { currentUser?.username ?: "" } ?: "مستخدم المحلة") }
     var userStatus by remember { mutableStateOf(currentUser?.role ?: "عضو نشط • متاح للتواصل") }
     var userPhone by remember {
         mutableStateOf(
@@ -137,6 +137,22 @@ fun WhatsAppSettingsScreen(
         )
     }
     var userAvatar by remember { mutableStateOf(currentUser?.avatar ?: "") }
+
+    LaunchedEffect(Unit) {
+        CloudflareClient.checkAuth(context) { ok, refreshed ->
+            if (ok && refreshed != null) {
+                currentUser = refreshed
+                userName = refreshed.fullName.ifEmpty { refreshed.username }
+                userStatus = refreshed.role
+                userPhone = refreshed.email.takeIf { it.isNotBlank() }
+                    ?: refreshed.username.takeIf { it.isNotBlank() }?.let { "@$it" }
+                    ?: "حساب محلي"
+                if (refreshed.avatar.isNotBlank()) {
+                    userAvatar = refreshed.avatar
+                }
+            }
+        }
+    }
 
     // Dialog & Sheet States
     var showProfileEditDialog by remember { mutableStateOf(false) }
@@ -1605,9 +1621,10 @@ fun WhatsAppSettingsScreen(
                         )
                     }
 
-                    if (currentUser?.email?.contains("@") == true) {
+                    val linkedEmail = currentUser?.email.orEmpty()
+                    if (linkedEmail.contains("@")) {
                         Text(
-                            text = "مرتبط بالبريد: ${currentUser.email}",
+                            text = "مرتبط بالبريد: $linkedEmail",
                             fontSize = 12.sp,
                             color = Color(0xFF64748B),
                             fontFamily = TajawalFontFamily

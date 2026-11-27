@@ -1,11 +1,6 @@
 package com.almahala.netplay.ui.compose
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
-import android.widget.Toast
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,25 +14,21 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.navigation.NavController
@@ -300,147 +291,6 @@ fun ChatListScreen(
                         tint = Color(0xFF475569),
                         modifier = Modifier.size(24.dp)
                     )
-                }
-            }
-        }
-
-        // 1.5 Current Account Visibility Strip (Avatar, Name, @username, Linked Email + 1-Tap Copy)
-        currentUser?.let { activeUser ->
-            val myName = activeUser.fullName.ifBlank { activeUser.username }
-            val myAvatar = CloudflareClient.normalizeAvatarUrl(context, activeUser.avatar)
-            val myInitial = myName.take(1).uppercase().ifEmpty { "م" }
-            Surface(
-                onClick = {
-                    context.startActivity(Intent(context, SettingsActivity::class.java))
-                },
-                shape = RoundedCornerShape(18.dp),
-                color = Color(0xFFF8FAFF),
-                border = BorderStroke(1.dp, Color(0xFFDBEAFE)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 4.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 9.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(modifier = Modifier.size(42.dp)) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .clip(CircleShape)
-                                .background(
-                                    Brush.linearGradient(
-                                        listOf(Color(0xFF3B82F6), Color(0xFF1D4ED8))
-                                    )
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (myAvatar.isNotBlank()) {
-                                SubcomposeAsyncImage(
-                                    model = myAvatar,
-                                    contentDescription = myName,
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .clip(CircleShape),
-                                    contentScale = ContentScale.Crop,
-                                    error = {
-                                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                            Text(
-                                                text = myInitial,
-                                                color = Color.White,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 16.sp,
-                                                fontFamily = TajawalFontFamily
-                                            )
-                                        }
-                                    }
-                                )
-                            } else {
-                                Text(
-                                    text = myInitial,
-                                    color = Color.White,
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 16.sp,
-                                    fontFamily = TajawalFontFamily
-                                )
-                            }
-                        }
-                        Box(
-                            modifier = Modifier
-                                .size(11.dp)
-                                .align(Alignment.BottomEnd)
-                                .background(Color(0xFF10B981), CircleShape)
-                                .border(2.dp, Color.White, CircleShape)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.width(10.dp))
-
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = myName,
-                                fontSize = 14.5.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = TajawalFontFamily,
-                                color = Color(0xFF0F172A),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            if (activeUser.email.contains("@")) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Icon(
-                                    imageVector = Icons.Default.VerifiedUser,
-                                    contentDescription = "مرتبط بحساب Google",
-                                    tint = Color(0xFF2563EB),
-                                    modifier = Modifier.size(14.dp)
-                                )
-                            }
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "@${activeUser.username}",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = Color(0xFF2563EB),
-                                maxLines = 1
-                            )
-                            if (activeUser.email.contains("@")) {
-                                Text(
-                                    text = " • ${activeUser.email}",
-                                    fontSize = 11.sp,
-                                    color = Color(0xFF64748B),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                    }
-
-                    IconButton(
-                        onClick = {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                            clipboard?.setPrimaryClip(ClipData.newPlainText("username", activeUser.username))
-                            Toast.makeText(
-                                context,
-                                "تم نسخ المعرّف @${activeUser.username} للمشاركة مع الأصدقاء",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        },
-                        modifier = Modifier
-                            .size(34.dp)
-                            .background(Color(0xFFEFF6FF), CircleShape)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.ContentCopy,
-                            contentDescription = "نسخ اليوزر",
-                            tint = Color(0xFF2563EB),
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
                 }
             }
         }

@@ -457,6 +457,76 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
         })
     }
 
+    fun getGoogleOAuthStartUrl(context: Context): String {
+        return "${getBaseUrl(context)}/auth/google/start?platform=android"
+    }
+
+    fun getFacebookOAuthStartUrl(context: Context): String {
+        return "${getBaseUrl(context)}/auth/facebook/start?platform=android"
+    }
+
+    fun completeOAuthTokenLogin(
+        context: Context,
+        token: String,
+        callback: (Boolean, String?, com.almahala.netplay.UserProfile?) -> Unit
+    ) {
+        val cleanToken = token.trim()
+        if (cleanToken.isEmpty()) {
+            mainHandler.post { callback(false, "رمز المصادقة مفقود", null) }
+            return
+        }
+        val url = "${getBaseUrl(context)}/auth/me"
+        val request = Request.Builder()
+            .url(url)
+            .addHeader("Authorization", "Bearer $cleanToken")
+            .build()
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                mainHandler.post { callback(false, "تعذر الاتصال بالسيرفر للتحقق من الحساب", null) }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    val respStr = resp.body?.string() ?: "{}"
+                    if (resp.isSuccessful) {
+                        try {
+                            val json = JSONObject(respStr)
+                            val userObj = json.optJSONObject("user")
+                            if (userObj != null) {
+                                val uname = userObj.optString("username")
+                                val dName = userObj.optString("display_name", "").ifBlank { uname }
+                                val avatar = normalizeAvatarUrl(context, userObj.optString("avatar_url", ""))
+                                val profile = com.almahala.netplay.UserProfile(
+                                    id = userObj.optString("id"),
+                                    username = uname,
+                                    isAdmin = uname.lowercase() == "ahmed",
+                                    createdAt = userObj.optLong("created_at", System.currentTimeMillis()),
+                                    fullName = dName,
+                                    role = if (uname.lowercase() == "ahmed") "مشرف" else "عضو",
+                                    avatar = avatar,
+                                    email = userObj.optString("email", "")
+                                )
+                                saveAuthToken(context, cleanToken)
+                                cacheUserAvatar(context, profile.id, profile.username, profile.avatar)
+                                UserManager.saveAuthenticatedSession(context, profile, cleanToken)
+                                com.almahala.netplay.AppSettingsManager.setUserName(context, dName)
+                                mainHandler.post { callback(true, null, profile) }
+                                return
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    var errMsg = "فشل التحقق من الحساب"
+                    try {
+                        val errJson = JSONObject(respStr)
+                        val raw = errJson.optString("error", "")
+                        if (raw.isNotBlank()) errMsg = raw
+                    } catch (_: Exception) {}
+                    mainHandler.post { callback(false, errMsg, null) }
+                }
+            }
+        })
+    }
+
     private fun deriveSocialSecret(prefix: String, identifier: String): String {
         val raw = "$prefix:${identifier.trim().lowercase()}"
         val digest = java.security.MessageDigest.getInstance("SHA-256")
@@ -1095,6 +1165,10 @@ override fun onResponse(call: Call, response: Response) {
 fun sendFriendRequest(context: Context, username: String, callback: (Boolean, String) -> Unit) {
         val token = getAuthToken(context)
         val cleanTarget = username.trim().removePrefix("@")
+        if (cleanTarget.isEmpty()) {
+            mainHandler.post { callback(false, "يرجى اختيار حساب صحيح") }
+            return
+        }
         val url = "${getBaseUrl(context)}/friends/request"
         val bodyObj = JSONObject().apply {
             put("to_username", cleanTarget)
@@ -1110,27 +1184,22 @@ fun sendFriendRequest(context: Context, username: String, callback: (Boolean, St
             .build()
         httpClient.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                // Local fallback simulation
-                addLocalOutgoingRequest(context, cleanTarget)
-                mainHandler.post { callback(true, "تم إرسال طلب الصداقة محلياً") }
+                mainHandler.post { callback(false, "تعذر الاتصال بالسيرفر، لم يتم إرسال الطلب") }
             }
 override fun onResponse(call: Call, response: Response) {
                 response.use {
+                    val rawStr = response.body?.string() ?: ""
                     if (response.isSuccessful) {
-                        addLocalOutgoingRequest(context, username)
-                        mainHandler.post { callback(true, "تم إرسال طلب الصداقة بنجاح") }
+                        addLocalOutgoingRequest(context, cleanTarget)
+                        val okMsg = try {
+                            JSONObject(rawStr).optString("message", "تم إرسال طلب الصداقة بنجاح")
+                        } catch (_: Exception) { "تم إرسال طلب الصداقة بنجاح" }
+                        mainHandler.post { callback(true, okMsg) }
                     } else {
-                        val rawStr = response.body?.string() ?: ""
                         val errMsg = try {
-                            JSONObject(rawStr).optString("error", "فشل الإرسال")
-                        } catch (_: Exception) { "فشل الإرسال" }
-                        if (errMsg.contains("no such table", ignoreCase = true) || errMsg.contains("SQLITE_ERROR", ignoreCase = true) || response.code == 500) {
-                            // Fallback gracefully so user experience is not broken
-                            addLocalOutgoingRequest(context, username)
-                            mainHandler.post { callback(true, "تم إرسال طلب الصداقة بنجاح") }
-                        } else {
-                            mainHandler.post { callback(false, errMsg) }
-                        }
+                            JSONObject(rawStr).optString("error", "لا يوجد حساب مسجل بهذا الاسم")
+                        } catch (_: Exception) { "لا يوجد حساب مسجل بهذا الاسم" }
+                        mainHandler.post { callback(false, errMsg) }
                     }
                 }
             }
@@ -1867,10 +1936,6 @@ fun searchUsers(context: Context, query: String, callback: (Boolean, List<com.al
                             mainHandler.post { callback(true, list) }
                             return
                         } catch (_: Exception) {}
-                    }
-                    if (resp.code == 404) {
-                        getAllUsers(context, callback)
-                        return
                     }
                     mainHandler.post { callback(false, null) }
                 }

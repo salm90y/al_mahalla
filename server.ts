@@ -882,7 +882,35 @@ async function startServer() {
     res.json({ success: true, friends });
   });
 
-  // POST /friends/request - send friend request
+  // GET /users/search - strict lookup of existing registered users only
+  app.get(['/users/search', '/api/users/search'], (req, res) => {
+    const auth = getAuth(req);
+    if (!auth) return res.status(401).json({ error: "Unauthorized" });
+    const q = String(req.query.q || "").trim().replace(/^@+/, "").toLowerCase();
+    const all = Array.from(dbUsers.values()).filter((u) => u.id !== auth.id && u.username.toLowerCase() !== auth.username.toLowerCase());
+    const matches = !q
+      ? all.slice(0, 30)
+      : all.filter((u) =>
+          u.username.toLowerCase().includes(q) ||
+          (u.email && u.email.toLowerCase().includes(q)) ||
+          u.id.toLowerCase() === q
+        ).slice(0, 30);
+    res.json({
+      success: true,
+      users: matches.map((u) => ({
+        id: u.id,
+        username: u.username,
+        display_name: u.username,
+        email: u.email || "",
+        avatar_url: u.avatar_url || "",
+        status: u.status || "offline",
+        created_at: u.created_at,
+        last_seen: u.last_seen,
+      }))
+    });
+  });
+
+  // POST /friends/request - send friend request (strictly to existing registered accounts only)
   app.post(['/friends/request', '/api/friends/request'], (req, res) => {
     const auth = getAuth(req);
     if (!auth) return res.status(401).json({ error: "Unauthorized" });
@@ -898,13 +926,16 @@ async function startServer() {
       password_hash: ""
     };
 
-    const { to_username, to_user_id } = req.body || {};
-    const targetIdentifier = String(to_username || to_user_id || "").trim();
+    const { to_username, to_user_id, to_email } = req.body || {};
+    const targetIdentifier = String(to_username || to_email || to_user_id || "").trim().replace(/^@+/, "");
     if (!targetIdentifier) {
       return res.status(400).json({ error: "يرجى إدخال اسم المستخدم المطلوب" });
     }
 
-    const targetUser = findDbUser(targetIdentifier) || getOrCreateDbUser(targetIdentifier);
+    const targetUser = findDbUser(targetIdentifier);
+    if (!targetUser) {
+      return res.status(404).json({ error: "لا يوجد حساب مسجل بهذا الاسم أو المعرّف" });
+    }
 
     if (targetUser.id === senderUser.id || targetUser.username.toLowerCase() === senderUser.username.toLowerCase()) {
       return res.status(400).json({ error: "لا يمكنك إرسال طلب صداقة لنفسك" });

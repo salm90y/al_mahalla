@@ -31,6 +31,10 @@ export interface Env {
   GREEN_API_URL?: string;
   WHATSAPP_WEBHOOK_URL?: string;
   WHATSAPP_WEBHOOK_KEY?: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  FACEBOOK_APP_ID?: string;
+  FACEBOOK_APP_SECRET?: string;
 }
 
 // Durable Object for Real-Time Chat & Signaling
@@ -233,6 +237,280 @@ async function verifyJwt(token: string, secret: string): Promise<any | null> {
   }
 }
 
+async function signHmacText(text: string, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(text));
+  return btoa(String.fromCharCode(...new Uint8Array(sig)))
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function escapeHtml(raw: string): string {
+  return raw
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function htmlResponse(html: string, status = 200): Response {
+  return new Response(html, {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store"
+    }
+  });
+}
+
+function redirectToApp(deepLinkUrl: string): Response {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: deepLinkUrl,
+      "Cache-Control": "no-store"
+    }
+  });
+}
+
+function renderOAuthConfigErrorPage(providerLabel: string, callbackUrl: string, missingVars: string[]): Response {
+  const varsHtml = missingVars.map((v) => `<code>${escapeHtml(v)}</code>`).join(" ، ");
+  return htmlResponse(`<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>إعداد تسجيل ${escapeHtml(providerLabel)}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; background: #f0f6ff; color: #0f172a; margin: 0; padding: 24px; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .card { max-width: 460px; background: #fff; border: 1px solid #dbeafe; border-radius: 20px; padding: 24px; box-shadow: 0 10px 25px rgba(15,23,42,0.08); }
+    h1 { font-size: 20px; margin: 0 0 12px; color: #1e3a8a; }
+    p { font-size: 14px; line-height: 1.7; color: #334155; margin: 0 0 12px; }
+    code { background: #eff6ff; color: #1d4ed8; padding: 2px 6px; border-radius: 6px; font-size: 12px; direction: ltr; display: inline-block; word-break: break-all; }
+    .btn { display: inline-block; margin-top: 12px; background: #2563eb; color: #fff; text-decoration: none; padding: 10px 18px; border-radius: 12px; font-weight: bold; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>ربط ${escapeHtml(providerLabel)} الرسمي غير مكتمل على الخادم</h1>
+    <p>يلزم إضافة متغيرات الربط الرسمية في Cloudflare Worker Secrets لهذا المشروع:</p>
+    <p>${varsHtml}</p>
+    <p>رابط العودة المطلوب (Redirect URI):<br /><code>${escapeHtml(callbackUrl)}</code></p>
+    <a class="btn" href="almahala://auth/callback?error=${encodeURIComponent(`يرجى ضبط إعدادات ${providerLabel} على خادم Cloudflare أولاً`)}">العودة إلى التطبيق</a>
+  </div>
+</body>
+</html>`, 503);
+}
+
+async function createOAuthState(
+  provider: "google" | "facebook",
+  redirectUri: string,
+  env: Env,
+  jwtSecret: string
+): Promise<string> {
+  const nonce = crypto.randomUUID().replace(/-/g, "");
+  const ts = Date.now().toString();
+  const payload = `${nonce}.${provider}.${ts}`;
+  const sig = await signHmacText(payload, jwtSecret);
+  const state = `${payload}.${sig}`;
+  if (env.SESSIONS) {
+    try {
+      await env.SESSIONS.put(
+        `oauth_state:${state}`,
+        JSON.stringify({ provider, redirectUri, createdAt: Date.now() }),
+        { expirationTtl: 600 }
+      );
+    } catch (_) {}
+  }
+  return state;
+}
+
+async function verifyOAuthState(
+  state: string,
+  expectedProvider: "google" | "facebook",
+  env: Env,
+  jwtSecret: string
+): Promise<boolean> {
+  if (!state) return false;
+  const parts = state.split(".");
+  if (parts.length !== 4) return false;
+  const [nonce, provider, tsStr, sig] = parts;
+  if (!nonce || provider !== expectedProvider) return false;
+  const ts = Number(tsStr);
+  if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > 15 * 60 * 1000) return false;
+  const expectedSig = await signHmacText(`${nonce}.${provider}.${tsStr}`, jwtSecret);
+  if (sig !== expectedSig) return false;
+
+  if (env.SESSIONS) {
+    try {
+      const kvKey = `oauth_state:${state}`;
+      const stored = await env.SESSIONS.get(kvKey);
+      if (stored) {
+        await env.SESSIONS.delete(kvKey);
+        return true;
+      }
+    } catch (_) {}
+  }
+  return true;
+}
+
+async function buildUniqueUsername(db: any, rawBase: string, seedSource: string): Promise<string> {
+  const cleaned = rawBase
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 14) || "user";
+  const hashSeed = (await hashPassword(`AlMahallaHandle:${seedSource}`)).slice(0, 6);
+  const baseCandidate = cleaned.length >= 3 ? cleaned : `${cleaned}_${hashSeed.slice(0, 4)}`;
+
+  let finalUsername = baseCandidate;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const clash = await db.prepare("SELECT id FROM users WHERE LOWER(username) = ?").bind(finalUsername).first();
+    if (!clash) break;
+    if (attempt === 0) {
+      finalUsername = `${baseCandidate.slice(0, 11)}_${hashSeed.slice(0, 4)}`;
+    } else {
+      const randArr = new Uint16Array(1);
+      crypto.getRandomValues(randArr);
+      finalUsername = `${baseCandidate.slice(0, 10)}_${100 + (randArr[0] % 900)}`;
+    }
+  }
+  return finalUsername;
+}
+
+async function upsertVerifiedOAuthUser(
+  env: Env,
+  jwtSecret: string,
+  params: {
+    provider: "google" | "facebook";
+    sub: string;
+    email: string | null;
+    emailVerified: boolean;
+    displayName: string;
+    avatarUrl: string;
+  }
+) {
+  const now = Date.now();
+  const cleanEmail = params.email ? params.email.trim().toLowerCase() : null;
+  const cleanDisplayName = params.displayName.trim().slice(0, 60);
+  const cleanAvatar = params.avatarUrl.trim();
+
+  let existingUser: any = null;
+  if (cleanEmail) {
+    existingUser = await env.DB.prepare(
+      `SELECT id, username, display_name, email, phone, avatar_url, status, auth_provider, oauth_sub, created_at, last_seen
+       FROM users
+       WHERE ((auth_provider = ? AND oauth_sub = ?) OR LOWER(COALESCE(email, '')) = ?)
+         AND COALESCE(password_hash, '') != 'auto_gen'
+       LIMIT 1`
+    ).bind(params.provider, params.sub, cleanEmail).first<any>();
+  } else {
+    existingUser = await env.DB.prepare(
+      `SELECT id, username, display_name, email, phone, avatar_url, status, auth_provider, oauth_sub, created_at, last_seen
+       FROM users
+       WHERE auth_provider = ? AND oauth_sub = ?
+         AND COALESCE(password_hash, '') != 'auto_gen'
+       LIMIT 1`
+    ).bind(params.provider, params.sub).first<any>();
+  }
+
+  if (existingUser) {
+    const nextDisplayName = cleanDisplayName || existingUser.display_name || existingUser.username;
+    const nextAvatar = (existingUser.avatar_url && existingUser.avatar_url.includes("/media/avatars/"))
+      ? existingUser.avatar_url
+      : (cleanAvatar || existingUser.avatar_url || "");
+    const nextEmail = existingUser.email || cleanEmail;
+    await env.DB.prepare(
+      `UPDATE users
+       SET status = 'online',
+           last_seen = ?,
+           display_name = ?,
+           avatar_url = ?,
+           email = COALESCE(email, ?),
+           auth_provider = ?,
+           oauth_sub = ?,
+           email_verified = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(email_verified, 0) END
+       WHERE id = ?`
+    ).bind(now, nextDisplayName, nextAvatar, nextEmail, params.provider, params.sub, params.emailVerified ? 1 : 0, existingUser.id).run();
+
+    existingUser = {
+      ...existingUser,
+      display_name: nextDisplayName,
+      avatar_url: nextAvatar,
+      email: nextEmail || "",
+      auth_provider: params.provider,
+      oauth_sub: params.sub,
+      status: "online",
+      last_seen: now
+    };
+  } else {
+    const rawBase = cleanEmail
+      ? cleanEmail.split("@")[0]
+      : (cleanDisplayName || `${params.provider === "facebook" ? "fb" : "g"}_${params.sub.slice(-6)}`);
+    const finalUsername = await buildUniqueUsername(env.DB, rawBase, `${params.provider}:${params.sub}:${cleanEmail || ""}`);
+    const userId = crypto.randomUUID();
+    const passHash = await hashPassword(`AlMahallaOAuth:${params.provider}:${params.sub}:${userId}`);
+    const resolvedDisplayName = cleanDisplayName || finalUsername;
+
+    await env.DB.prepare(
+      `INSERT INTO users (id, username, display_name, email, phone, password_hash, avatar_url, status, auth_provider, oauth_sub, email_verified, created_at, last_seen, livekit_identity)
+       VALUES (?, ?, ?, ?, NULL, ?, ?, 'online', ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      userId,
+      finalUsername,
+      resolvedDisplayName,
+      cleanEmail,
+      passHash,
+      cleanAvatar,
+      params.provider,
+      params.sub,
+      params.emailVerified ? 1 : 0,
+      now,
+      now,
+      userId
+    ).run();
+
+    existingUser = {
+      id: userId,
+      username: finalUsername,
+      display_name: resolvedDisplayName,
+      email: cleanEmail || "",
+      avatar_url: cleanAvatar,
+      status: "online",
+      auth_provider: params.provider,
+      oauth_sub: params.sub,
+      created_at: now,
+      last_seen: now
+    };
+  }
+
+  const token = await signJwt({ id: existingUser.id, username: existingUser.username }, jwtSecret);
+  const expiry = now + (30 * 24 * 3600 * 1000);
+
+  await env.DB.prepare(
+    "INSERT OR REPLACE INTO sessions (token, user_id, expiry, created_at) VALUES (?, ?, ?, ?)"
+  ).bind(token, existingUser.id, expiry, now).run();
+
+  if (env.SESSIONS) {
+    await env.SESSIONS.put(
+      `session:${token}`,
+      JSON.stringify({ id: existingUser.id, username: existingUser.username }),
+      { expirationTtl: 30 * 86400 }
+    );
+  }
+
+  return { token, user: existingUser };
+}
+
 async function ensureAllTables(db: any) {
   if (!db) return;
   const queries = [
@@ -246,18 +524,25 @@ async function ensureAllTables(db: any) {
       avatar_url TEXT DEFAULT '',
       status TEXT DEFAULT 'offline',
       auth_provider TEXT DEFAULT 'local',
+      oauth_sub TEXT DEFAULT '',
+      email_verified INTEGER DEFAULT 0,
       created_at INTEGER NOT NULL,
       last_seen INTEGER NOT NULL,
       livekit_identity TEXT
     )`,
     `ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT ''`,
     `ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'local'`,
+    `ALTER TABLE users ADD COLUMN oauth_sub TEXT DEFAULT ''`,
+    `ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0`,
     `ALTER TABLE users ADD COLUMN email TEXT`,
     `ALTER TABLE users ADD COLUMN phone TEXT`,
     `ALTER TABLE users ADD COLUMN avatar_url TEXT DEFAULT ''`,
     `ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'offline'`,
     `ALTER TABLE users ADD COLUMN last_seen INTEGER`,
     `ALTER TABLE users ADD COLUMN livekit_identity TEXT`,
+    `DELETE FROM friend_requests WHERE from_user_id IN (SELECT id FROM users WHERE password_hash = 'auto_gen') OR to_user_id IN (SELECT id FROM users WHERE password_hash = 'auto_gen')`,
+    `DELETE FROM friendships WHERE user1_id IN (SELECT id FROM users WHERE password_hash = 'auto_gen') OR user2_id IN (SELECT id FROM users WHERE password_hash = 'auto_gen')`,
+    `DELETE FROM users WHERE password_hash = 'auto_gen'`,
     `CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -669,113 +954,192 @@ export default {
         return json({ success: true, user });
       }
 
-      // POST /auth/google or /api/auth/google - Direct Google Sign-In & Auto Username Linking
+      // GET /auth/google/start - Real Official Google OAuth 2.0 Redirect
+      if ((url.pathname === "/auth/google/start" || url.pathname === "/api/auth/google/start") && method === "GET") {
+        const googleClientId = (env.GOOGLE_CLIENT_ID || "").trim();
+        const googleClientSecret = (env.GOOGLE_CLIENT_SECRET || "").trim();
+        const redirectUri = `${url.origin}/auth/google/callback`;
+        if (!googleClientId || !googleClientSecret) {
+          return renderOAuthConfigErrorPage("Google", redirectUri, ["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]);
+        }
+
+        const state = await createOAuthState("google", redirectUri, env, jwtSecret);
+        const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+        authUrl.searchParams.set("client_id", googleClientId);
+        authUrl.searchParams.set("redirect_uri", redirectUri);
+        authUrl.searchParams.set("response_type", "code");
+        authUrl.searchParams.set("scope", "openid email profile");
+        authUrl.searchParams.set("access_type", "online");
+        authUrl.searchParams.set("prompt", "consent select_account");
+        authUrl.searchParams.set("state", state);
+        return Response.redirect(authUrl.toString(), 302);
+      }
+
+      // GET /auth/google/callback - Exchange code with Google OAuth, verify userinfo, store real user in D1 & deep-link to app
+      if ((url.pathname === "/auth/google/callback" || url.pathname === "/api/auth/google/callback") && method === "GET") {
+        const oauthError = url.searchParams.get("error");
+        if (oauthError) {
+          const msg = oauthError === "access_denied" ? "تم إلغاء منح أذونات Google" : `فشل تسجيل الدخول عبر Google: ${oauthError}`;
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent(msg)}`);
+        }
+        const code = (url.searchParams.get("code") || "").trim();
+        const state = (url.searchParams.get("state") || "").trim();
+        if (!code || !(await verifyOAuthState(state, "google", env, jwtSecret))) {
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent("انتهت صلاحية جلسة التحقق مع Google، يرجى المحاولة مرة أخرى")}`);
+        }
+
+        const googleClientId = (env.GOOGLE_CLIENT_ID || "").trim();
+        const googleClientSecret = (env.GOOGLE_CLIENT_SECRET || "").trim();
+        if (!googleClientId || !googleClientSecret) {
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent("إعدادات Google OAuth غير مكتملة على الخادم")}`);
+        }
+        if (!env.DB) {
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent("قاعدة البيانات غير متصلة")}`);
+        }
+
+        const redirectUri = `${url.origin}${url.pathname}`;
+        const tokenResp = await fetch("https://oauth2.googleapis.com/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            code,
+            client_id: googleClientId,
+            client_secret: googleClientSecret,
+            redirect_uri: redirectUri,
+            grant_type: "authorization_code"
+          }).toString()
+        });
+        const tokenJson = await tokenResp.json<any>().catch(() => ({}));
+        if (!tokenResp.ok || !tokenJson.access_token) {
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent("تعذر تبادل رمز التحقق مع Google")}`);
+        }
+
+        const userInfoResp = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+          headers: { Authorization: `Bearer ${tokenJson.access_token}` }
+        });
+        const userInfo = await userInfoResp.json<any>().catch(() => ({}));
+        if (!userInfoResp.ok || !userInfo.sub || !userInfo.email) {
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent("لم يتم استلام بيانات حساب Google الموثقة")}`);
+        }
+
+        await ensureAllTables(env.DB);
+        const { token } = await upsertVerifiedOAuthUser(env, jwtSecret, {
+          provider: "google",
+          sub: String(userInfo.sub),
+          email: String(userInfo.email),
+          emailVerified: userInfo.email_verified === true || userInfo.email_verified === "true",
+          displayName: String(userInfo.name || userInfo.given_name || String(userInfo.email).split("@")[0]),
+          avatarUrl: String(userInfo.picture || "")
+        });
+
+        return redirectToApp(`almahala://auth/callback?token=${encodeURIComponent(token)}`);
+      }
+
+      // GET /auth/facebook/start - Real Official Facebook Login OAuth 2.0 Redirect
+      if ((url.pathname === "/auth/facebook/start" || url.pathname === "/api/auth/facebook/start") && method === "GET") {
+        const fbAppId = (env.FACEBOOK_APP_ID || "").trim();
+        const fbAppSecret = (env.FACEBOOK_APP_SECRET || "").trim();
+        const redirectUri = `${url.origin}/auth/facebook/callback`;
+        if (!fbAppId || !fbAppSecret) {
+          return renderOAuthConfigErrorPage("Facebook", redirectUri, ["FACEBOOK_APP_ID", "FACEBOOK_APP_SECRET"]);
+        }
+
+        const state = await createOAuthState("facebook", redirectUri, env, jwtSecret);
+        const authUrl = new URL("https://www.facebook.com/v21.0/dialog/oauth");
+        authUrl.searchParams.set("client_id", fbAppId);
+        authUrl.searchParams.set("redirect_uri", redirectUri);
+        authUrl.searchParams.set("response_type", "code");
+        authUrl.searchParams.set("scope", "public_profile,email");
+        authUrl.searchParams.set("auth_type", "rerequest");
+        authUrl.searchParams.set("state", state);
+        return Response.redirect(authUrl.toString(), 302);
+      }
+
+      // GET /auth/facebook/callback - Exchange code with Facebook Graph API, verify user profile, store real user in D1 & deep-link to app
+      if ((url.pathname === "/auth/facebook/callback" || url.pathname === "/api/auth/facebook/callback") && method === "GET") {
+        const fbErr = url.searchParams.get("error");
+        if (fbErr) {
+          const desc = url.searchParams.get("error_description") || "تم إلغاء منح أذونات فيسبوك";
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent(desc)}`);
+        }
+        const code = (url.searchParams.get("code") || "").trim();
+        const state = (url.searchParams.get("state") || "").trim();
+        if (!code || !(await verifyOAuthState(state, "facebook", env, jwtSecret))) {
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent("انتهت صلاحية جلسة التحقق مع فيسبوك، يرجى المحاولة مرة أخرى")}`);
+        }
+
+        const fbAppId = (env.FACEBOOK_APP_ID || "").trim();
+        const fbAppSecret = (env.FACEBOOK_APP_SECRET || "").trim();
+        if (!fbAppId || !fbAppSecret) {
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent("إعدادات Facebook Login غير مكتملة على الخادم")}`);
+        }
+        if (!env.DB) {
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent("قاعدة البيانات غير متصلة")}`);
+        }
+
+        const redirectUri = `${url.origin}${url.pathname}`;
+        const tokenUrl = new URL("https://graph.facebook.com/v21.0/oauth/access_token");
+        tokenUrl.searchParams.set("client_id", fbAppId);
+        tokenUrl.searchParams.set("redirect_uri", redirectUri);
+        tokenUrl.searchParams.set("client_secret", fbAppSecret);
+        tokenUrl.searchParams.set("code", code);
+
+        const fbTokenResp = await fetch(tokenUrl.toString());
+        const fbTokenJson = await fbTokenResp.json<any>().catch(() => ({}));
+        if (!fbTokenResp.ok || !fbTokenJson.access_token) {
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent("تعذر التحقق من رمز الدخول مع فيسبوك")}`);
+        }
+
+        const meUrl = new URL("https://graph.facebook.com/v21.0/me");
+        meUrl.searchParams.set("fields", "id,name,email,picture.type(large)");
+        meUrl.searchParams.set("access_token", fbTokenJson.access_token);
+        const fbMeResp = await fetch(meUrl.toString());
+        const fbUser = await fbMeResp.json<any>().catch(() => ({}));
+        if (!fbMeResp.ok || !fbUser.id) {
+          return redirectToApp(`almahala://auth/callback?error=${encodeURIComponent("تعذر قراءة بيانات حساب فيسبوك الموثق")}`);
+        }
+
+        await ensureAllTables(env.DB);
+        const { token } = await upsertVerifiedOAuthUser(env, jwtSecret, {
+          provider: "facebook",
+          sub: String(fbUser.id),
+          email: fbUser.email ? String(fbUser.email) : null,
+          emailVerified: !!fbUser.email,
+          displayName: String(fbUser.name || `Facebook User`),
+          avatarUrl: String(fbUser.picture?.data?.url || "")
+        });
+
+        return redirectToApp(`almahala://auth/callback?token=${encodeURIComponent(token)}`);
+      }
+
+      // POST /auth/google or /api/auth/google - Strictly requires a genuine Google ID Token verified with Google
       if ((url.pathname === "/auth/google" || url.pathname === "/api/auth/google") && method === "POST") {
         if (!env.DB) return json({ error: "قاعدة البيانات غير متصلة بالسيرفر (Missing D1 Binding)" }, 500);
         await ensureAllTables(env.DB);
 
         const body = await request.json<any>().catch(() => ({}));
-        const emailLower = String(body.email || "").trim().toLowerCase();
-        if (!emailLower.includes("@") || !emailLower.includes(".") || emailLower.length < 5) {
-          return json({ error: "يرجى اختيار أو إدخال بريد جوجل صحيح" }, 400);
+        const idToken = String(body.id_token || body.idToken || "").trim();
+        if (!idToken) {
+          return json({ error: "يجب إتمام تسجيل الدخول الرسمي عبر صفحة Google في المتصفح لمنح الأذونات والتحقق من الحساب" }, 403);
         }
 
-        const requestedDisplayName = String(body.display_name || body.displayName || body.name || "").trim().slice(0, 60);
-        const requestedAvatar = String(body.avatar_url || body.avatarUrl || "").trim();
-        const now = Date.now();
-
-        let existingUser = await env.DB.prepare(
-          "SELECT id, username, display_name, email, phone, avatar_url, status, auth_provider, created_at, last_seen FROM users WHERE LOWER(email) = ?"
-        ).bind(emailLower).first<any>();
-
-        let isNewUser = false;
-
-        if (existingUser) {
-          const nextDisplayName = requestedDisplayName || existingUser.display_name || existingUser.username;
-          const nextAvatar = existingUser.avatar_url || requestedAvatar || "";
-          await env.DB.prepare(
-            "UPDATE users SET status = 'online', last_seen = ?, display_name = ?, avatar_url = ?, auth_provider = COALESCE(NULLIF(auth_provider, ''), 'google') WHERE id = ?"
-          ).bind(now, nextDisplayName, nextAvatar, existingUser.id).run();
-          existingUser = {
-            ...existingUser,
-            display_name: nextDisplayName,
-            avatar_url: nextAvatar,
-            status: "online",
-            last_seen: now,
-            auth_provider: existingUser.auth_provider || "google"
-          };
-        } else {
-          isNewUser = true;
-          const rawPrefix = emailLower
-            .split("@")[0]
-            .replace(/[^a-z0-9_]/g, "_")
-            .replace(/_+/g, "_")
-            .replace(/^_+|_+$/g, "")
-            .slice(0, 14) || "user";
-          const hashSeed = (await hashPassword(`AlMahallaGoogleUser:${emailLower}`)).slice(0, 6);
-          const baseCandidate = rawPrefix.length >= 3 ? rawPrefix : `${rawPrefix}_${hashSeed.slice(0, 4)}`;
-
-          let finalUsername = baseCandidate;
-          for (let attempt = 0; attempt < 8; attempt++) {
-            const clash = await env.DB.prepare("SELECT id FROM users WHERE LOWER(username) = ?").bind(finalUsername).first();
-            if (!clash) break;
-            if (attempt === 0) {
-              finalUsername = `${baseCandidate.slice(0, 11)}_${hashSeed.slice(0, 4)}`;
-            } else {
-              const randArr = new Uint16Array(1);
-              crypto.getRandomValues(randArr);
-              finalUsername = `${baseCandidate.slice(0, 10)}_${100 + (randArr[0] % 900)}`;
-            }
-          }
-
-          const userId = crypto.randomUUID();
-          const passHash = await hashPassword(`AlMahallaGoogleAuthV2:${emailLower}:${userId}`);
-          const displayName = requestedDisplayName || emailLower.split("@")[0].replace(/[._-]+/g, " ").trim() || finalUsername;
-
-          await env.DB.prepare(
-            "INSERT INTO users (id, username, display_name, email, phone, password_hash, avatar_url, status, auth_provider, created_at, last_seen, livekit_identity) VALUES (?, ?, ?, ?, NULL, ?, ?, 'online', 'google', ?, ?, ?)"
-          ).bind(userId, finalUsername, displayName, emailLower, passHash, requestedAvatar, now, now, userId).run();
-
-          existingUser = {
-            id: userId,
-            username: finalUsername,
-            display_name: displayName,
-            email: emailLower,
-            avatar_url: requestedAvatar,
-            status: "online",
-            auth_provider: "google",
-            created_at: now,
-            last_seen: now
-          };
+        const verifyResp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
+        const claims = await verifyResp.json<any>().catch(() => ({}));
+        const expectedClientId = (env.GOOGLE_CLIENT_ID || "").trim();
+        if (!verifyResp.ok || !claims.sub || !claims.email || (expectedClientId && claims.aud !== expectedClientId)) {
+          return json({ error: "رمز Google غير صالح أو غير موثق" }, 401);
         }
 
-        const token = await signJwt({ id: existingUser.id, username: existingUser.username }, jwtSecret);
-        const expiry = now + (30 * 24 * 3600 * 1000);
-
-        await env.DB.prepare(
-          "INSERT OR REPLACE INTO sessions (token, user_id, expiry, created_at) VALUES (?, ?, ?, ?)"
-        ).bind(token, existingUser.id, expiry, now).run();
-
-        if (env.SESSIONS) {
-          await env.SESSIONS.put(`session:${token}`, JSON.stringify({ id: existingUser.id, username: existingUser.username }), { expirationTtl: 30 * 86400 });
-        }
-
-        return json({
-          success: true,
-          is_new_user: isNewUser,
-          token,
-          user: {
-            id: existingUser.id,
-            username: existingUser.username,
-            display_name: existingUser.display_name || existingUser.username,
-            email: existingUser.email || emailLower,
-            avatar_url: existingUser.avatar_url || "",
-            status: "online",
-            auth_provider: existingUser.auth_provider || "google",
-            created_at: existingUser.created_at,
-            last_seen: now
-          }
+        const { token, user } = await upsertVerifiedOAuthUser(env, jwtSecret, {
+          provider: "google",
+          sub: String(claims.sub),
+          email: String(claims.email),
+          emailVerified: claims.email_verified === true || claims.email_verified === "true",
+          displayName: String(claims.name || String(claims.email).split("@")[0]),
+          avatarUrl: String(claims.picture || "")
         });
+
+        return json({ success: true, token, user });
       }
 
       // POST /auth/whatsapp/send-otp or /api/auth/whatsapp/send-otp
@@ -1174,7 +1538,13 @@ export default {
       if (url.pathname === "/api/admin/users" && method === "GET") {
         const auth = await getAuthUser();
         if (!auth || auth.username !== "ahmed") return json({ error: "Unauthorized" }, 403);
-        const users = await env.DB.prepare("SELECT id, username, email, phone, avatar_url, status, created_at, last_seen FROM users ORDER BY created_at DESC").all();
+        await ensureAllTables(env.DB);
+        const users = await env.DB.prepare(
+          `SELECT id, username, display_name, email, phone, avatar_url, status, auth_provider, oauth_sub, email_verified, created_at, last_seen
+           FROM users
+           WHERE COALESCE(password_hash, '') != 'auto_gen'
+           ORDER BY created_at DESC`
+        ).all();
         return json({ success: true, users: users.results });
       }
 
@@ -1273,7 +1643,7 @@ export default {
         return json({ success: true, is_online: false, status: "offline", last_seen: 0 });
       }
 
-      // GET /users/search or /api/users/search - Open directory search for all logged-in users to find & add friends
+      // GET /users/search or /api/users/search - Strict search for real registered users only
       if ((url.pathname === "/users/search" || url.pathname === "/api/users/search") && method === "GET") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "Unauthorized" }, 401);
@@ -1285,18 +1655,19 @@ export default {
           let rows: any;
           if (!rawQuery) {
             rows = await env.DB.prepare(
-              `SELECT id, username, display_name, avatar_url, status, last_seen, created_at
+              `SELECT id, username, display_name, avatar_url, auth_provider, status, last_seen, created_at
                FROM users
-               WHERE id != ?
+               WHERE id != ? AND COALESCE(password_hash, '') != 'auto_gen'
                ORDER BY status = 'online' DESC, last_seen DESC
                LIMIT 30`
             ).bind(auth.id).all();
           } else {
             const pattern = `%${rawQuery}%`;
             rows = await env.DB.prepare(
-              `SELECT id, username, display_name, avatar_url, status, last_seen, created_at
+              `SELECT id, username, display_name, avatar_url, auth_provider, status, last_seen, created_at
                FROM users
                WHERE id != ?
+                 AND COALESCE(password_hash, '') != 'auto_gen'
                  AND (
                    LOWER(username) LIKE ?
                    OR LOWER(COALESCE(display_name, '')) LIKE ?
@@ -1925,33 +2296,29 @@ export default {
         if (!auth) return json({ error: "Unauthorized" }, 401);
         if (env.DB) await ensureAllTables(env.DB);
 
-        const body = await request.json<any>();
+        const body = await request.json<any>().catch(() => ({}));
         const { to_user_id, to_username, to_email } = body;
+        const cleanId = String(to_user_id || "").trim().toLowerCase();
         const cleanTarget = String(to_username || to_email || "").trim().replace(/^@+/, "").toLowerCase();
+        const lookup = cleanId || cleanTarget;
 
-        let targetUserId = String(to_user_id || "").trim();
-        if (!targetUserId && cleanTarget) {
-          try {
-            const target = await env.DB.prepare(
-              "SELECT id FROM users WHERE LOWER(username) = ? OR LOWER(COALESCE(email, '')) = ? OR LOWER(id) = ?"
-            ).bind(cleanTarget, cleanTarget, cleanTarget).first<any>();
-            if (target) targetUserId = target.id;
-          } catch (e) {}
+        if (!lookup) {
+          return json({ error: "يرجى اختيار مستخدم مسجل لإرسال الطلب" }, 400);
         }
 
+        let targetUserId = "";
+        try {
+          const target = await env.DB.prepare(
+            `SELECT id FROM users
+             WHERE (LOWER(id) = ? OR LOWER(username) = ? OR LOWER(COALESCE(email, '')) = ?)
+               AND COALESCE(password_hash, '') != 'auto_gen'
+             LIMIT 1`
+          ).bind(lookup, cleanTarget || lookup, cleanTarget || lookup).first<any>();
+          if (target?.id) targetUserId = target.id;
+        } catch (e) {}
+
         if (!targetUserId) {
-          if (cleanTarget && !cleanTarget.includes("@")) {
-            targetUserId = `u_${cleanTarget}`;
-            try {
-              const nowUser = Date.now();
-              await env.DB.prepare(`
-                INSERT OR IGNORE INTO users (id, username, display_name, password_hash, avatar_url, status, created_at, last_seen)
-                VALUES (?, ?, ?, 'auto_gen', '', 'offline', ?, ?)
-              `).bind(targetUserId, cleanTarget, cleanTarget, nowUser, nowUser).run();
-            } catch (e) {}
-          } else {
-            return json({ error: "المستخدم غير موجود" }, 404);
-          }
+          return json({ error: "لا يوجد حساب مسجل بهذا الاسم أو المعرّف" }, 404);
         }
 
         if (targetUserId === auth.id) {
