@@ -2837,6 +2837,18 @@ var index_default = {
           appSign: "29c005b621138958b88eea14c91bd62b2189095171ce962ffe3680974493b41d"
         });
       }
+      if (url.pathname === "/privacy" && method === "GET") {
+        return new Response(
+          `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>\u0633\u064A\u0627\u0633\u0629 \u0627\u0644\u062E\u0635\u0648\u0635\u064A\u0629 - Al-Mahala</title><style>body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 20px;line-height:1.8;color:#111}h1{font-size:1.5rem}</style></head><body><h1>\u0633\u064A\u0627\u0633\u0629 \u0627\u0644\u062E\u0635\u0648\u0635\u064A\u0629 \u0644\u062A\u0637\u0628\u064A\u0642 Al-Mahala</h1><p>\u064A\u0633\u062A\u062E\u062F\u0645 \u062A\u0637\u0628\u064A\u0642 Al-Mahala \u062A\u0633\u062C\u064A\u0644 \u0627\u0644\u062F\u062E\u0648\u0644 \u0639\u0628\u0631 Google \u0648 Facebook \u0641\u0642\u0637 \u0644\u0644\u062A\u062D\u0642\u0642 \u0645\u0646 \u0647\u0648\u064A\u0629 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0648\u0625\u0646\u0634\u0627\u0621 \u062D\u0633\u0627\u0628\u0647 \u0627\u0644\u0634\u062E\u0635\u064A \u062F\u0627\u062E\u0644 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 (\u0627\u0644\u0627\u0633\u0645\u060C \u0627\u0644\u0628\u0631\u064A\u062F \u0627\u0644\u0625\u0644\u0643\u062A\u0631\u0648\u0646\u064A\u060C \u0648\u0635\u0648\u0631\u0629 \u0627\u0644\u0645\u0644\u0641 \u0627\u0644\u0634\u062E\u0635\u064A). \u0644\u0627 \u0646\u0642\u0648\u0645 \u0628\u0628\u064A\u0639 \u0628\u064A\u0627\u0646\u0627\u062A\u0643 \u0623\u0648 \u0645\u0634\u0627\u0631\u0643\u062A\u0647\u0627 \u0645\u0639 \u0623\u064A \u0637\u0631\u0641 \u062B\u0627\u0644\u062B.</p><p>\u064A\u0645\u0643\u0646\u0643 \u0637\u0644\u0628 \u062D\u0630\u0641 \u062D\u0633\u0627\u0628\u0643 \u0648\u0628\u064A\u0627\u0646\u0627\u062A\u0643 \u0641\u064A \u0623\u064A \u0648\u0642\u062A \u0639\u0628\u0631 \u0627\u0644\u062A\u0648\u0627\u0635\u0644 \u0645\u0639: ahmed1986y5@gmail.com</p></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders } }
+        );
+      }
+      if (url.pathname === "/terms" && method === "GET") {
+        return new Response(
+          `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>\u0634\u0631\u0648\u0637 \u0627\u0644\u0627\u0633\u062A\u062E\u062F\u0627\u0645 - Al-Mahala</title><style>body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 20px;line-height:1.8;color:#111}h1{font-size:1.5rem}</style></head><body><h1>\u0634\u0631\u0648\u0637 \u0627\u0644\u0627\u0633\u062A\u062E\u062F\u0627\u0645 \u0644\u062A\u0637\u0628\u064A\u0642 Al-Mahala</h1><p>\u0628\u0627\u0633\u062A\u062E\u062F\u0627\u0645\u0643 \u0644\u062A\u0637\u0628\u064A\u0642 Al-Mahala \u0641\u0625\u0646\u0643 \u062A\u0648\u0627\u0641\u0642 \u0639\u0644\u0649 \u0627\u0633\u062A\u062E\u062F\u0627\u0645 \u062E\u062F\u0645\u0627\u062A \u0627\u0644\u062F\u0631\u062F\u0634\u0629 \u0648\u0627\u0644\u062A\u0648\u0627\u0635\u0644 \u0628\u0634\u0643\u0644 \u0645\u062D\u062A\u0631\u0645 \u0648\u0642\u0627\u0646\u0648\u0646\u064A \u0648\u0639\u062F\u0645 \u0625\u0633\u0627\u0621\u0629 \u0627\u0633\u062A\u062E\u062F\u0627\u0645 \u0627\u0644\u062D\u0633\u0627\u0628\u0627\u062A.</p><p>\u0644\u0644\u0627\u0633\u062A\u0641\u0633\u0627\u0631: ahmed1986y5@gmail.com</p></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders } }
+        );
+      }
       if (url.pathname === "/" || url.pathname === "/health") {
         return json({
           status: "ok",

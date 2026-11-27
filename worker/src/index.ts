@@ -3226,6 +3226,20 @@ export default {
         });
       }
 
+      if (url.pathname === "/privacy" && method === "GET") {
+        return new Response(
+          `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>سياسة الخصوصية - Al-Mahala</title><style>body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 20px;line-height:1.8;color:#111}h1{font-size:1.5rem}</style></head><body><h1>سياسة الخصوصية لتطبيق Al-Mahala</h1><p>يستخدم تطبيق Al-Mahala تسجيل الدخول عبر Google و Facebook فقط للتحقق من هوية المستخدم وإنشاء حسابه الشخصي داخل التطبيق (الاسم، البريد الإلكتروني، وصورة الملف الشخصي). لا نقوم ببيع بياناتك أو مشاركتها مع أي طرف ثالث.</p><p>يمكنك طلب حذف حسابك وبياناتك في أي وقت عبر التواصل مع: ahmed1986y5@gmail.com</p></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders } }
+        );
+      }
+
+      if (url.pathname === "/terms" && method === "GET") {
+        return new Response(
+          `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>شروط الاستخدام - Al-Mahala</title><style>body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 20px;line-height:1.8;color:#111}h1{font-size:1.5rem}</style></head><body><h1>شروط الاستخدام لتطبيق Al-Mahala</h1><p>باستخدامك لتطبيق Al-Mahala فإنك توافق على استخدام خدمات الدردشة والتواصل بشكل محترم وقانوني وعدم إساءة استخدام الحسابات.</p><p>للاستفسار: ahmed1986y5@gmail.com</p></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", ...corsHeaders } }
+        );
+      }
+
       if (url.pathname === "/" || url.pathname === "/health") {
         return json({ 
           status: "ok", 
