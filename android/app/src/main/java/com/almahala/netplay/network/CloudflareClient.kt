@@ -327,13 +327,15 @@ val token = json.optString("token")
 val userObj = json.optJSONObject("user")
                             if (token.isNotEmpty() && userObj != null) {
                                 saveAuthToken(context, token)
+                                val uname = userObj.optString("username")
+                                val dName = userObj.optString("display_name", "").ifBlank { uname }
                                 val profile = com.almahala.netplay.UserProfile(
                                     id = userObj.optString("id"),
-                                    username = userObj.optString("username"),
-                                    isAdmin = userObj.optString("username").lowercase() == "ahmed",
+                                    username = uname,
+                                    isAdmin = uname.lowercase() == "ahmed",
                                     createdAt = userObj.optLong("created_at", System.currentTimeMillis()),
-                                    fullName = userObj.optString("username"),
-                                    role = if (userObj.optString("username").lowercase() == "ahmed") "مشرف" else "عضو",
+                                    fullName = dName,
+                                    role = if (uname.lowercase() == "ahmed") "مشرف" else "عضو",
                                     avatar = normalizeAvatarUrl(context, userObj.optString("avatar_url", "")),
                                     email = userObj.optString("email", "")
                                 )
@@ -423,13 +425,15 @@ val token = json.optString("token")
 val userObj = json.optJSONObject("user")
                             if (token.isNotEmpty() && userObj != null) {
                                 saveAuthToken(context, token)
-val profile = com.almahala.netplay.UserProfile(
+                                val uname = userObj.optString("username")
+                                val dName = userObj.optString("display_name", "").ifBlank { uname }
+                                val profile = com.almahala.netplay.UserProfile(
                                     id = userObj.optString("id"),
-                                    username = userObj.optString("username"),
-                                    isAdmin = userObj.optString("username").lowercase() == "ahmed",
+                                    username = uname,
+                                    isAdmin = uname.lowercase() == "ahmed",
                                     createdAt = userObj.optLong("created_at", System.currentTimeMillis()),
-                                    fullName = userObj.optString("username"),
-                                    role = if (userObj.optString("username").lowercase() == "ahmed") "مشرف" else "عضو",
+                                    fullName = dName,
+                                    role = if (uname.lowercase() == "ahmed") "مشرف" else "عضو",
                                     avatar = normalizeAvatarUrl(context, userObj.optString("avatar_url", "")),
                                     email = userObj.optString("email", "")
                                 )
@@ -460,6 +464,19 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
         return digest.joinToString("") { "%02x".format(it) }.take(32)
     }
 
+    fun previewGoogleUsername(googleEmail: String): String {
+        val emailLower = googleEmail.trim().lowercase()
+        if (!emailLower.contains("@")) return ""
+        val emailHashFull = deriveSocialSecret("AlMahallaGoogleAuthV1", emailLower)
+        val rawPrefix = emailLower.substringBefore("@")
+            .replace(Regex("[^a-z0-9_]"), "_")
+            .replace(Regex("_+"), "_")
+            .trim('_')
+            .ifEmpty { "user" }
+            .take(14)
+        return if (rawPrefix.length >= 3) rawPrefix else "${rawPrefix}_${emailHashFull.take(4)}"
+    }
+
     fun loginOrRegisterWithGoogle(
         context: Context,
         googleEmail: String,
@@ -467,24 +484,91 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
         callback: (Boolean, String?, com.almahala.netplay.UserProfile?) -> Unit
     ) {
         val emailLower = googleEmail.trim().lowercase()
-        if (!emailLower.contains("@") || emailLower.length < 5) {
+        if (!emailLower.contains("@") || !emailLower.contains(".") || emailLower.length < 5) {
             mainHandler.post { callback(false, "بريد جوجل غير صالح", null) }
             return
         }
 
+        val friendlyName = displayName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: emailLower.substringBefore("@").replace(Regex("[._-]+"), " ").trim().ifEmpty { emailLower.substringBefore("@") }
+
+        val url = "${getBaseUrl(context)}/auth/google"
+        val bodyObj = JSONObject().apply {
+            put("email", emailLower)
+            put("display_name", friendlyName)
+        }
+        val requestBody = bodyObj.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
+        val request = Request.Builder().url(url).post(requestBody).build()
+
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                mainHandler.post {
+                    loginOrRegisterWithGoogleLegacy(context, emailLower, friendlyName, callback)
+                }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    val respStr = resp.body?.string() ?: "{}"
+                    if (resp.code == 404) {
+                        mainHandler.post {
+                            loginOrRegisterWithGoogleLegacy(context, emailLower, friendlyName, callback)
+                        }
+                        return
+                    }
+                    if (resp.isSuccessful) {
+                        try {
+                            val json = JSONObject(respStr)
+                            val token = json.optString("token")
+                            val userObj = json.optJSONObject("user")
+                            if (token.isNotEmpty() && userObj != null) {
+                                val uname = userObj.optString("username")
+                                val dName = userObj.optString("display_name", "").ifBlank { friendlyName }
+                                saveAuthToken(context, token)
+                                val profile = com.almahala.netplay.UserProfile(
+                                    id = userObj.optString("id"),
+                                    username = uname,
+                                    isAdmin = uname.lowercase() == "ahmed",
+                                    createdAt = userObj.optLong("created_at", System.currentTimeMillis()),
+                                    fullName = dName,
+                                    role = if (uname.lowercase() == "ahmed") "مشرف" else "عضو",
+                                    avatar = normalizeAvatarUrl(context, userObj.optString("avatar_url", "")),
+                                    email = userObj.optString("email", emailLower).ifBlank { emailLower }
+                                )
+                                getPrefs(context).edit().putString("google_user_$emailLower", uname).apply()
+                                cacheUserAvatar(context, profile.id, profile.username, profile.avatarUrl)
+                                UserManager.saveAuthenticatedSession(context, profile, token)
+                                UserManager.addUser(context, profile)
+                                com.almahala.netplay.AppSettingsManager.setUserName(context, dName)
+                                mainHandler.post { callback(true, null, profile) }
+                                return
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    var errMsg = "تعذر تسجيل الدخول بحساب جوجل"
+                    try {
+                        val errJson = JSONObject(respStr)
+                        val rawErr = errJson.optString("error", "")
+                        if (rawErr.isNotBlank()) errMsg = rawErr
+                    } catch (_: Exception) {}
+                    mainHandler.post { callback(false, errMsg, null) }
+                }
+            }
+        })
+    }
+
+    private fun loginOrRegisterWithGoogleLegacy(
+        context: Context,
+        emailLower: String,
+        friendlyName: String,
+        callback: (Boolean, String?, com.almahala.netplay.UserProfile?) -> Unit
+    ) {
         val prefs = getPrefs(context)
         val mappingKey = "google_user_$emailLower"
         val emailHashFull = deriveSocialSecret("AlMahallaGoogleAuthV1", emailLower)
-        val rawPrefix = emailLower.substringBefore("@")
-            .replace(Regex("[^a-z0-9_]"), "_")
-            .trim('_')
-            .ifEmpty { "user" }
-            .take(14)
-        val baseUsername = if (rawPrefix.length >= 3) rawPrefix else "${rawPrefix}_${emailHashFull.take(4)}"
+        val baseUsername = previewGoogleUsername(emailLower)
         val resolvedUsername = prefs.getString(mappingKey, null)?.takeIf { it.length >= 3 } ?: baseUsername
         val secretPass = emailHashFull
-        val friendlyName = displayName?.trim()?.takeIf { it.isNotEmpty() }
-            ?: emailLower.substringBefore("@")
 
         fun applyFriendlyProfile(profile: com.almahala.netplay.UserProfile, activeUsername: String) {
             prefs.edit().putString(mappingKey, activeUsername).apply()
@@ -496,6 +580,7 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
             if (token.isNotEmpty()) {
                 UserManager.saveAuthenticatedSession(context, updated, token)
             }
+            UserManager.addUser(context, updated)
             com.almahala.netplay.AppSettingsManager.setUserName(context, friendlyName)
             callback(true, null, updated)
         }
@@ -638,10 +723,14 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
 
         val currentBase = getBaseUrl(context)
         performRequestWhatsAppOtp(context, currentBase, digits, displayName) { ok, phoneOut, expSec, senderHint, err ->
-            if (!ok && currentBase == DEFAULT_BASE_URL && (err?.contains("404") == true || err?.contains("تعذر الاتصال") == true)) {
+            if (!ok && currentBase == DEFAULT_BASE_URL && err?.contains("تعذر الاتصال بالخادم") == true) {
                 performRequestWhatsAppOtp(context, FALLBACK_BASE_URL, digits, displayName) { fOk, fPhone, fExp, fSender, fErr ->
-                    if (fOk) setBaseUrl(context, FALLBACK_BASE_URL)
-                    callback(fOk, fPhone, fExp, fSender, fErr)
+                    if (fOk) {
+                        setBaseUrl(context, FALLBACK_BASE_URL)
+                        callback(fOk, fPhone, fExp, fSender, fErr)
+                    } else {
+                        callback(false, "", 0, "", err)
+                    }
                 }
             } else {
                 callback(ok, phoneOut, expSec, senderHint, err)
@@ -684,10 +773,21 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
                             mainHandler.post { callback(true, cleanPhone, expiresIn, senderNum, null) }
                             return
                         }
-                        val errMsg = json.optString("error", "تعذر إرسال رمز واتساب (${resp.code})")
+                        val rawErr = json.optString("error", "")
+                        val errMsg = when {
+                            resp.code == 404 ->
+                                "خدمة إرسال رمز واتساب غير منشورة على السيرفر بعد (404). يرجى نشر تحديث Worker على Cloudflare."
+                            rawErr.isNotBlank() && !rawErr.equals("Not Found", ignoreCase = true) -> rawErr
+                            else -> "تعذر إرسال رمز واتساب (${resp.code})"
+                        }
                         mainHandler.post { callback(false, "", 0, "", errMsg) }
                     } catch (_: Exception) {
-                        mainHandler.post { callback(false, "", 0, "", "تعذر معالجة استجابة الخادم (${resp.code})") }
+                        val errMsg = if (resp.code == 404) {
+                            "خدمة إرسال رمز واتساب غير منشورة على السيرفر بعد (404). يرجى نشر تحديث Worker على Cloudflare."
+                        } else {
+                            "تعذر معالجة استجابة الخادم (${resp.code})"
+                        }
+                        mainHandler.post { callback(false, "", 0, "", errMsg) }
                     }
                 }
             }
@@ -705,7 +805,7 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
         callback: (Boolean, String?, com.almahala.netplay.UserProfile?) -> Unit
     ) {
         val digits = WhatsAppOtpManager.normalizePhoneDigits(rawPhone)
-        val cleanOtp = otpCode.trim().replace(Regex("[^0-9]"), "")
+        val cleanOtp = WhatsAppOtpManager.normalizeAsciiDigits(otpCode).trim().replace(Regex("[^0-9]"), "")
         if (digits.length < 8 || cleanOtp.length != 6) {
             mainHandler.post { callback(false, "يرجى إدخال رمز التحقق المكون من 6 أرقام", null) }
             return
@@ -713,10 +813,14 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
 
         val currentBase = getBaseUrl(context)
         performVerifyWhatsAppOtp(context, currentBase, digits, cleanOtp, displayName) { ok, err, user ->
-            if (!ok && currentBase == DEFAULT_BASE_URL && (err?.contains("404") == true || err?.contains("تعذر الاتصال") == true)) {
+            if (!ok && currentBase == DEFAULT_BASE_URL && err?.contains("تعذر الاتصال بالسيرفر") == true) {
                 performVerifyWhatsAppOtp(context, FALLBACK_BASE_URL, digits, cleanOtp, displayName) { fOk, fErr, fUser ->
-                    if (fOk) setBaseUrl(context, FALLBACK_BASE_URL)
-                    callback(fOk, fErr, fUser)
+                    if (fOk) {
+                        setBaseUrl(context, FALLBACK_BASE_URL)
+                        callback(fOk, fErr, fUser)
+                    } else {
+                        callback(false, err, null)
+                    }
                 }
             } else {
                 callback(ok, err, user)
@@ -783,10 +887,17 @@ var errorMsg = if (resp.code == 404) "المسار غير موجود (404)" else
                             return
                         }
                     }
-                    var errMsg = "رمز التحقق غير صحيح أو منتهي الصلاحية"
+                    var errMsg = if (resp.code == 404) {
+                        "خدمة التحقق عبر واتساب غير منشورة على السيرفر بعد (404)."
+                    } else {
+                        "رمز التحقق غير صحيح أو منتهي الصلاحية"
+                    }
                     try {
                         val errJson = JSONObject(respStr)
-                        if (errJson.has("error")) errMsg = errJson.getString("error")
+                        val rawErr = errJson.optString("error", "")
+                        if (rawErr.isNotBlank() && !rawErr.equals("Not Found", ignoreCase = true)) {
+                            errMsg = rawErr
+                        }
                     } catch (_: Exception) {}
                     mainHandler.post { callback(false, errMsg, null) }
                 }
@@ -820,14 +931,16 @@ override fun onResponse(call: Call, response: Response) {
                             val json = JSONObject(resp.body?.string() ?: "{}")
 val userObj = json.optJSONObject("user")
                             if (userObj != null) {
+                                val uname = userObj.optString("username")
+                                val dName = userObj.optString("display_name", "").ifBlank { uname }
                                 val profile = com.almahala.netplay.UserProfile(
                                     id = userObj.optString("id"),
-                                    username = userObj.optString("username"),
-                                    isAdmin = userObj.optString("username").lowercase() == "ahmed",
+                                    username = uname,
+                                    isAdmin = uname.lowercase() == "ahmed",
                                     createdAt = userObj.optLong("created_at", System.currentTimeMillis()),
-                                    fullName = userObj.optString("username"),
-                                    role = if (userObj.optString("username").lowercase() == "ahmed") "مشرف" else "عضو",
-                                    avatar = userObj.optString("avatar_url", ""),
+                                    fullName = dName,
+                                    role = if (uname.lowercase() == "ahmed") "مشرف" else "عضو",
+                                    avatar = normalizeAvatarUrl(context, userObj.optString("avatar_url", "")),
                                     email = userObj.optString("email", "")
                                 )
                                 UserManager.saveAuthenticatedSession(context, profile, token)
@@ -981,10 +1094,16 @@ override fun onResponse(call: Call, response: Response) {
     }
 fun sendFriendRequest(context: Context, username: String, callback: (Boolean, String) -> Unit) {
         val token = getAuthToken(context)
-val url = "${getBaseUrl(context)}/friends/request"
-        val bodyObj = JSONObject().apply { put("to_username", username) }
-val body = bodyObj.toString().toRequestBody("application/json".toMediaTypeOrNull())
-val request = Request.Builder()
+        val cleanTarget = username.trim().removePrefix("@")
+        val url = "${getBaseUrl(context)}/friends/request"
+        val bodyObj = JSONObject().apply {
+            put("to_username", cleanTarget)
+            if (cleanTarget.contains("@")) {
+                put("to_email", cleanTarget.lowercase())
+            }
+        }
+        val body = bodyObj.toString().toRequestBody("application/json".toMediaTypeOrNull())
+        val request = Request.Builder()
             .url(url)
             .post(body)
             .apply { if (token != null) addHeader("Authorization", "Bearer $token") }
@@ -992,7 +1111,7 @@ val request = Request.Builder()
         httpClient.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 // Local fallback simulation
-addLocalOutgoingRequest(context, username)
+                addLocalOutgoingRequest(context, cleanTarget)
                 mainHandler.post { callback(true, "تم إرسال طلب الصداقة محلياً") }
             }
 override fun onResponse(call: Call, response: Response) {
@@ -1701,6 +1820,122 @@ val array = JSONArray()
         }
         getPrefs(context).edit().putString("local_outgoing_reqs", array.toString()).apply()
     }
+fun searchUsers(context: Context, query: String, callback: (Boolean, List<com.almahala.netplay.UserProfile>?) -> Unit) {
+        val token = getAuthToken(context)
+        if (token.isNullOrEmpty()) {
+            mainHandler.post { callback(false, null) }
+            return
+        }
+        val cleanQ = query.trim().removePrefix("@")
+        val url = "${getBaseUrl(context)}/users/search?q=${Uri.encode(cleanQ)}"
+        val request = Request.Builder().url(url).addHeader("Authorization", "Bearer $token").get().build()
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                mainHandler.post { callback(false, null) }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    if (resp.isSuccessful) {
+                        try {
+                            val json = JSONObject(resp.body?.string() ?: "{}")
+                            val usersArray = json.optJSONArray("users")
+                            val list = mutableListOf<com.almahala.netplay.UserProfile>()
+                            if (usersArray != null) {
+                                for (i in 0 until usersArray.length()) {
+                                    val u = usersArray.getJSONObject(i)
+                                    val uname = u.optString("username")
+                                    val dName = u.optString("display_name", "").ifBlank { uname }
+                                    val normAvatar = normalizeAvatarUrl(context, u.optString("avatar_url"))
+                                    list.add(
+                                        com.almahala.netplay.UserProfile(
+                                            id = u.optString("id"),
+                                            username = uname,
+                                            isAdmin = uname.lowercase() == "ahmed",
+                                            createdAt = u.optLong("created_at"),
+                                            fullName = dName,
+                                            role = if (uname.lowercase() == "ahmed") "مشرف" else "عضو",
+                                            avatar = normAvatar,
+                                            email = u.optString("email", "")
+                                        )
+                                    )
+                                }
+                            }
+                            if (cleanQ.isBlank() && list.isNotEmpty()) {
+                                UserManager.saveAllUsers(context, list)
+                            }
+                            mainHandler.post { callback(true, list) }
+                            return
+                        } catch (_: Exception) {}
+                    }
+                    if (resp.code == 404) {
+                        getAllUsers(context, callback)
+                        return
+                    }
+                    mainHandler.post { callback(false, null) }
+                }
+            }
+        })
+    }
+
+    fun updateMyProfile(
+        context: Context,
+        displayName: String,
+        avatarUrl: String? = null,
+        callback: (Boolean, com.almahala.netplay.UserProfile?) -> Unit
+    ) {
+        val token = getAuthToken(context)
+        if (token.isNullOrEmpty()) {
+            mainHandler.post { callback(false, null) }
+            return
+        }
+        val url = "${getBaseUrl(context)}/users/profile"
+        val bodyObj = JSONObject().apply {
+            if (displayName.isNotBlank()) put("display_name", displayName.trim())
+            if (avatarUrl != null) put("avatar_url", avatarUrl.trim())
+        }
+        val body = bodyObj.toString().toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
+        val request = Request.Builder()
+            .url(url)
+            .post(body)
+            .addHeader("Authorization", "Bearer $token")
+            .build()
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                mainHandler.post { callback(false, null) }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    if (resp.isSuccessful) {
+                        try {
+                            val json = JSONObject(resp.body?.string() ?: "{}")
+                            val u = json.optJSONObject("user")
+                            if (u != null) {
+                                val uname = u.optString("username")
+                                val dName = u.optString("display_name", "").ifBlank { displayName.ifBlank { uname } }
+                                val profile = com.almahala.netplay.UserProfile(
+                                    id = u.optString("id"),
+                                    username = uname,
+                                    isAdmin = uname.lowercase() == "ahmed",
+                                    createdAt = u.optLong("created_at"),
+                                    fullName = dName,
+                                    role = if (uname.lowercase() == "ahmed") "مشرف" else "عضو",
+                                    avatar = normalizeAvatarUrl(context, u.optString("avatar_url")),
+                                    email = u.optString("email", "")
+                                )
+                                UserManager.saveAuthenticatedSession(context, profile, token)
+                                mainHandler.post { callback(true, profile) }
+                                return
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    mainHandler.post { callback(false, null) }
+                }
+            }
+        })
+    }
+
 fun getAllUsers(context: Context, callback: (Boolean, List<com.almahala.netplay.UserProfile>?) -> Unit) {
         val token = getAuthToken(context)
         if (token.isNullOrEmpty()) {
@@ -1723,14 +1958,16 @@ val list = mutableListOf<com.almahala.netplay.UserProfile>()
                             if (usersArray != null) {
                                 for (i in 0 until usersArray.length()) {
                                     val u = usersArray.getJSONObject(i)
+                                    val uname = u.optString("username")
+                                    val dName = u.optString("display_name", "").ifBlank { uname }
                                     list.add(com.almahala.netplay.UserProfile(
                                         id = u.optString("id"),
-                                        username = u.optString("username"),
-                                        isAdmin = u.optString("username").lowercase() == "ahmed",
+                                        username = uname,
+                                        isAdmin = uname.lowercase() == "ahmed",
                                         createdAt = u.optLong("created_at"),
-                                        fullName = u.optString("username"),
-                                        role = if (u.optString("username").lowercase() == "ahmed") "مشرف" else "عضو",
-                                        avatar = u.optString("avatar_url"),
+                                        fullName = dName,
+                                        role = if (uname.lowercase() == "ahmed") "مشرف" else "عضو",
+                                        avatar = normalizeAvatarUrl(context, u.optString("avatar_url")),
                                         email = u.optString("email")
                                     ))
                                 }
@@ -2384,6 +2621,50 @@ override fun onResponse(call: Call, response: Response) {
                     }
                     val cached = getCachedUserAvatar(context, userId, username)
                     mainHandler.post { callback(cached, false) }
+                }
+            }
+        })
+    }
+
+    fun fetchUserPublicProfile(
+        context: Context,
+        userQuery: String,
+        callback: (username: String, displayName: String, avatarUrl: String, isOnline: Boolean) -> Unit
+    ) {
+        val queryKey = userQuery.trim()
+        if (queryKey.isBlank()) {
+            mainHandler.post { callback("", "", "", false) }
+            return
+        }
+        val token = getAuthToken(context)
+        val url = "${getBaseUrl(context)}/users/status?userId=${Uri.encode(queryKey)}"
+        val reqBuilder = Request.Builder().url(url)
+        if (!token.isNullOrEmpty()) {
+            reqBuilder.addHeader("Authorization", "Bearer $token")
+        }
+
+        httpClient.newCall(reqBuilder.build()).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                mainHandler.post { callback("", "", "", false) }
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    if (resp.isSuccessful) {
+                        try {
+                            val json = JSONObject(resp.body?.string() ?: "{}")
+                            val uname = json.optString("username", "")
+                            val dName = json.optString("display_name", "").ifBlank { uname }
+                            val normAvatar = normalizeAvatarUrl(context, json.optString("avatar_url"))
+                            val isOnline = json.optBoolean("is_online", false)
+                            if (normAvatar.isNotBlank()) {
+                                cacheUserAvatar(context, json.optString("user_id", queryKey), uname, normAvatar)
+                            }
+                            mainHandler.post { callback(uname, dName, normAvatar, isOnline) }
+                            return
+                        } catch (_: Exception) {}
+                    }
+                    mainHandler.post { callback("", "", "", false) }
                 }
             }
         })

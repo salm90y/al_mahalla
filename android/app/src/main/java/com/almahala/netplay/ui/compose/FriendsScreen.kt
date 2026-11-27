@@ -1,5 +1,8 @@
 package com.almahala.netplay.ui.compose
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -22,9 +25,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -93,7 +98,7 @@ fun FriendsScreen(
     }
 
     LaunchedEffect(Unit) {
-        CloudflareClient.getAllUsers(context) { success, list ->
+        CloudflareClient.searchUsers(context, "") { success, list ->
             if (success && list != null && list.isNotEmpty()) {
                 allUsers = list
             } else {
@@ -111,7 +116,7 @@ fun FriendsScreen(
     }
 
     fun performAccountSearch(query: String) {
-        val q = query.trim()
+        val q = query.trim().removePrefix("@")
         if (q.isBlank()) {
             searchResults = emptyList()
             isSearching = false
@@ -119,13 +124,47 @@ fun FriendsScreen(
         }
         isSearching = true
         val filtered = allUsers.filter { user ->
-            (user.id != currentUserId && user.username != currentUsername) &&
+            (user.id != currentUserId && !user.username.equals(currentUsername, ignoreCase = true)) &&
             (user.username.contains(q, ignoreCase = true) ||
              user.fullName.contains(q, ignoreCase = true) ||
+             user.email.contains(q, ignoreCase = true) ||
              user.id.contains(q, ignoreCase = true))
         }
         searchResults = filtered
-        isSearching = false
+    }
+
+    LaunchedEffect(accountSearchText) {
+        val q = accountSearchText.trim().removePrefix("@")
+        if (q.isBlank()) {
+            searchResults = emptyList()
+            isSearching = false
+            return@LaunchedEffect
+        }
+        isSearching = true
+        delay(220)
+        CloudflareClient.searchUsers(context, q) { success, remoteList ->
+            val currentQueryNow = accountSearchText.trim().removePrefix("@")
+            if (currentQueryNow.isBlank()) {
+                searchResults = emptyList()
+                isSearching = false
+                return@searchUsers
+            }
+            val merged = if (success && remoteList != null) {
+                remoteList.filter { user ->
+                    user.id != currentUserId && !user.username.equals(currentUsername, ignoreCase = true)
+                }
+            } else {
+                allUsers.filter { user ->
+                    (user.id != currentUserId && !user.username.equals(currentUsername, ignoreCase = true)) &&
+                    (user.username.contains(currentQueryNow, ignoreCase = true) ||
+                     user.fullName.contains(currentQueryNow, ignoreCase = true) ||
+                     user.email.contains(currentQueryNow, ignoreCase = true) ||
+                     user.id.contains(currentQueryNow, ignoreCase = true))
+                }
+            }
+            searchResults = merged
+            isSearching = false
+        }
     }
 
     val filteredFriends = friendsList.filter {
@@ -218,6 +257,76 @@ fun FriendsScreen(
                 }
             }
 
+            // 2.5 My Shareable @username Strip so friends can add this user easily
+            if (currentUsername.isNotBlank()) {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFFEFF6FF),
+                    border = BorderStroke(1.dp, Color(0xFFBFDBFE)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 4.dp)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "معرّفك لإضافة الأصدقاء",
+                                fontSize = 11.sp,
+                                fontFamily = TajawalFontFamily,
+                                color = Color(0xFF64748B)
+                            )
+                            Text(
+                                text = "@$currentUsername",
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF1D4ED8),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                clipboard?.setPrimaryClip(ClipData.newPlainText("username", currentUsername))
+                                Toast.makeText(context, "تم نسخ @$currentUsername", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCopy,
+                                contentDescription = "نسخ اليوزر",
+                                tint = Color(0xFF2563EB),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        IconButton(
+                            onClick = {
+                                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_TEXT, "أضفني على تطبيق المحلة عبر اليوزر: @$currentUsername")
+                                }
+                                try {
+                                    context.startActivity(Intent.createChooser(shareIntent, "مشاركة حسابك"))
+                                } catch (_: Exception) {}
+                            },
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Share,
+                                contentDescription = "مشاركة",
+                                tint = Color(0xFF2563EB),
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             // 3. Sleek, thin, elegant search field placed directly below tabs & requests
             Box(
                 modifier = Modifier
@@ -268,7 +377,7 @@ fun FriendsScreen(
                         decorationBox = { innerTextField ->
                             if (accountSearchText.isEmpty()) {
                                 Text(
-                                    text = "بحث عن حساب أو صديق (الاسم أو اليوزر)...",
+                                    text = "ابحث عن صديق بالاسم أو @اليوزر أو البريد...",
                                     fontSize = 13.sp,
                                     fontFamily = TajawalFontFamily,
                                     color = Color(0xFF94A3B8)
@@ -343,6 +452,10 @@ fun FriendsScreen(
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             items(searchResults, key = { it.id }) { user ->
+                                val isAlreadyFriend = friendsList.any {
+                                    it.id.equals(user.id, ignoreCase = true) ||
+                                    it.username.equals(user.username, ignoreCase = true)
+                                }
                                 val isRequestSent = sentRequests.contains(user.id) || sentRequests.contains(user.username)
                                 val displayName = user.fullName.ifEmpty { user.username }
                                 val encodedName = try {
@@ -421,8 +534,22 @@ fun FriendsScreen(
 
                                     Spacer(modifier = Modifier.width(6.dp))
 
-                                    // Small icon-only button without text to send friend request
-                                    if (isRequestSent) {
+                                    if (isAlreadyFriend) {
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = Color(0xFFECFDF5),
+                                            border = BorderStroke(1.dp, Color(0xFFA7F3D0))
+                                        ) {
+                                            Text(
+                                                text = "صديق",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = Color(0xFF059669),
+                                                fontFamily = TajawalFontFamily,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
+                                    } else if (isRequestSent) {
                                         Box(
                                             modifier = Modifier
                                                 .size(32.dp)
@@ -440,7 +567,8 @@ fun FriendsScreen(
                                         IconButton(
                                             onClick = {
                                                 sentRequests = sentRequests + user.id + user.username
-                                                CloudflareClient.sendFriendRequest(context, user.username) { success, msg ->
+                                                val targetHandle = user.username.ifBlank { user.id }
+                                                CloudflareClient.sendFriendRequest(context, targetHandle) { success, msg ->
                                                     Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                                     loadData()
                                                 }

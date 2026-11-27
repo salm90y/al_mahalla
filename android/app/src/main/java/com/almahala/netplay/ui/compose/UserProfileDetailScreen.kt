@@ -77,11 +77,24 @@ fun UserProfileDetailScreen(
     }
     val isFriend = matchedFriend != null
 
-    // Real-Time Online / Offline Presence Tracking
+    // Real-Time Online / Offline Presence & Public Handle Tracking
     var isUserOnline by remember { mutableStateOf(matchedFriend?.isOnline ?: false) }
+    var resolvedUsername by remember {
+        mutableStateOf(
+            matchedFriend?.username?.takeIf { it.isNotBlank() }
+                ?: userName.trim().replace(" ", "_").lowercase()
+        )
+    }
+    var resolvedDisplayName by remember { mutableStateOf(userName.ifBlank { "مستخدم" }) }
+
     LaunchedEffect(userId, userName) {
         val targetQuery = userId.ifBlank { userName }
         if (targetQuery.isNotBlank()) {
+            CloudflareClient.fetchUserPublicProfile(context, targetQuery) { uname, dName, _, online ->
+                if (uname.isNotBlank()) resolvedUsername = uname
+                if (dName.isNotBlank()) resolvedDisplayName = dName
+                if (online) isUserOnline = true
+            }
             while (isActive) {
                 CloudflareClient.checkUserOnline(context, targetQuery) { online: Boolean ->
                     isUserOnline = online
@@ -437,7 +450,7 @@ fun UserProfileDetailScreen(
 
                         // User Name
                         Text(
-                            text = userName,
+                            text = resolvedDisplayName,
                             fontSize = 22.sp,
                             fontWeight = FontWeight.Bold,
                             fontFamily = TajawalFontFamily,
@@ -449,7 +462,7 @@ fun UserProfileDetailScreen(
 
                         // User Tag / Status: Never show "متصل" when offline! Show "غير متصل" in Red when offline!
                         Text(
-                            text = if (isUserOnline) "@${userName.replace(" ", "_").lowercase()} • متصل الآن" else "@${userName.replace(" ", "_").lowercase()} • غير متصل",
+                            text = if (isUserOnline) "@$resolvedUsername • متصل الآن" else "@$resolvedUsername • غير متصل",
                             fontSize = 13.sp,
                             fontFamily = TajawalFontFamily,
                             fontWeight = FontWeight.Medium,
@@ -623,7 +636,8 @@ fun UserProfileDetailScreen(
                             Button(
                                 onClick = {
                                     isLoadingAction = true
-                                    CloudflareClient.sendFriendRequest(context, userName) { success, msg ->
+                                    val targetHandle = resolvedUsername.ifBlank { userId.ifBlank { userName } }
+                                    CloudflareClient.sendFriendRequest(context, targetHandle) { success, msg ->
                                         isLoadingAction = false
                                         Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                                         reloadData()
@@ -702,8 +716,8 @@ fun UserProfileDetailScreen(
                         ProfileInfoItem(
                             icon = Icons.Outlined.AccountCircle,
                             title = "اسم المستخدم",
-                            value = "@${userName.replace(" ", "_").lowercase()}",
-                            onCopy = { copyToClipboard("اسم المستخدم", userName) }
+                            value = "@$resolvedUsername",
+                            onCopy = { copyToClipboard("اسم المستخدم", resolvedUsername) }
                         )
 
                         Divider(color = Color(0xFFF1F5F9), thickness = 1.dp)

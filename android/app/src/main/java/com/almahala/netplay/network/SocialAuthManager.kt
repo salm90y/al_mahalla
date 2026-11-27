@@ -72,8 +72,20 @@ object WhatsAppOtpManager {
     private fun prefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    fun normalizeAsciiDigits(input: String): String {
+        val sb = StringBuilder(input.length)
+        for (ch in input) {
+            when (ch) {
+                in '٠'..'٩' -> sb.append(('0'.code + (ch.code - '٠'.code)).toChar())
+                in '۰'..'۹' -> sb.append(('0'.code + (ch.code - '۰'.code)).toChar())
+                else -> sb.append(ch)
+            }
+        }
+        return sb.toString()
+    }
+
     fun normalizePhoneDigits(rawPhone: String): String {
-        var digits = rawPhone.trim().replace(Regex("[^0-9+]"), "")
+        var digits = normalizeAsciiDigits(rawPhone).trim().replace(Regex("[^0-9+]"), "")
         if (digits.startsWith("00")) {
             digits = digits.substring(2)
         }

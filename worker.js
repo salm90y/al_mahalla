@@ -172,15 +172,25 @@ async function ensureAllTables(db) {
     `CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
+      display_name TEXT DEFAULT '',
       email TEXT,
       phone TEXT,
       password_hash TEXT NOT NULL,
       avatar_url TEXT DEFAULT '',
       status TEXT DEFAULT 'offline',
+      auth_provider TEXT DEFAULT 'local',
       created_at INTEGER NOT NULL,
       last_seen INTEGER NOT NULL,
       livekit_identity TEXT
     )`,
+    `ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT ''`,
+    `ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'local'`,
+    `ALTER TABLE users ADD COLUMN email TEXT`,
+    `ALTER TABLE users ADD COLUMN phone TEXT`,
+    `ALTER TABLE users ADD COLUMN avatar_url TEXT DEFAULT ''`,
+    `ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'offline'`,
+    `ALTER TABLE users ADD COLUMN last_seen INTEGER`,
+    `ALTER TABLE users ADD COLUMN livekit_identity TEXT`,
     `CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -367,7 +377,7 @@ var index_default = {
       if ((url.pathname === "/auth/register" || url.pathname === "/api/auth/register") && method === "POST") {
         if (!env.DB) return json({ error: "\u0642\u0627\u0639\u062F\u0629 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A \u063A\u064A\u0631 \u0645\u062A\u0635\u0644\u0629 \u0628\u0627\u0644\u0633\u064A\u0631\u0641\u0631 (Missing D1 Binding)" }, 500);
         const body = await request.json();
-        const { username, password, email, phone, avatar_url } = body;
+        const { username, password, email, phone, avatar_url, display_name } = body;
         if (!username || !password) {
           return json({ error: "\u0627\u0633\u0645 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0648\u0643\u0644\u0645\u0629 \u0627\u0644\u0645\u0631\u0648\u0631 \u0645\u0637\u0644\u0648\u0628\u0627\u0646" }, 400);
         }
@@ -375,58 +385,18 @@ var index_default = {
         if (cleanUsername.length < 3) {
           return json({ error: "\u0627\u0633\u0645 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u064A\u062C\u0628 \u0623\u0646 \u064A\u062A\u0643\u0648\u0646 \u0645\u0646 3 \u0623\u062D\u0631\u0641 \u0639\u0644\u0649 \u0627\u0644\u0623\u0642\u0644" }, 400);
         }
+        const cleanDisplayName = String(display_name || cleanUsername).trim().slice(0, 60) || cleanUsername;
         try {
-          await env.DB.prepare(`
-            CREATE TABLE IF NOT EXISTS users (
-              id TEXT PRIMARY KEY,
-              username TEXT UNIQUE NOT NULL,
-              email TEXT,
-              phone TEXT,
-              password_hash TEXT NOT NULL,
-              avatar_url TEXT,
-              status TEXT DEFAULT 'offline',
-              created_at INTEGER NOT NULL,
-              last_seen INTEGER NOT NULL,
-              livekit_identity TEXT
-            )
-          `).run();
-          await env.DB.prepare(`
-            CREATE TABLE IF NOT EXISTS sessions (
-              token TEXT PRIMARY KEY,
-              user_id TEXT NOT NULL,
-              expiry INTEGER NOT NULL,
-              created_at INTEGER NOT NULL
-            )
-          `).run();
-          try {
-            await env.DB.prepare("ALTER TABLE users ADD COLUMN email TEXT").run();
-          } catch (e) {
-          }
-          try {
-            await env.DB.prepare("ALTER TABLE users ADD COLUMN avatar_url TEXT").run();
-          } catch (e) {
-          }
-          try {
-            await env.DB.prepare("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'offline'").run();
-          } catch (e) {
-          }
-          try {
-            await env.DB.prepare("ALTER TABLE users ADD COLUMN last_seen INTEGER").run();
-          } catch (e) {
-          }
-          try {
-            await env.DB.prepare("ALTER TABLE users ADD COLUMN livekit_identity TEXT").run();
-          } catch (e) {
-          }
+          await ensureAllTables(env.DB);
         } catch (err) {
           return json({ error: "\u062E\u0637\u0623 \u0641\u064A \u062A\u0647\u064A\u0626\u0629 \u0642\u0627\u0639\u062F\u0629 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A: " + err.message }, 500);
         }
-        const existing = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(cleanUsername).first();
+        const existing = await env.DB.prepare("SELECT id FROM users WHERE LOWER(username) = ?").bind(cleanUsername).first();
         if (existing) {
           return json({ error: "\u0627\u0633\u0645 \u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u0645\u0633\u062C\u0644 \u0645\u0633\u0628\u0642\u0627\u064B\u060C \u0627\u062E\u062A\u0631 \u0627\u0633\u0645\u0627\u064B \u0622\u062E\u0631" }, 409);
         }
         if (email) {
-          const existingEmail = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+          const existingEmail = await env.DB.prepare("SELECT id FROM users WHERE LOWER(email) = ?").bind(String(email).trim().toLowerCase()).first();
           if (existingEmail) {
             return json({ error: "\u0627\u0644\u0628\u0631\u064A\u062F \u0627\u0644\u0625\u0644\u0643\u062A\u0631\u0648\u0646\u064A \u0645\u0633\u062C\u0644 \u0645\u0633\u0628\u0642\u0627\u064B" }, 409);
           }
@@ -435,8 +405,8 @@ var index_default = {
         const passHash = await hashPassword(password);
         const now = Date.now();
         await env.DB.prepare(
-          "INSERT INTO users (id, username, email, phone, password_hash, avatar_url, status, created_at, last_seen, livekit_identity) VALUES (?, ?, ?, ?, ?, ?, 'online', ?, ?, ?)"
-        ).bind(userId, cleanUsername, email || null, phone || null, passHash, avatar_url || "", now, now, userId).run();
+          "INSERT INTO users (id, username, display_name, email, phone, password_hash, avatar_url, status, auth_provider, created_at, last_seen, livekit_identity) VALUES (?, ?, ?, ?, ?, ?, ?, 'online', 'local', ?, ?, ?)"
+        ).bind(userId, cleanUsername, cleanDisplayName, email ? String(email).trim().toLowerCase() : null, phone || null, passHash, avatar_url || "", now, now, userId).run();
         const token = await signJwt({ id: userId, username: cleanUsername }, jwtSecret);
         const expiry = now + 30 * 24 * 3600 * 1e3;
         await env.DB.prepare(
@@ -451,9 +421,11 @@ var index_default = {
           user: {
             id: userId,
             username: cleanUsername,
-            email: email || "",
+            display_name: cleanDisplayName,
+            email: email ? String(email).trim().toLowerCase() : "",
             avatar_url: avatar_url || "",
             status: "online",
+            auth_provider: "local",
             created_at: now,
             last_seen: now
           }
@@ -550,7 +522,7 @@ var index_default = {
           });
         }
         const user = await env.DB.prepare(
-          "SELECT id, username, email, phone, password_hash, avatar_url, status, created_at, last_seen FROM users WHERE username = ?"
+          "SELECT id, username, display_name, email, phone, password_hash, avatar_url, status, auth_provider, created_at, last_seen FROM users WHERE username = ?"
         ).bind(lookupKey).first();
         if (!user) {
           return json({ error: "\u0628\u064A\u0627\u0646\u0627\u062A \u0627\u0644\u062F\u062E\u0648\u0644 \u063A\u064A\u0631 \u0635\u062D\u064A\u062D\u0629" }, 401);
@@ -575,9 +547,11 @@ var index_default = {
           user: {
             id: user.id,
             username: user.username,
+            display_name: user.display_name || user.username,
             email: user.email || "",
             avatar_url: user.avatar_url || "",
             status: "online",
+            auth_provider: user.auth_provider || "local",
             created_at: user.created_at,
             last_seen: now
           }
@@ -586,11 +560,101 @@ var index_default = {
       if ((url.pathname === "/auth/me" || url.pathname === "/api/auth/me") && method === "GET") {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "\u063A\u064A\u0631 \u0645\u0635\u0631\u062D - \u0627\u0644\u062C\u0644\u0633\u0629 \u0645\u0646\u062A\u0647\u064A\u0629" }, 401);
+        await ensureAllTables(env.DB);
         const user = await env.DB.prepare(
-          "SELECT id, username, email, phone, avatar_url, status, last_seen, created_at FROM users WHERE id = ?"
+          "SELECT id, username, display_name, email, phone, avatar_url, status, auth_provider, last_seen, created_at FROM users WHERE id = ?"
         ).bind(auth.id).first();
         if (!user) return json({ error: "\u0627\u0644\u0645\u0633\u062A\u062E\u062F\u0645 \u063A\u064A\u0631 \u0645\u0648\u062C\u0648\u062F" }, 401);
         return json({ success: true, user });
+      }
+      if ((url.pathname === "/auth/google" || url.pathname === "/api/auth/google") && method === "POST") {
+        if (!env.DB) return json({ error: "\u0642\u0627\u0639\u062F\u0629 \u0627\u0644\u0628\u064A\u0627\u0646\u0627\u062A \u063A\u064A\u0631 \u0645\u062A\u0635\u0644\u0629 \u0628\u0627\u0644\u0633\u064A\u0631\u0641\u0631 (Missing D1 Binding)" }, 500);
+        await ensureAllTables(env.DB);
+        const body = await request.json().catch(() => ({}));
+        const emailLower = String(body.email || "").trim().toLowerCase();
+        if (!emailLower.includes("@") || !emailLower.includes(".") || emailLower.length < 5) {
+          return json({ error: "\u064A\u0631\u062C\u0649 \u0627\u062E\u062A\u064A\u0627\u0631 \u0623\u0648 \u0625\u062F\u062E\u0627\u0644 \u0628\u0631\u064A\u062F \u062C\u0648\u062C\u0644 \u0635\u062D\u064A\u062D" }, 400);
+        }
+        const requestedDisplayName = String(body.display_name || body.displayName || body.name || "").trim().slice(0, 60);
+        const requestedAvatar = String(body.avatar_url || body.avatarUrl || "").trim();
+        const now = Date.now();
+        let existingUser = await env.DB.prepare(
+          "SELECT id, username, display_name, email, phone, avatar_url, status, auth_provider, created_at, last_seen FROM users WHERE LOWER(email) = ?"
+        ).bind(emailLower).first();
+        let isNewUser = false;
+        if (existingUser) {
+          const nextDisplayName = requestedDisplayName || existingUser.display_name || existingUser.username;
+          const nextAvatar = existingUser.avatar_url || requestedAvatar || "";
+          await env.DB.prepare(
+            "UPDATE users SET status = 'online', last_seen = ?, display_name = ?, avatar_url = ?, auth_provider = COALESCE(NULLIF(auth_provider, ''), 'google') WHERE id = ?"
+          ).bind(now, nextDisplayName, nextAvatar, existingUser.id).run();
+          existingUser = {
+            ...existingUser,
+            display_name: nextDisplayName,
+            avatar_url: nextAvatar,
+            status: "online",
+            last_seen: now,
+            auth_provider: existingUser.auth_provider || "google"
+          };
+        } else {
+          isNewUser = true;
+          const rawPrefix = emailLower.split("@")[0].replace(/[^a-z0-9_]/g, "_").replace(/_+/g, "_").replace(/^_+|_+$/g, "").slice(0, 14) || "user";
+          const hashSeed = (await hashPassword(`AlMahallaGoogleUser:${emailLower}`)).slice(0, 6);
+          const baseCandidate = rawPrefix.length >= 3 ? rawPrefix : `${rawPrefix}_${hashSeed.slice(0, 4)}`;
+          let finalUsername = baseCandidate;
+          for (let attempt = 0; attempt < 8; attempt++) {
+            const clash = await env.DB.prepare("SELECT id FROM users WHERE LOWER(username) = ?").bind(finalUsername).first();
+            if (!clash) break;
+            if (attempt === 0) {
+              finalUsername = `${baseCandidate.slice(0, 11)}_${hashSeed.slice(0, 4)}`;
+            } else {
+              const randArr = new Uint16Array(1);
+              crypto.getRandomValues(randArr);
+              finalUsername = `${baseCandidate.slice(0, 10)}_${100 + randArr[0] % 900}`;
+            }
+          }
+          const userId = crypto.randomUUID();
+          const passHash = await hashPassword(`AlMahallaGoogleAuthV2:${emailLower}:${userId}`);
+          const displayName = requestedDisplayName || emailLower.split("@")[0].replace(/[._-]+/g, " ").trim() || finalUsername;
+          await env.DB.prepare(
+            "INSERT INTO users (id, username, display_name, email, phone, password_hash, avatar_url, status, auth_provider, created_at, last_seen, livekit_identity) VALUES (?, ?, ?, ?, NULL, ?, ?, 'online', 'google', ?, ?, ?)"
+          ).bind(userId, finalUsername, displayName, emailLower, passHash, requestedAvatar, now, now, userId).run();
+          existingUser = {
+            id: userId,
+            username: finalUsername,
+            display_name: displayName,
+            email: emailLower,
+            avatar_url: requestedAvatar,
+            status: "online",
+            auth_provider: "google",
+            created_at: now,
+            last_seen: now
+          };
+        }
+        const token = await signJwt({ id: existingUser.id, username: existingUser.username }, jwtSecret);
+        const expiry = now + 30 * 24 * 3600 * 1e3;
+        await env.DB.prepare(
+          "INSERT OR REPLACE INTO sessions (token, user_id, expiry, created_at) VALUES (?, ?, ?, ?)"
+        ).bind(token, existingUser.id, expiry, now).run();
+        if (env.SESSIONS) {
+          await env.SESSIONS.put(`session:${token}`, JSON.stringify({ id: existingUser.id, username: existingUser.username }), { expirationTtl: 30 * 86400 });
+        }
+        return json({
+          success: true,
+          is_new_user: isNewUser,
+          token,
+          user: {
+            id: existingUser.id,
+            username: existingUser.username,
+            display_name: existingUser.display_name || existingUser.username,
+            email: existingUser.email || emailLower,
+            avatar_url: existingUser.avatar_url || "",
+            status: "online",
+            auth_provider: existingUser.auth_provider || "google",
+            created_at: existingUser.created_at,
+            last_seen: now
+          }
+        });
       }
       if ((url.pathname === "/auth/whatsapp/send-otp" || url.pathname === "/api/auth/whatsapp/send-otp") && method === "POST") {
         const body = await request.json().catch(() => ({}));
@@ -603,9 +667,22 @@ var index_default = {
         }
         const waPhoneNumberId = (env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
         const waAccessToken = (env.WHATSAPP_ACCESS_TOKEN || "").trim();
-        if (!waPhoneNumberId || !waAccessToken) {
+        const ultraInstance = (env.ULTRAMSG_INSTANCE_ID || "").trim();
+        const ultraToken = (env.ULTRAMSG_TOKEN || "").trim();
+        const twilioSid = (env.TWILIO_ACCOUNT_SID || "").trim();
+        const twilioToken = (env.TWILIO_AUTH_TOKEN || "").trim();
+        const twilioFrom = (env.TWILIO_WHATSAPP_FROM || "").trim();
+        const greenId = (env.GREEN_API_INSTANCE_ID || "").trim();
+        const greenToken = (env.GREEN_API_TOKEN || "").trim();
+        const webhookUrl = (env.WHATSAPP_WEBHOOK_URL || "").trim();
+        const hasMeta = !!(waPhoneNumberId && waAccessToken);
+        const hasUltraMsg = !!(ultraInstance && ultraToken);
+        const hasTwilio = !!(twilioSid && twilioToken && twilioFrom);
+        const hasGreenApi = !!(greenId && greenToken);
+        const hasWebhook = !!webhookUrl;
+        if (!hasMeta && !hasUltraMsg && !hasTwilio && !hasGreenApi && !hasWebhook) {
           return json({
-            error: "\u062E\u062F\u0645\u0629 \u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0626\u0644 \u0648\u0627\u062A\u0633\u0627\u0628 \u063A\u064A\u0631 \u0645\u0641\u0639\u0651\u0644\u0629 \u0639\u0644\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 \u0628\u0639\u062F. \u064A\u0631\u062C\u0649 \u0625\u0636\u0627\u0641\u0629 WHATSAPP_PHONE_NUMBER_ID \u0648 WHATSAPP_ACCESS_TOKEN \u0641\u064A \u0625\u0639\u062F\u0627\u062F\u0627\u062A Cloudflare Worker."
+            error: "\u0628\u0648\u0627\u0628\u0629 \u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0626\u0644 \u0648\u0627\u062A\u0633\u0627\u0628 \u063A\u064A\u0631 \u0645\u0641\u0639\u0651\u0644\u0629 \u0639\u0644\u0649 \u0627\u0644\u062E\u0627\u062F\u0645 \u0628\u0639\u062F. \u064A\u0631\u062C\u0649 \u0625\u0636\u0627\u0641\u0629 \u0628\u064A\u0627\u0646\u0627\u062A \u0623\u062D\u062F \u0627\u0644\u0645\u0632\u0648\u062F\u064A\u0646 \u0641\u064A Cloudflare Worker Secrets (\u0645\u062B\u0644 Meta WhatsApp API \u0623\u0648 UltraMsg \u0623\u0648 Twilio \u0623\u0648 Webhook)."
           }, 503);
         }
         if (env.DB) {
@@ -631,58 +708,143 @@ var index_default = {
         const otpCode = String(1e5 + randArr[0] % 9e5);
         const expiresAt = now + 3 * 60 * 1e3;
         const otpHash = await hashPassword(`AlMahalla_WA_OTP_v1:${digits}:${otpCode}:${jwtSecret}`);
-        const graphUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(waPhoneNumberId)}/messages`;
-        const templateName = (env.WHATSAPP_OTP_TEMPLATE || "").trim();
-        const waPayload = templateName ? {
-          messaging_product: "whatsapp",
-          recipient_type: "individual",
-          to: digits,
-          type: "template",
-          template: {
-            name: templateName,
-            language: { code: "ar" },
-            components: [
-              {
-                type: "body",
-                parameters: [{ type: "text", text: otpCode }]
-              }
-            ]
-          }
-        } : {
-          messaging_product: "whatsapp",
-          recipient_type: "individual",
-          to: digits,
-          type: "text",
-          text: {
-            preview_url: false,
-            body: `\u{1F510} \u0631\u0645\u0632 \u0627\u0644\u062A\u062D\u0642\u0642 \u0627\u0644\u062E\u0627\u0635 \u0628\u0643 \u0644\u062A\u0637\u0628\u064A\u0642 \u0627\u0644\u0645\u062D\u0644\u0629 \u0647\u0648: ${otpCode}
+        const otpMessageText = `\u{1F510} \u0631\u0645\u0632 \u0627\u0644\u062A\u062D\u0642\u0642 \u0627\u0644\u062E\u0627\u0635 \u0628\u0643 \u0644\u062A\u0637\u0628\u064A\u0642 \u0627\u0644\u0645\u062D\u0644\u0629 \u0647\u0648: ${otpCode}
 \u23F3 \u0635\u0644\u0627\u062D\u064A\u0629 \u0627\u0644\u0631\u0645\u0632: 3 \u062F\u0642\u0627\u0626\u0642 \u0641\u0642\u0637.
-\u0644\u0627 \u062A\u0634\u0627\u0631\u0643 \u0647\u0630\u0627 \u0627\u0644\u0631\u0645\u0632 \u0645\u0639 \u0623\u064A \u0634\u062E\u0635.`
-          }
-        };
-        let waRes;
+\u0644\u0627 \u062A\u0634\u0627\u0631\u0643 \u0647\u0630\u0627 \u0627\u0644\u0631\u0645\u0632 \u0645\u0639 \u0623\u064A \u0634\u062E\u0635.`;
         try {
-          waRes = await fetch(graphUrl, {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${waAccessToken}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify(waPayload)
-          });
+          if (hasMeta) {
+            const graphUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(waPhoneNumberId)}/messages`;
+            const templateName = (env.WHATSAPP_OTP_TEMPLATE || "").trim();
+            const templateLang = (env.WHATSAPP_OTP_TEMPLATE_LANG || "ar").trim();
+            const waPayload = templateName ? {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to: digits,
+              type: "template",
+              template: {
+                name: templateName,
+                language: { code: templateLang },
+                components: [
+                  {
+                    type: "body",
+                    parameters: [{ type: "text", text: otpCode }]
+                  }
+                ]
+              }
+            } : {
+              messaging_product: "whatsapp",
+              recipient_type: "individual",
+              to: digits,
+              type: "text",
+              text: {
+                preview_url: false,
+                body: otpMessageText
+              }
+            };
+            const waRes = await fetch(graphUrl, {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${waAccessToken}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify(waPayload)
+            });
+            if (!waRes.ok) {
+              let errDetail = "";
+              let errCode = 0;
+              try {
+                const errBody = await waRes.json();
+                errDetail = errBody?.error?.message || "";
+                errCode = Number(errBody?.error?.code || 0);
+              } catch (_) {
+              }
+              if (errCode === 131047 || errCode === 131026) {
+                return json({
+                  error: "Meta WhatsApp \u064A\u062A\u0637\u0644\u0628 \u0636\u0628\u0637 \u0642\u0627\u0644\u0628 \u0631\u0633\u0627\u0626\u0644 \u0645\u0639\u062A\u0645\u062F (WHATSAPP_OTP_TEMPLATE) \u0644\u0625\u0631\u0633\u0627\u0644 \u0627\u0644\u0643\u0648\u062F \u0644\u0623\u0648\u0644 \u0645\u0631\u0629."
+                }, 502);
+              }
+              return json({
+                error: errDetail ? `\u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062A\u0633\u0627\u0628 (${waRes.status}): ${errDetail}` : `\u062A\u0639\u0630\u0631 \u0625\u0631\u0633\u0627\u0644 \u0631\u0645\u0632 \u0648\u0627\u062A\u0633\u0627\u0628 \u0645\u0646 \u0631\u0642\u0645 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 (\u0631\u0645\u0632 \u0627\u0644\u062E\u0637\u0623 ${waRes.status}).`
+              }, 502);
+            }
+          } else if (hasUltraMsg) {
+            const ultraUrl = `https://api.ultramsg.com/${encodeURIComponent(ultraInstance)}/messages/chat`;
+            const form = new URLSearchParams();
+            form.set("token", ultraToken);
+            form.set("to", `+${digits}`);
+            form.set("body", otpMessageText);
+            const uRes = await fetch(ultraUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: form.toString()
+            });
+            const uJson = await uRes.json().catch(() => ({}));
+            if (!uRes.ok || uJson?.error || uJson?.sent && String(uJson.sent) !== "true") {
+              return json({
+                error: `\u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062A\u0633\u0627\u0628 \u0639\u0628\u0631 UltraMsg: ${uJson?.error || uRes.status}`
+              }, 502);
+            }
+          } else if (hasTwilio) {
+            const twUrl = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(twilioSid)}/Messages.json`;
+            const fromNormalized = twilioFrom.startsWith("whatsapp:") ? twilioFrom : `whatsapp:${twilioFrom}`;
+            const form = new URLSearchParams();
+            form.set("From", fromNormalized);
+            form.set("To", `whatsapp:+${digits}`);
+            form.set("Body", otpMessageText);
+            const basicAuth = btoa(`${twilioSid}:${twilioToken}`);
+            const twRes = await fetch(twUrl, {
+              method: "POST",
+              headers: {
+                "Authorization": `Basic ${basicAuth}`,
+                "Content-Type": "application/x-www-form-urlencoded"
+              },
+              body: form.toString()
+            });
+            if (!twRes.ok) {
+              const twErr = await twRes.json().catch(() => ({}));
+              return json({
+                error: `\u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062A\u0633\u0627\u0628 \u0639\u0628\u0631 Twilio (${twRes.status}): ${twErr?.message || "\u062E\u0637\u0623 \u0645\u0632\u0648\u062F"}`
+              }, 502);
+            }
+          } else if (hasGreenApi) {
+            const gBase = (env.GREEN_API_URL || "https://api.green-api.com").trim().replace(/\/+$/, "");
+            const gUrl = `${gBase}/waInstance${encodeURIComponent(greenId)}/sendMessage/${encodeURIComponent(greenToken)}`;
+            const gRes = await fetch(gUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chatId: `${digits}@c.us`,
+                message: otpMessageText
+              })
+            });
+            if (!gRes.ok) {
+              return json({ error: `\u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062A\u0633\u0627\u0628 \u0639\u0628\u0631 Green-API (${gRes.status}).` }, 502);
+            }
+          } else if (hasWebhook) {
+            const whHeaders = { "Content-Type": "application/json" };
+            const whKey = (env.WHATSAPP_WEBHOOK_KEY || "").trim();
+            if (whKey) {
+              whHeaders["Authorization"] = `Bearer ${whKey}`;
+              whHeaders["X-API-Key"] = whKey;
+            }
+            const whRes = await fetch(webhookUrl, {
+              method: "POST",
+              headers: whHeaders,
+              body: JSON.stringify({
+                phone: `+${digits}`,
+                digits,
+                otp: otpCode,
+                code: otpCode,
+                message: otpMessageText,
+                expires_in_seconds: 180
+              })
+            });
+            if (!whRes.ok) {
+              return json({ error: `\u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062A\u0633\u0627\u0628 \u0639\u0628\u0631 \u0627\u0644\u0628\u0648\u0627\u0628\u0629 (${whRes.status}).` }, 502);
+            }
+          }
         } catch (netErr) {
           return json({ error: `\u062A\u0639\u0630\u0631 \u0627\u0644\u0627\u062A\u0635\u0627\u0644 \u0628\u062E\u062F\u0645\u0629 \u0648\u0627\u062A\u0633\u0627\u0628: ${netErr?.message || "\u062E\u0637\u0623 \u0634\u0628\u0643\u0629"}` }, 502);
-        }
-        if (!waRes.ok) {
-          let errDetail = "";
-          try {
-            const errBody = await waRes.json();
-            errDetail = errBody?.error?.message || "";
-          } catch (_) {
-          }
-          return json({
-            error: errDetail ? `\u0641\u0634\u0644 \u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0644\u0629 \u0648\u0627\u062A\u0633\u0627\u0628 (${waRes.status}): ${errDetail}` : `\u062A\u0639\u0630\u0631 \u0625\u0631\u0633\u0627\u0644 \u0631\u0645\u0632 \u0648\u0627\u062A\u0633\u0627\u0628 \u0645\u0646 \u0631\u0642\u0645 \u0627\u0644\u062A\u0637\u0628\u064A\u0642 (\u0631\u0645\u0632 \u0627\u0644\u062E\u0637\u0623 ${waRes.status}).`
-          }, 502);
         }
         const record = {
           phone: digits,
@@ -919,12 +1081,12 @@ var index_default = {
         });
       }
       if ((url.pathname === "/users/status" || url.pathname === "/api/users/status") && method === "GET") {
-        const targetUserId = String(url.searchParams.get("userId") || url.searchParams.get("username") || "").trim().toLowerCase();
+        const targetUserId = String(url.searchParams.get("userId") || url.searchParams.get("username") || "").trim().replace(/^@+/, "").toLowerCase();
         if (!targetUserId) return json({ error: "Missing userId" }, 400);
         if (env.DB) {
           await ensureAllTables(env.DB);
           const uDb = await env.DB.prepare(
-            "SELECT id, username, avatar_url, status, last_seen FROM users WHERE LOWER(id) = ? OR LOWER(username) = ?"
+            "SELECT id, username, display_name, avatar_url, status, last_seen FROM users WHERE LOWER(id) = ? OR LOWER(username) = ?"
           ).bind(targetUserId, targetUserId).first();
           if (uDb) {
             const now = Date.now();
@@ -934,6 +1096,7 @@ var index_default = {
               success: true,
               user_id: uDb.id,
               username: uDb.username,
+              display_name: uDb.display_name || uDb.username,
               avatar_url: uDb.avatar_url || "",
               is_online: isOnline,
               status: isOnline ? "online" : "offline",
@@ -942,6 +1105,68 @@ var index_default = {
           }
         }
         return json({ success: true, is_online: false, status: "offline", last_seen: 0 });
+      }
+      if ((url.pathname === "/users/search" || url.pathname === "/api/users/search") && method === "GET") {
+        const auth = await getAuthUser();
+        if (!auth) return json({ error: "Unauthorized" }, 401);
+        if (!env.DB) return json({ success: true, users: [] });
+        await ensureAllTables(env.DB);
+        const rawQuery = String(url.searchParams.get("q") || "").trim().replace(/^@+/, "").toLowerCase();
+        try {
+          let rows;
+          if (!rawQuery) {
+            rows = await env.DB.prepare(
+              `SELECT id, username, display_name, avatar_url, status, last_seen, created_at
+               FROM users
+               WHERE id != ?
+               ORDER BY status = 'online' DESC, last_seen DESC
+               LIMIT 30`
+            ).bind(auth.id).all();
+          } else {
+            const pattern = `%${rawQuery}%`;
+            rows = await env.DB.prepare(
+              `SELECT id, username, display_name, avatar_url, status, last_seen, created_at
+               FROM users
+               WHERE id != ?
+                 AND (
+                   LOWER(username) LIKE ?
+                   OR LOWER(COALESCE(display_name, '')) LIKE ?
+                   OR LOWER(COALESCE(email, '')) LIKE ?
+                   OR LOWER(id) = ?
+                 )
+               ORDER BY CASE WHEN LOWER(username) = ? THEN 0 WHEN LOWER(username) LIKE ? THEN 1 ELSE 2 END, last_seen DESC
+               LIMIT 30`
+            ).bind(auth.id, pattern, pattern, pattern, rawQuery, rawQuery, `${rawQuery}%`).all();
+          }
+          return json({ success: true, users: rows.results || [] });
+        } catch (err) {
+          return json({ success: true, users: [] });
+        }
+      }
+      if ((url.pathname === "/users/profile" || url.pathname === "/api/users/profile") && (method === "POST" || method === "PUT")) {
+        const auth = await getAuthUser();
+        if (!auth) return json({ error: "Unauthorized" }, 401);
+        if (!env.DB) return json({ error: "Missing D1 Binding" }, 500);
+        await ensureAllTables(env.DB);
+        const body = await request.json().catch(() => ({}));
+        const updates = [];
+        const params = [];
+        if (typeof body.display_name === "string" && body.display_name.trim()) {
+          updates.push("display_name = ?");
+          params.push(body.display_name.trim().slice(0, 60));
+        }
+        if (typeof body.avatar_url === "string") {
+          updates.push("avatar_url = ?");
+          params.push(body.avatar_url.trim());
+        }
+        if (updates.length > 0) {
+          params.push(auth.id);
+          await env.DB.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).bind(...params).run();
+        }
+        const updated = await env.DB.prepare(
+          "SELECT id, username, display_name, email, phone, avatar_url, status, auth_provider, last_seen, created_at FROM users WHERE id = ?"
+        ).bind(auth.id).first();
+        return json({ success: true, user: updated });
       }
       if ((url.pathname === "/users/heartbeat" || url.pathname === "/api/users/heartbeat") && method === "POST") {
         const auth = await getAuthUser();
@@ -1456,7 +1681,7 @@ var index_default = {
         try {
           const friends = await env.DB.prepare(
             `SELECT f.id as friendship_id, f.created_at as friendship_date, f.is_blocked, f.blocked_by, f.mute_until, f.mute_type,
-                    u.id, u.username, u.avatar_url, u.status, u.last_seen
+                    u.id, u.username, u.display_name, u.avatar_url, u.status, u.last_seen
              FROM friendships f
              JOIN users u ON (u.id = CASE WHEN f.user1_id = ? THEN f.user2_id ELSE f.user1_id END)
              WHERE (f.user1_id = ? OR f.user2_id = ?)
@@ -1472,24 +1697,27 @@ var index_default = {
         if (!auth) return json({ error: "Unauthorized" }, 401);
         if (env.DB) await ensureAllTables(env.DB);
         const body = await request.json();
-        const { to_user_id, to_username } = body;
-        let targetUserId = to_user_id;
-        if (!targetUserId && to_username) {
+        const { to_user_id, to_username, to_email } = body;
+        const cleanTarget = String(to_username || to_email || "").trim().replace(/^@+/, "").toLowerCase();
+        let targetUserId = String(to_user_id || "").trim();
+        if (!targetUserId && cleanTarget) {
           try {
-            const target = await env.DB.prepare("SELECT id FROM users WHERE LOWER(username) = ?").bind(to_username.toLowerCase().trim()).first();
+            const target = await env.DB.prepare(
+              "SELECT id FROM users WHERE LOWER(username) = ? OR LOWER(COALESCE(email, '')) = ? OR LOWER(id) = ?"
+            ).bind(cleanTarget, cleanTarget, cleanTarget).first();
             if (target) targetUserId = target.id;
           } catch (e) {
           }
         }
         if (!targetUserId) {
-          if (to_username) {
-            targetUserId = `u_${to_username.toLowerCase().trim()}`;
+          if (cleanTarget && !cleanTarget.includes("@")) {
+            targetUserId = `u_${cleanTarget}`;
             try {
               const nowUser = Date.now();
               await env.DB.prepare(`
-                INSERT OR IGNORE INTO users (id, username, password_hash, avatar_url, status, created_at, last_seen)
-                VALUES (?, ?, 'auto_gen', '', 'offline', ?, ?)
-              `).bind(targetUserId, to_username.toLowerCase().trim(), nowUser, nowUser).run();
+                INSERT OR IGNORE INTO users (id, username, display_name, password_hash, avatar_url, status, created_at, last_seen)
+                VALUES (?, ?, ?, 'auto_gen', '', 'offline', ?, ?)
+              `).bind(targetUserId, cleanTarget, cleanTarget, nowUser, nowUser).run();
             } catch (e) {
             }
           } else {
@@ -1506,6 +1734,12 @@ var index_default = {
           ).bind(u1, u2).first();
           if (existing) {
             return json({ error: "\u0623\u0646\u062A\u0645 \u0623\u0635\u062F\u0642\u0627\u0621 \u0628\u0627\u0644\u0641\u0639\u0644" }, 400);
+          }
+          const existingPending = await env.DB.prepare(
+            "SELECT id FROM friend_requests WHERE from_user_id = ? AND to_user_id = ? AND status = 'pending'"
+          ).bind(auth.id, targetUserId).first();
+          if (existingPending) {
+            return json({ success: true, request_id: existingPending.id, message: "\u062A\u0645 \u0625\u0631\u0633\u0627\u0644 \u0637\u0644\u0628 \u0627\u0644\u0635\u062F\u0627\u0642\u0629 \u0628\u0627\u0644\u0641\u0639\u0644" });
           }
         } catch (e) {
         }
@@ -1530,7 +1764,7 @@ var index_default = {
         try {
           const reqs = await env.DB.prepare(`
             SELECT r.id, r.from_user_id, r.to_user_id, r.status, r.created_at,
-                   u.username, u.avatar_url
+                   u.username, u.display_name, u.avatar_url
             FROM friend_requests r
             JOIN users u ON u.id = r.from_user_id
             WHERE r.to_user_id = ? AND r.status = 'pending'
@@ -1548,7 +1782,7 @@ var index_default = {
         try {
           const reqs = await env.DB.prepare(`
             SELECT r.id, r.from_user_id, r.to_user_id, r.status, r.created_at,
-                   u.username, u.avatar_url
+                   u.username, u.display_name, u.avatar_url
             FROM friend_requests r
             JOIN users u ON u.id = r.to_user_id
             WHERE r.from_user_id = ? AND r.status = 'pending'

@@ -19,7 +19,18 @@ export interface Env {
   WHATSAPP_PHONE_NUMBER_ID?: string;
   WHATSAPP_ACCESS_TOKEN?: string;
   WHATSAPP_OTP_TEMPLATE?: string;
+  WHATSAPP_OTP_TEMPLATE_LANG?: string;
   WHATSAPP_SENDER_NUMBER?: string;
+  ULTRAMSG_INSTANCE_ID?: string;
+  ULTRAMSG_TOKEN?: string;
+  TWILIO_ACCOUNT_SID?: string;
+  TWILIO_AUTH_TOKEN?: string;
+  TWILIO_WHATSAPP_FROM?: string;
+  GREEN_API_INSTANCE_ID?: string;
+  GREEN_API_TOKEN?: string;
+  GREEN_API_URL?: string;
+  WHATSAPP_WEBHOOK_URL?: string;
+  WHATSAPP_WEBHOOK_KEY?: string;
 }
 
 // Durable Object for Real-Time Chat & Signaling
@@ -228,15 +239,25 @@ async function ensureAllTables(db: any) {
     `CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
+      display_name TEXT DEFAULT '',
       email TEXT,
       phone TEXT,
       password_hash TEXT NOT NULL,
       avatar_url TEXT DEFAULT '',
       status TEXT DEFAULT 'offline',
+      auth_provider TEXT DEFAULT 'local',
       created_at INTEGER NOT NULL,
       last_seen INTEGER NOT NULL,
       livekit_identity TEXT
     )`,
+    `ALTER TABLE users ADD COLUMN display_name TEXT DEFAULT ''`,
+    `ALTER TABLE users ADD COLUMN auth_provider TEXT DEFAULT 'local'`,
+    `ALTER TABLE users ADD COLUMN email TEXT`,
+    `ALTER TABLE users ADD COLUMN phone TEXT`,
+    `ALTER TABLE users ADD COLUMN avatar_url TEXT DEFAULT ''`,
+    `ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'offline'`,
+    `ALTER TABLE users ADD COLUMN last_seen INTEGER`,
+    `ALTER TABLE users ADD COLUMN livekit_identity TEXT`,
     `CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -436,7 +457,7 @@ export default {
         if (!env.DB) return json({ error: "قاعدة البيانات غير متصلة بالسيرفر (Missing D1 Binding)" }, 500);
         
         const body = await request.json<any>();
-        const { username, password, email, phone, avatar_url } = body;
+        const { username, password, email, phone, avatar_url, display_name } = body;
         
         if (!username || !password) {
           return json({ error: "اسم المستخدم وكلمة المرور مطلوبان" }, 400);
@@ -446,47 +467,21 @@ export default {
         if (cleanUsername.length < 3) {
           return json({ error: "اسم المستخدم يجب أن يتكون من 3 أحرف على الأقل" }, 400);
         }
+        const cleanDisplayName = String(display_name || cleanUsername).trim().slice(0, 60) || cleanUsername;
 
         try {
-          await env.DB.prepare(`
-            CREATE TABLE IF NOT EXISTS users (
-              id TEXT PRIMARY KEY,
-              username TEXT UNIQUE NOT NULL,
-              email TEXT,
-              phone TEXT,
-              password_hash TEXT NOT NULL,
-              avatar_url TEXT,
-              status TEXT DEFAULT 'offline',
-              created_at INTEGER NOT NULL,
-              last_seen INTEGER NOT NULL,
-              livekit_identity TEXT
-            )
-          `).run();
-          await env.DB.prepare(`
-            CREATE TABLE IF NOT EXISTS sessions (
-              token TEXT PRIMARY KEY,
-              user_id TEXT NOT NULL,
-              expiry INTEGER NOT NULL,
-              created_at INTEGER NOT NULL
-            )
-          `).run();
-          // Safely add missing columns for existing tables
-          try { await env.DB.prepare("ALTER TABLE users ADD COLUMN email TEXT").run(); } catch (e) {}
-          try { await env.DB.prepare("ALTER TABLE users ADD COLUMN avatar_url TEXT").run(); } catch (e) {}
-          try { await env.DB.prepare("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'offline'").run(); } catch (e) {}
-          try { await env.DB.prepare("ALTER TABLE users ADD COLUMN last_seen INTEGER").run(); } catch (e) {}
-          try { await env.DB.prepare("ALTER TABLE users ADD COLUMN livekit_identity TEXT").run(); } catch (e) {}
+          await ensureAllTables(env.DB);
         } catch (err: any) {
           return json({ error: "خطأ في تهيئة قاعدة البيانات: " + err.message }, 500);
         }
 
-        const existing = await env.DB.prepare("SELECT id FROM users WHERE username = ?").bind(cleanUsername).first();
+        const existing = await env.DB.prepare("SELECT id FROM users WHERE LOWER(username) = ?").bind(cleanUsername).first();
         if (existing) {
           return json({ error: "اسم المستخدم مسجل مسبقاً، اختر اسماً آخر" }, 409);
         }
 
         if (email) {
-          const existingEmail = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+          const existingEmail = await env.DB.prepare("SELECT id FROM users WHERE LOWER(email) = ?").bind(String(email).trim().toLowerCase()).first();
           if (existingEmail) {
             return json({ error: "البريد الإلكتروني مسجل مسبقاً" }, 409);
           }
@@ -497,8 +492,8 @@ export default {
         const now = Date.now();
 
         await env.DB.prepare(
-          "INSERT INTO users (id, username, email, phone, password_hash, avatar_url, status, created_at, last_seen, livekit_identity) VALUES (?, ?, ?, ?, ?, ?, 'online', ?, ?, ?)"
-        ).bind(userId, cleanUsername, email || null, phone || null, passHash, avatar_url || "", now, now, userId).run();
+          "INSERT INTO users (id, username, display_name, email, phone, password_hash, avatar_url, status, auth_provider, created_at, last_seen, livekit_identity) VALUES (?, ?, ?, ?, ?, ?, ?, 'online', 'local', ?, ?, ?)"
+        ).bind(userId, cleanUsername, cleanDisplayName, email ? String(email).trim().toLowerCase() : null, phone || null, passHash, avatar_url || "", now, now, userId).run();
 
         const token = await signJwt({ id: userId, username: cleanUsername }, jwtSecret);
         const expiry = now + (30 * 24 * 3600 * 1000);
@@ -516,10 +511,12 @@ export default {
           token,
           user: { 
             id: userId, 
-            username: cleanUsername, 
-            email: email || "", 
+            username: cleanUsername,
+            display_name: cleanDisplayName,
+            email: email ? String(email).trim().toLowerCase() : "", 
             avatar_url: avatar_url || "", 
-            status: "online", 
+            status: "online",
+            auth_provider: "local",
             created_at: now,
             last_seen: now
           }
@@ -613,7 +610,7 @@ export default {
         }
 
         const user = await env.DB.prepare(
-          "SELECT id, username, email, phone, password_hash, avatar_url, status, created_at, last_seen FROM users WHERE username = ?"
+          "SELECT id, username, display_name, email, phone, password_hash, avatar_url, status, auth_provider, created_at, last_seen FROM users WHERE username = ?"
         ).bind(lookupKey).first<any>();
 
         if (!user) {
@@ -646,9 +643,11 @@ export default {
           user: {
             id: user.id,
             username: user.username,
+            display_name: user.display_name || user.username,
             email: user.email || "",
             avatar_url: user.avatar_url || "",
             status: "online",
+            auth_provider: user.auth_provider || "local",
             created_at: user.created_at,
             last_seen: now
           }
@@ -660,13 +659,123 @@ export default {
         const auth = await getAuthUser();
         if (!auth) return json({ error: "غير مصرح - الجلسة منتهية" }, 401);
 
+        await ensureAllTables(env.DB);
         const user = await env.DB.prepare(
-          "SELECT id, username, email, phone, avatar_url, status, last_seen, created_at FROM users WHERE id = ?"
+          "SELECT id, username, display_name, email, phone, avatar_url, status, auth_provider, last_seen, created_at FROM users WHERE id = ?"
         ).bind(auth.id).first<any>();
 
         if (!user) return json({ error: "المستخدم غير موجود" }, 401);
 
         return json({ success: true, user });
+      }
+
+      // POST /auth/google or /api/auth/google - Direct Google Sign-In & Auto Username Linking
+      if ((url.pathname === "/auth/google" || url.pathname === "/api/auth/google") && method === "POST") {
+        if (!env.DB) return json({ error: "قاعدة البيانات غير متصلة بالسيرفر (Missing D1 Binding)" }, 500);
+        await ensureAllTables(env.DB);
+
+        const body = await request.json<any>().catch(() => ({}));
+        const emailLower = String(body.email || "").trim().toLowerCase();
+        if (!emailLower.includes("@") || !emailLower.includes(".") || emailLower.length < 5) {
+          return json({ error: "يرجى اختيار أو إدخال بريد جوجل صحيح" }, 400);
+        }
+
+        const requestedDisplayName = String(body.display_name || body.displayName || body.name || "").trim().slice(0, 60);
+        const requestedAvatar = String(body.avatar_url || body.avatarUrl || "").trim();
+        const now = Date.now();
+
+        let existingUser = await env.DB.prepare(
+          "SELECT id, username, display_name, email, phone, avatar_url, status, auth_provider, created_at, last_seen FROM users WHERE LOWER(email) = ?"
+        ).bind(emailLower).first<any>();
+
+        let isNewUser = false;
+
+        if (existingUser) {
+          const nextDisplayName = requestedDisplayName || existingUser.display_name || existingUser.username;
+          const nextAvatar = existingUser.avatar_url || requestedAvatar || "";
+          await env.DB.prepare(
+            "UPDATE users SET status = 'online', last_seen = ?, display_name = ?, avatar_url = ?, auth_provider = COALESCE(NULLIF(auth_provider, ''), 'google') WHERE id = ?"
+          ).bind(now, nextDisplayName, nextAvatar, existingUser.id).run();
+          existingUser = {
+            ...existingUser,
+            display_name: nextDisplayName,
+            avatar_url: nextAvatar,
+            status: "online",
+            last_seen: now,
+            auth_provider: existingUser.auth_provider || "google"
+          };
+        } else {
+          isNewUser = true;
+          const rawPrefix = emailLower
+            .split("@")[0]
+            .replace(/[^a-z0-9_]/g, "_")
+            .replace(/_+/g, "_")
+            .replace(/^_+|_+$/g, "")
+            .slice(0, 14) || "user";
+          const hashSeed = (await hashPassword(`AlMahallaGoogleUser:${emailLower}`)).slice(0, 6);
+          const baseCandidate = rawPrefix.length >= 3 ? rawPrefix : `${rawPrefix}_${hashSeed.slice(0, 4)}`;
+
+          let finalUsername = baseCandidate;
+          for (let attempt = 0; attempt < 8; attempt++) {
+            const clash = await env.DB.prepare("SELECT id FROM users WHERE LOWER(username) = ?").bind(finalUsername).first();
+            if (!clash) break;
+            if (attempt === 0) {
+              finalUsername = `${baseCandidate.slice(0, 11)}_${hashSeed.slice(0, 4)}`;
+            } else {
+              const randArr = new Uint16Array(1);
+              crypto.getRandomValues(randArr);
+              finalUsername = `${baseCandidate.slice(0, 10)}_${100 + (randArr[0] % 900)}`;
+            }
+          }
+
+          const userId = crypto.randomUUID();
+          const passHash = await hashPassword(`AlMahallaGoogleAuthV2:${emailLower}:${userId}`);
+          const displayName = requestedDisplayName || emailLower.split("@")[0].replace(/[._-]+/g, " ").trim() || finalUsername;
+
+          await env.DB.prepare(
+            "INSERT INTO users (id, username, display_name, email, phone, password_hash, avatar_url, status, auth_provider, created_at, last_seen, livekit_identity) VALUES (?, ?, ?, ?, NULL, ?, ?, 'online', 'google', ?, ?, ?)"
+          ).bind(userId, finalUsername, displayName, emailLower, passHash, requestedAvatar, now, now, userId).run();
+
+          existingUser = {
+            id: userId,
+            username: finalUsername,
+            display_name: displayName,
+            email: emailLower,
+            avatar_url: requestedAvatar,
+            status: "online",
+            auth_provider: "google",
+            created_at: now,
+            last_seen: now
+          };
+        }
+
+        const token = await signJwt({ id: existingUser.id, username: existingUser.username }, jwtSecret);
+        const expiry = now + (30 * 24 * 3600 * 1000);
+
+        await env.DB.prepare(
+          "INSERT OR REPLACE INTO sessions (token, user_id, expiry, created_at) VALUES (?, ?, ?, ?)"
+        ).bind(token, existingUser.id, expiry, now).run();
+
+        if (env.SESSIONS) {
+          await env.SESSIONS.put(`session:${token}`, JSON.stringify({ id: existingUser.id, username: existingUser.username }), { expirationTtl: 30 * 86400 });
+        }
+
+        return json({
+          success: true,
+          is_new_user: isNewUser,
+          token,
+          user: {
+            id: existingUser.id,
+            username: existingUser.username,
+            display_name: existingUser.display_name || existingUser.username,
+            email: existingUser.email || emailLower,
+            avatar_url: existingUser.avatar_url || "",
+            status: "online",
+            auth_provider: existingUser.auth_provider || "google",
+            created_at: existingUser.created_at,
+            last_seen: now
+          }
+        });
       }
 
       // POST /auth/whatsapp/send-otp or /api/auth/whatsapp/send-otp
@@ -683,9 +792,24 @@ export default {
 
         const waPhoneNumberId = (env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
         const waAccessToken = (env.WHATSAPP_ACCESS_TOKEN || "").trim();
-        if (!waPhoneNumberId || !waAccessToken) {
+        const ultraInstance = (env.ULTRAMSG_INSTANCE_ID || "").trim();
+        const ultraToken = (env.ULTRAMSG_TOKEN || "").trim();
+        const twilioSid = (env.TWILIO_ACCOUNT_SID || "").trim();
+        const twilioToken = (env.TWILIO_AUTH_TOKEN || "").trim();
+        const twilioFrom = (env.TWILIO_WHATSAPP_FROM || "").trim();
+        const greenId = (env.GREEN_API_INSTANCE_ID || "").trim();
+        const greenToken = (env.GREEN_API_TOKEN || "").trim();
+        const webhookUrl = (env.WHATSAPP_WEBHOOK_URL || "").trim();
+
+        const hasMeta = !!(waPhoneNumberId && waAccessToken);
+        const hasUltraMsg = !!(ultraInstance && ultraToken);
+        const hasTwilio = !!(twilioSid && twilioToken && twilioFrom);
+        const hasGreenApi = !!(greenId && greenToken);
+        const hasWebhook = !!webhookUrl;
+
+        if (!hasMeta && !hasUltraMsg && !hasTwilio && !hasGreenApi && !hasWebhook) {
           return json({
-            error: "خدمة إرسال رسائل واتساب غير مفعّلة على الخادم بعد. يرجى إضافة WHATSAPP_PHONE_NUMBER_ID و WHATSAPP_ACCESS_TOKEN في إعدادات Cloudflare Worker."
+            error: "بوابة إرسال رسائل واتساب غير مفعّلة على الخادم بعد. يرجى إضافة بيانات أحد المزودين في Cloudflare Worker Secrets (مثل Meta WhatsApp API أو UltraMsg أو Twilio أو Webhook)."
           }, 503);
         }
 
@@ -715,63 +839,146 @@ export default {
         const otpCode = String(100000 + (randArr[0] % 900000));
         const expiresAt = now + (3 * 60 * 1000); // Strictly 3 minutes
         const otpHash = await hashPassword(`AlMahalla_WA_OTP_v1:${digits}:${otpCode}:${jwtSecret}`);
+        const otpMessageText = `🔐 رمز التحقق الخاص بك لتطبيق المحلة هو: ${otpCode}\n⏳ صلاحية الرمز: 3 دقائق فقط.\nلا تشارك هذا الرمز مع أي شخص.`;
 
-        // Deliver OTP directly to user's WhatsApp from our app's dedicated WhatsApp Business number
-        const graphUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(waPhoneNumberId)}/messages`;
-        const templateName = (env.WHATSAPP_OTP_TEMPLATE || "").trim();
-        const waPayload: any = templateName
-          ? {
-              messaging_product: "whatsapp",
-              recipient_type: "individual",
-              to: digits,
-              type: "template",
-              template: {
-                name: templateName,
-                language: { code: "ar" },
-                components: [
-                  {
-                    type: "body",
-                    parameters: [{ type: "text", text: otpCode }]
-                  }
-                ]
-              }
-            }
-          : {
-              messaging_product: "whatsapp",
-              recipient_type: "individual",
-              to: digits,
-              type: "text",
-              text: {
-                preview_url: false,
-                body: `🔐 رمز التحقق الخاص بك لتطبيق المحلة هو: ${otpCode}\n⏳ صلاحية الرمز: 3 دقائق فقط.\nلا تشارك هذا الرمز مع أي شخص.`
-              }
-            };
-
-        let waRes: Response;
+        // Deliver OTP directly to user's WhatsApp from the configured real provider
         try {
-          waRes = await fetch(graphUrl, {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${waAccessToken}`,
-              "Content-Type": "application/json"
-            },
-            body: JSON.stringify(waPayload)
-          });
+          if (hasMeta) {
+            const graphUrl = `https://graph.facebook.com/v21.0/${encodeURIComponent(waPhoneNumberId)}/messages`;
+            const templateName = (env.WHATSAPP_OTP_TEMPLATE || "").trim();
+            const templateLang = (env.WHATSAPP_OTP_TEMPLATE_LANG || "ar").trim();
+            const waPayload: any = templateName
+              ? {
+                  messaging_product: "whatsapp",
+                  recipient_type: "individual",
+                  to: digits,
+                  type: "template",
+                  template: {
+                    name: templateName,
+                    language: { code: templateLang },
+                    components: [
+                      {
+                        type: "body",
+                        parameters: [{ type: "text", text: otpCode }]
+                      }
+                    ]
+                  }
+                }
+              : {
+                  messaging_product: "whatsapp",
+                  recipient_type: "individual",
+                  to: digits,
+                  type: "text",
+                  text: {
+                    preview_url: false,
+                    body: otpMessageText
+                  }
+                };
+            const waRes = await fetch(graphUrl, {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${waAccessToken}`,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify(waPayload)
+            });
+            if (!waRes.ok) {
+              let errDetail = "";
+              let errCode = 0;
+              try {
+                const errBody: any = await waRes.json();
+                errDetail = errBody?.error?.message || "";
+                errCode = Number(errBody?.error?.code || 0);
+              } catch (_) {}
+              if (errCode === 131047 || errCode === 131026) {
+                return json({
+                  error: "Meta WhatsApp يتطلب ضبط قالب رسائل معتمد (WHATSAPP_OTP_TEMPLATE) لإرسال الكود لأول مرة."
+                }, 502);
+              }
+              return json({
+                error: errDetail
+                  ? `فشل إرسال رسالة واتساب (${waRes.status}): ${errDetail}`
+                  : `تعذر إرسال رمز واتساب من رقم التطبيق (رمز الخطأ ${waRes.status}).`
+              }, 502);
+            }
+          } else if (hasUltraMsg) {
+            const ultraUrl = `https://api.ultramsg.com/${encodeURIComponent(ultraInstance)}/messages/chat`;
+            const form = new URLSearchParams();
+            form.set("token", ultraToken);
+            form.set("to", `+${digits}`);
+            form.set("body", otpMessageText);
+            const uRes = await fetch(ultraUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: form.toString()
+            });
+            const uJson: any = await uRes.json().catch(() => ({}));
+            if (!uRes.ok || uJson?.error || (uJson?.sent && String(uJson.sent) !== "true")) {
+              return json({
+                error: `فشل إرسال رسالة واتساب عبر UltraMsg: ${uJson?.error || uRes.status}`
+              }, 502);
+            }
+          } else if (hasTwilio) {
+            const twUrl = `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(twilioSid)}/Messages.json`;
+            const fromNormalized = twilioFrom.startsWith("whatsapp:") ? twilioFrom : `whatsapp:${twilioFrom}`;
+            const form = new URLSearchParams();
+            form.set("From", fromNormalized);
+            form.set("To", `whatsapp:+${digits}`);
+            form.set("Body", otpMessageText);
+            const basicAuth = btoa(`${twilioSid}:${twilioToken}`);
+            const twRes = await fetch(twUrl, {
+              method: "POST",
+              headers: {
+                "Authorization": `Basic ${basicAuth}`,
+                "Content-Type": "application/x-www-form-urlencoded"
+              },
+              body: form.toString()
+            });
+            if (!twRes.ok) {
+              const twErr: any = await twRes.json().catch(() => ({}));
+              return json({
+                error: `فشل إرسال رسالة واتساب عبر Twilio (${twRes.status}): ${twErr?.message || "خطأ مزود"}`
+              }, 502);
+            }
+          } else if (hasGreenApi) {
+            const gBase = (env.GREEN_API_URL || "https://api.green-api.com").trim().replace(/\/+$/, "");
+            const gUrl = `${gBase}/waInstance${encodeURIComponent(greenId)}/sendMessage/${encodeURIComponent(greenToken)}`;
+            const gRes = await fetch(gUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chatId: `${digits}@c.us`,
+                message: otpMessageText
+              })
+            });
+            if (!gRes.ok) {
+              return json({ error: `فشل إرسال رسالة واتساب عبر Green-API (${gRes.status}).` }, 502);
+            }
+          } else if (hasWebhook) {
+            const whHeaders: Record<string, string> = { "Content-Type": "application/json" };
+            const whKey = (env.WHATSAPP_WEBHOOK_KEY || "").trim();
+            if (whKey) {
+              whHeaders["Authorization"] = `Bearer ${whKey}`;
+              whHeaders["X-API-Key"] = whKey;
+            }
+            const whRes = await fetch(webhookUrl, {
+              method: "POST",
+              headers: whHeaders,
+              body: JSON.stringify({
+                phone: `+${digits}`,
+                digits,
+                otp: otpCode,
+                code: otpCode,
+                message: otpMessageText,
+                expires_in_seconds: 180
+              })
+            });
+            if (!whRes.ok) {
+              return json({ error: `فشل إرسال رسالة واتساب عبر البوابة (${whRes.status}).` }, 502);
+            }
+          }
         } catch (netErr: any) {
           return json({ error: `تعذر الاتصال بخدمة واتساب: ${netErr?.message || "خطأ شبكة"}` }, 502);
-        }
-
-        if (!waRes.ok) {
-          let errDetail = "";
-          try {
-            const errBody: any = await waRes.json();
-            errDetail = errBody?.error?.message || "";
-          } catch (_) {}
-          return json({
-            error: errDetail
-              ? `فشل إرسال رسالة واتساب (${waRes.status}): ${errDetail}`
-              : `تعذر إرسال رمز واتساب من رقم التطبيق (رمز الخطأ ${waRes.status}).`
-          }, 502);
         }
 
         const record = {
@@ -1038,13 +1245,13 @@ export default {
 
       // GET /users/status or /api/users/status - Real-time online/offline presence check
       if ((url.pathname === "/users/status" || url.pathname === "/api/users/status") && method === "GET") {
-        const targetUserId = String(url.searchParams.get("userId") || url.searchParams.get("username") || "").trim().toLowerCase();
+        const targetUserId = String(url.searchParams.get("userId") || url.searchParams.get("username") || "").trim().replace(/^@+/, "").toLowerCase();
         if (!targetUserId) return json({ error: "Missing userId" }, 400);
 
         if (env.DB) {
           await ensureAllTables(env.DB);
           const uDb = await env.DB.prepare(
-            "SELECT id, username, avatar_url, status, last_seen FROM users WHERE LOWER(id) = ? OR LOWER(username) = ?"
+            "SELECT id, username, display_name, avatar_url, status, last_seen FROM users WHERE LOWER(id) = ? OR LOWER(username) = ?"
           ).bind(targetUserId, targetUserId).first<any>();
 
           if (uDb) {
@@ -1055,6 +1262,7 @@ export default {
               success: true,
               user_id: uDb.id,
               username: uDb.username,
+              display_name: uDb.display_name || uDb.username,
               avatar_url: uDb.avatar_url || "",
               is_online: isOnline,
               status: isOnline ? "online" : "offline",
@@ -1063,6 +1271,74 @@ export default {
           }
         }
         return json({ success: true, is_online: false, status: "offline", last_seen: 0 });
+      }
+
+      // GET /users/search or /api/users/search - Open directory search for all logged-in users to find & add friends
+      if ((url.pathname === "/users/search" || url.pathname === "/api/users/search") && method === "GET") {
+        const auth = await getAuthUser();
+        if (!auth) return json({ error: "Unauthorized" }, 401);
+        if (!env.DB) return json({ success: true, users: [] });
+        await ensureAllTables(env.DB);
+
+        const rawQuery = String(url.searchParams.get("q") || "").trim().replace(/^@+/, "").toLowerCase();
+        try {
+          let rows: any;
+          if (!rawQuery) {
+            rows = await env.DB.prepare(
+              `SELECT id, username, display_name, avatar_url, status, last_seen, created_at
+               FROM users
+               WHERE id != ?
+               ORDER BY status = 'online' DESC, last_seen DESC
+               LIMIT 30`
+            ).bind(auth.id).all();
+          } else {
+            const pattern = `%${rawQuery}%`;
+            rows = await env.DB.prepare(
+              `SELECT id, username, display_name, avatar_url, status, last_seen, created_at
+               FROM users
+               WHERE id != ?
+                 AND (
+                   LOWER(username) LIKE ?
+                   OR LOWER(COALESCE(display_name, '')) LIKE ?
+                   OR LOWER(COALESCE(email, '')) LIKE ?
+                   OR LOWER(id) = ?
+                 )
+               ORDER BY CASE WHEN LOWER(username) = ? THEN 0 WHEN LOWER(username) LIKE ? THEN 1 ELSE 2 END, last_seen DESC
+               LIMIT 30`
+            ).bind(auth.id, pattern, pattern, pattern, rawQuery, rawQuery, `${rawQuery}%`).all();
+          }
+          return json({ success: true, users: rows.results || [] });
+        } catch (err: any) {
+          return json({ success: true, users: [] });
+        }
+      }
+
+      // POST/PUT /users/profile or /api/users/profile - Update current user's display name & avatar
+      if ((url.pathname === "/users/profile" || url.pathname === "/api/users/profile") && (method === "POST" || method === "PUT")) {
+        const auth = await getAuthUser();
+        if (!auth) return json({ error: "Unauthorized" }, 401);
+        if (!env.DB) return json({ error: "Missing D1 Binding" }, 500);
+        await ensureAllTables(env.DB);
+
+        const body = await request.json<any>().catch(() => ({}));
+        const updates: string[] = [];
+        const params: any[] = [];
+        if (typeof body.display_name === "string" && body.display_name.trim()) {
+          updates.push("display_name = ?");
+          params.push(body.display_name.trim().slice(0, 60));
+        }
+        if (typeof body.avatar_url === "string") {
+          updates.push("avatar_url = ?");
+          params.push(body.avatar_url.trim());
+        }
+        if (updates.length > 0) {
+          params.push(auth.id);
+          await env.DB.prepare(`UPDATE users SET ${updates.join(", ")} WHERE id = ?`).bind(...params).run();
+        }
+        const updated = await env.DB.prepare(
+          "SELECT id, username, display_name, email, phone, avatar_url, status, auth_provider, last_seen, created_at FROM users WHERE id = ?"
+        ).bind(auth.id).first<any>();
+        return json({ success: true, user: updated });
       }
 
       // POST /users/heartbeat or /api/users/heartbeat - Keep user online
@@ -1631,7 +1907,7 @@ export default {
         try {
           const friends = await env.DB.prepare(
             `SELECT f.id as friendship_id, f.created_at as friendship_date, f.is_blocked, f.blocked_by, f.mute_until, f.mute_type,
-                    u.id, u.username, u.avatar_url, u.status, u.last_seen
+                    u.id, u.username, u.display_name, u.avatar_url, u.status, u.last_seen
              FROM friendships f
              JOIN users u ON (u.id = CASE WHEN f.user1_id = ? THEN f.user2_id ELSE f.user1_id END)
              WHERE (f.user1_id = ? OR f.user2_id = ?)
@@ -1650,26 +1926,28 @@ export default {
         if (env.DB) await ensureAllTables(env.DB);
 
         const body = await request.json<any>();
-        const { to_user_id, to_username } = body;
+        const { to_user_id, to_username, to_email } = body;
+        const cleanTarget = String(to_username || to_email || "").trim().replace(/^@+/, "").toLowerCase();
 
-        let targetUserId = to_user_id;
-        if (!targetUserId && to_username) {
+        let targetUserId = String(to_user_id || "").trim();
+        if (!targetUserId && cleanTarget) {
           try {
-            const target = await env.DB.prepare("SELECT id FROM users WHERE LOWER(username) = ?").bind(to_username.toLowerCase().trim()).first<any>();
+            const target = await env.DB.prepare(
+              "SELECT id FROM users WHERE LOWER(username) = ? OR LOWER(COALESCE(email, '')) = ? OR LOWER(id) = ?"
+            ).bind(cleanTarget, cleanTarget, cleanTarget).first<any>();
             if (target) targetUserId = target.id;
           } catch (e) {}
         }
 
         if (!targetUserId) {
-          // Auto create user record for searched username if missing
-          if (to_username) {
-            targetUserId = `u_${to_username.toLowerCase().trim()}`;
+          if (cleanTarget && !cleanTarget.includes("@")) {
+            targetUserId = `u_${cleanTarget}`;
             try {
               const nowUser = Date.now();
               await env.DB.prepare(`
-                INSERT OR IGNORE INTO users (id, username, password_hash, avatar_url, status, created_at, last_seen)
-                VALUES (?, ?, 'auto_gen', '', 'offline', ?, ?)
-              `).bind(targetUserId, to_username.toLowerCase().trim(), nowUser, nowUser).run();
+                INSERT OR IGNORE INTO users (id, username, display_name, password_hash, avatar_url, status, created_at, last_seen)
+                VALUES (?, ?, ?, 'auto_gen', '', 'offline', ?, ?)
+              `).bind(targetUserId, cleanTarget, cleanTarget, nowUser, nowUser).run();
             } catch (e) {}
           } else {
             return json({ error: "المستخدم غير موجود" }, 404);
@@ -1688,6 +1966,13 @@ export default {
 
           if (existing) {
             return json({ error: "أنتم أصدقاء بالفعل" }, 400);
+          }
+
+          const existingPending = await env.DB.prepare(
+            "SELECT id FROM friend_requests WHERE from_user_id = ? AND to_user_id = ? AND status = 'pending'"
+          ).bind(auth.id, targetUserId).first<any>();
+          if (existingPending) {
+            return json({ success: true, request_id: existingPending.id, message: "تم إرسال طلب الصداقة بالفعل" });
           }
         } catch (e) {}
 
@@ -1715,7 +2000,7 @@ export default {
         try {
           const reqs = await env.DB.prepare(`
             SELECT r.id, r.from_user_id, r.to_user_id, r.status, r.created_at,
-                   u.username, u.avatar_url
+                   u.username, u.display_name, u.avatar_url
             FROM friend_requests r
             JOIN users u ON u.id = r.from_user_id
             WHERE r.to_user_id = ? AND r.status = 'pending'
@@ -1736,7 +2021,7 @@ export default {
         try {
           const reqs = await env.DB.prepare(`
             SELECT r.id, r.from_user_id, r.to_user_id, r.status, r.created_at,
-                   u.username, u.avatar_url
+                   u.username, u.display_name, u.avatar_url
             FROM friend_requests r
             JOIN users u ON u.id = r.to_user_id
             WHERE r.from_user_id = ? AND r.status = 'pending'

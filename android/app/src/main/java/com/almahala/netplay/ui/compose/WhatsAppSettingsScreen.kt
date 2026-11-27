@@ -1,5 +1,7 @@
 package com.almahala.netplay.ui.compose
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
@@ -11,6 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -43,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.almahala.netplay.AppSettingsManager
+import com.almahala.netplay.AuthActivity
 import com.almahala.netplay.UserManager
 import com.almahala.netplay.network.AppInfoHelper
 import com.almahala.netplay.network.CloudflareClient
@@ -122,13 +126,21 @@ fun WhatsAppSettingsScreen(
 
     // Profile
     val currentUser = remember { UserManager.getCurrentUser(context) }
-    var userName by remember { mutableStateOf(currentUser?.fullName?.ifEmpty { currentUser.username } ?: "أحمد المحلاوي") }
+    val accountUsername = currentUser?.username.orEmpty()
+    var userName by remember { mutableStateOf(currentUser?.fullName?.ifEmpty { currentUser.username } ?: "مستخدم المحلة") }
     var userStatus by remember { mutableStateOf(currentUser?.role ?: "عضو نشط • متاح للتواصل") }
-    var userPhone by remember { mutableStateOf(currentUser?.email ?: "+964 770 123 4567") }
+    var userPhone by remember {
+        mutableStateOf(
+            currentUser?.email?.takeIf { it.isNotBlank() }
+                ?: accountUsername.takeIf { it.isNotBlank() }?.let { "@$it" }
+                ?: "حساب محلي"
+        )
+    }
     var userAvatar by remember { mutableStateOf(currentUser?.avatar ?: "") }
 
     // Dialog & Sheet States
     var showProfileEditDialog by remember { mutableStateOf(false) }
+    var showShareAccountDialog by remember { mutableStateOf(false) }
     var showTonePickerSheet by remember { mutableStateOf<String?>(null) }
     var showThemeDialog by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
@@ -144,8 +156,8 @@ fun WhatsAppSettingsScreen(
     val appVersionName = remember { AppInfoHelper.getVersionName(context) }
     val appVersionCode = remember { AppInfoHelper.getVersionCode(context) }
 
-    // Expanded accordion item ids
-    var expandedItems by remember { mutableStateOf(setOf<String>()) }
+    // Expanded accordion item ids (profile expanded by default for clear account visibility)
+    var expandedItems by remember { mutableStateOf(setOf("profile")) }
 
     fun toggleExpand(id: String) {
         expandedItems = if (expandedItems.contains(id)) {
@@ -322,11 +334,43 @@ fun WhatsAppSettingsScreen(
                                     fontWeight = FontWeight.Bold,
                                     fontFamily = TajawalFontFamily
                                 )
-                                Spacer(modifier = Modifier.height(2.dp))
+                                if (accountUsername.isNotBlank()) {
+                                    Spacer(modifier = Modifier.height(3.dp))
+                                    Surface(
+                                        onClick = {
+                                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                            clipboard?.setPrimaryClip(ClipData.newPlainText("username", accountUsername))
+                                            Toast.makeText(context, "تم نسخ اليوزر @$accountUsername", Toast.LENGTH_SHORT).show()
+                                        },
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = Color(0xFFEFF6FF),
+                                        border = BorderStroke(1.dp, Color(0xFFBFDBFE))
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "@$accountUsername",
+                                                color = Color(0xFF1D4ED8),
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            Spacer(modifier = Modifier.width(5.dp))
+                                            Icon(
+                                                imageVector = Icons.Default.ContentCopy,
+                                                contentDescription = "نسخ اليوزر",
+                                                tint = Color(0xFF2563EB),
+                                                modifier = Modifier.size(12.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(3.dp))
                                 Text(
                                     text = userStatus,
                                     color = Color(0xFF64748B),
-                                    fontSize = 13.sp,
+                                    fontSize = 12.5.sp,
                                     fontFamily = TajawalFontFamily,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
@@ -337,15 +381,17 @@ fun WhatsAppSettingsScreen(
                                     color = Color(0xFF2563EB),
                                     fontSize = 12.sp,
                                     fontFamily = TajawalFontFamily,
-                                    fontWeight = FontWeight.Medium
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                             IconButton(onClick = {
-                                Toast.makeText(context, "فتح رمز QR للبروفايل...", Toast.LENGTH_SHORT).show()
+                                showShareAccountDialog = true
                             }) {
                                 Icon(
                                     imageVector = Icons.Default.QrCode,
-                                    contentDescription = "QR Code",
+                                    contentDescription = "بطاقة الحساب والمشاركة",
                                     tint = Color(0xFF2563EB),
                                     modifier = Modifier.size(24.dp)
                                 )
@@ -739,6 +785,19 @@ fun WhatsAppSettingsScreen(
                             )
 
                             SettingsSubItem(
+                                title = "تسجيل الخروج",
+                                subtitle = "الخروج من الحساب الحالي والعودة لواجهة التسجيل",
+                                titleColor = Color(0xFFDC2626),
+                                onClick = {
+                                    CloudflareClient.clearAuthToken(context)
+                                    val intent = Intent(context, AuthActivity::class.java).apply {
+                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                                    }
+                                    context.startActivity(intent)
+                                }
+                            )
+
+                            SettingsSubItem(
                                 title = "حذف الحساب نهائياً",
                                 subtitle = "حذف كافة البيانات والرسائل",
                                 titleColor = Color(0xFFEF4444),
@@ -1116,10 +1175,10 @@ fun WhatsAppSettingsScreen(
                                         avatar = finalAvatarUrl
                                     )
                                     UserManager.saveCurrentUserProfile(context, updatedProfile)
-                                    CloudflareClient.adminUpdateUser(
+                                    CloudflareClient.updateMyProfile(
                                         context = context,
-                                        username = curr.username,
-                                        newAvatar = finalAvatarUrl
+                                        displayName = tempName,
+                                        avatarUrl = finalAvatarUrl
                                     ) { _, _ -> }
                                 }
 
@@ -1474,6 +1533,127 @@ fun WhatsAppSettingsScreen(
             },
             containerColor = Color.White,
             shape = RoundedCornerShape(20.dp)
+        )
+    }
+
+    // Account Card & Share Username Dialog
+    if (showShareAccountDialog) {
+        val shareHandle = accountUsername.ifBlank { userName }
+        AlertDialog(
+            onDismissRequest = { showShareAccountDialog = false },
+            containerColor = Color.White,
+            shape = RoundedCornerShape(24.dp),
+            title = {
+                Text(
+                    text = "بطاقة الحساب والإضافة",
+                    fontFamily = TajawalFontFamily,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF0F172A)
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFFEFF6FF))
+                            .border(2.dp, Color(0xFF2563EB), CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (userAvatar.isNotEmpty()) {
+                            AsyncImage(
+                                model = userAvatar,
+                                contentDescription = userName,
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.Crop
+                            )
+                        } else {
+                            Text(
+                                text = userName.take(1).uppercase().ifEmpty { "م" },
+                                fontSize = 26.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF2563EB),
+                                fontFamily = TajawalFontFamily
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = userName,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = TajawalFontFamily,
+                        color = Color(0xFF0F172A)
+                    )
+
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFFEFF6FF),
+                        border = BorderStroke(1.dp, Color(0xFFBFDBFE))
+                    ) {
+                        Text(
+                            text = "@$shareHandle",
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFF1D4ED8),
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                        )
+                    }
+
+                    if (currentUser?.email?.contains("@") == true) {
+                        Text(
+                            text = "مرتبط بالبريد: ${currentUser.email}",
+                            fontSize = 12.sp,
+                            color = Color(0xFF64748B),
+                            fontFamily = TajawalFontFamily
+                        )
+                    }
+
+                    Text(
+                        text = "أعطِ هذا اليوزر لأصدقائك ليتمكنوا من البحث عنك وإضافتك مباشرة في تبويب الأصدقاء.",
+                        fontSize = 12.5.sp,
+                        color = Color(0xFF475569),
+                        fontFamily = TajawalFontFamily,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        clipboard?.setPrimaryClip(ClipData.newPlainText("username", shareHandle))
+                        Toast.makeText(context, "تم نسخ @$shareHandle بنجاح", Toast.LENGTH_SHORT).show()
+                        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(
+                                Intent.EXTRA_TEXT,
+                                "أضفني على تطبيق المحلة عبر اليوزر: @$shareHandle"
+                            )
+                        }
+                        try {
+                            context.startActivity(Intent.createChooser(shareIntent, "مشاركة حسابك"))
+                        } catch (_: Exception) {}
+                        showShareAccountDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("نسخ ومشاركة", fontFamily = TajawalFontFamily, color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showShareAccountDialog = false }) {
+                    Text("إغلاق", fontFamily = TajawalFontFamily, color = Color(0xFF64748B))
+                }
+            }
         )
     }
 }
