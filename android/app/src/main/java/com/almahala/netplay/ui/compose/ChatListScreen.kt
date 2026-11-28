@@ -308,7 +308,45 @@ fun ChatListScreen(
                 }
             }
 
-            // 2. Search Bar (Placed above tabs, unified dimensions & styling matching FriendsScreen)
+            // 2. Category Tabs (الكل / المجموعات / القنوات - Placed above search bar matching FriendsScreen)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.Start
+            ) {
+                tabs.forEachIndexed { index, tabName ->
+                    val isSelected = selectedTab == index
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                selectedTab = index
+                            }
+                            .padding(horizontal = 14.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = tabName,
+                            fontSize = 15.sp,
+                            fontFamily = TajawalFontFamily,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) Color(0xFF2563EB) else Color(0xFF64748B)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .height(2.5.dp)
+                                .width(36.dp)
+                                .background(if (isSelected) Color(0xFF2563EB) else Color.Transparent, CircleShape)
+                        )
+                    }
+                }
+            }
+
+            // 3. Search Bar (Placed below tabs, unified dimensions & styling matching FriendsScreen)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -375,44 +413,6 @@ fun ChatListScreen(
                                 modifier = Modifier.size(15.dp)
                             )
                         }
-                    }
-                }
-            }
-
-            // 3. Category Tabs (الكل / المجموعات / القنوات - Unified dimensions matching FriendsScreen)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.Start
-            ) {
-                tabs.forEachIndexed { index, tabName ->
-                    val isSelected = selectedTab == index
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) {
-                                selectedTab = index
-                            }
-                            .padding(horizontal = 14.dp, vertical = 6.dp)
-                    ) {
-                        Text(
-                            text = tabName,
-                            fontSize = 15.sp,
-                            fontFamily = TajawalFontFamily,
-                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                            color = if (isSelected) Color(0xFF2563EB) else Color(0xFF64748B)
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Box(
-                            modifier = Modifier
-                                .height(2.5.dp)
-                                .width(36.dp)
-                                .background(if (isSelected) Color(0xFF2563EB) else Color.Transparent, CircleShape)
-                        )
                     }
                 }
             }

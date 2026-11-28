@@ -487,10 +487,10 @@ fun LoginScreen(
 
                         Spacer(modifier = Modifier.height(16.dp))
 
-                        // Official Google & Facebook Login Icons Side-by-Side
+                        // Official Google Login Icon Button
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally),
+                            horizontalArrangement = Arrangement.Center,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             // Google OAuth Icon Button
@@ -555,28 +555,6 @@ fun LoginScreen(
                                             cap = StrokeCap.Butt
                                         )
                                     }
-                                }
-                            }
-
-                            // Facebook OAuth Icon Button
-                            Surface(
-                                onClick = {
-                                    if (!isLoading) openOAuthUrl(CloudflareClient.getFacebookOAuthStartUrl(context))
-                                },
-                                enabled = !isLoading,
-                                shape = CircleShape,
-                                color = Color(0xFF1877F2),
-                                border = BorderStroke(1.2.dp, Color(0xFF166FE5)),
-                                shadowElevation = 3.dp,
-                                modifier = Modifier.size(58.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Text(
-                                        text = "f",
-                                        color = Color.White,
-                                        fontSize = 32.sp,
-                                        fontWeight = FontWeight.ExtraBold
-                                    )
                                 }
                             }
                         }

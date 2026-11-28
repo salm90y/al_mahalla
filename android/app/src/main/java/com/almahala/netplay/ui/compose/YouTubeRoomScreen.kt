@@ -1199,6 +1199,9 @@ fun YouTubeRoomScreen(
                                     val cookieMgr = CookieManager.getInstance()
                                     cookieMgr.setAcceptCookie(true)
                                     cookieMgr.setAcceptThirdPartyCookies(this, true)
+                                    cookieMgr.setCookie("https://www.youtube.com", "CONSENT=YES+cb; Path=/; Secure; SameSite=None")
+                                    cookieMgr.setCookie("https://www.youtube.com", "PREF=hl=ar&gl=IQ; Path=/; Secure; SameSite=None")
+                                    cookieMgr.flush()
                                 } catch (_: Throwable) {}
                                 layoutParams = ViewGroup.LayoutParams(
                                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1215,11 +1218,24 @@ fun YouTubeRoomScreen(
                                     allowFileAccess = true
                                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                                     cacheMode = WebSettings.LOAD_DEFAULT
-                                    userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+                                    val nativeUa = userAgentString ?: ""
+                                    if (nativeUa.isNotBlank()) {
+                                        userAgentString = nativeUa
+                                            .replace("; wv)", ")")
+                                            .replace("Version/4.0 ", "")
+                                    }
                                 }
                                 webChromeClient = WebChromeClient()
                                 webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
+                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                                        val urlStr = request?.url?.toString()?.lowercase() ?: return true
+                                        val isAllowedEmbed = urlStr.startsWith("https://www.youtube.com/embed/") ||
+                                            urlStr.startsWith("https://youtube.com/embed/") ||
+                                            urlStr.startsWith("https://www.youtube-nocookie.com/embed/") ||
+                                            urlStr.startsWith("https://ooki-game.ahmed1986y5.workers.dev") ||
+                                            urlStr == "about:blank"
+                                        return !isAllowedEmbed
+                                    }
                                     override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                                         if (view != null) {
                                             webViewRefHolder.compareAndSet(view, null)
@@ -1259,7 +1275,7 @@ fun YouTubeRoomScreen(
                                     <head>
                                         <meta charset="utf-8">
                                         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-                                        <meta name="referrer" content="strict-origin-when-cross-origin">
+                                        <meta name="referrer" content="origin">
                                         <style>
                                             * { margin: 0; padding: 0; box-sizing: border-box; }
                                             html, body {
@@ -1296,7 +1312,7 @@ fun YouTubeRoomScreen(
                                                 transform: none !important;
                                                 object-fit: contain !important;
                                             }
-                                            /* Touch Shield: Intercepts taps so external app prompts and play/pause buttons are never shown on video screen */
+                                            /* Touch Shield: Intercepts taps so external app/sign-in prompts and buttons are never shown on video screen */
                                             #touch-shield {
                                                 position: absolute;
                                                 top: 0;
@@ -1305,7 +1321,7 @@ fun YouTubeRoomScreen(
                                                 height: 100%;
                                                 z-index: 10;
                                                 background: transparent;
-                                                pointer-events: none;
+                                                pointer-events: auto;
                                             }
                                             /* Complete clean display - hide external links, titles, watermark, pause overlay, and ads */
                                             .ytp-chrome-top, .ytp-title, .ytp-title-text, .ytp-title-channel,
@@ -1358,6 +1374,7 @@ fun YouTubeRoomScreen(
                                                     player = new YT.Player('player', {
                                                         height: '100%',
                                                         width: '100%',
+                                                        host: 'https://www.youtube.com',
                                                         videoId: initId,
                                                         playerVars: {
                                                             'autoplay': 1,
@@ -1368,8 +1385,8 @@ fun YouTubeRoomScreen(
                                                             'playsinline': 1,
                                                             'enablejsapi': 1,
                                                             'iv_load_policy': 3,
-                                                            'origin': 'https://www.youtube-nocookie.com',
-                                                            'widget_referrer': 'https://www.youtube-nocookie.com'
+                                                            'origin': 'https://ooki-game.ahmed1986y5.workers.dev',
+                                                            'widget_referrer': 'https://ooki-game.ahmed1986y5.workers.dev/'
                                                         },
                                                         events: {
                                                             'onReady': function(e) {
@@ -1399,9 +1416,10 @@ fun YouTubeRoomScreen(
                                                             },
                                                             'onError': function(e) {
                                                                 try {
+                                                                    isPlayerReady = false;
                                                                     var p = document.getElementById('player');
                                                                     if (p) {
-                                                                        p.innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + currentVideoId + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://www.youtube-nocookie.com&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
+                                                                        p.innerHTML = '<iframe id="yt-fallback-frame" referrerpolicy="origin" src="https://www.youtube.com/embed/' + currentVideoId + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://ooki-game.ahmed1986y5.workers.dev&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
                                                                     }
                                                                 } catch(err) {}
                                                             }
@@ -1482,15 +1500,24 @@ fun YouTubeRoomScreen(
                                                 if (typeof autoPlay === 'boolean') pendingPlayState = autoPlay;
                                                 if (typeof startSec === 'number') pendingSeek = startSec;
                                                 try {
-                                                    if (player && isPlayerReady && typeof player.loadVideoById === 'function') {
+                                                    if (player && isPlayerReady && typeof player.loadVideoById === 'function' && document.querySelector('iframe#player')) {
                                                         player.loadVideoById({ videoId: vid, startSeconds: startSec || 0 });
                                                         if (pendingPlayState) player.playVideo(); else player.pauseVideo();
                                                         pendingVideoId = null;
                                                         pendingSeek = null;
-                                                    } else if (!window.YT) {
+                                                    } else if (player && isPlayerReady && typeof player.loadVideoById === 'function' && !document.getElementById('yt-fallback-frame')) {
+                                                        player.loadVideoById({ videoId: vid, startSeconds: startSec || 0 });
+                                                        if (pendingPlayState) player.playVideo(); else player.pauseVideo();
+                                                        pendingVideoId = null;
+                                                        pendingSeek = null;
+                                                    } else {
                                                         var p = document.getElementById('player');
-                                                        if (p) {
-                                                            p.innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + vid + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://www.youtube-nocookie.com&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
+                                                        var fb = document.getElementById('yt-fallback-frame');
+                                                        var nextSrc = 'https://www.youtube.com/embed/' + vid + '?autoplay=' + (pendingPlayState ? 1 : 0) + '&controls=0&playsinline=1&enablejsapi=1&origin=https://ooki-game.ahmed1986y5.workers.dev&rel=0&iv_load_policy=3';
+                                                        if (fb) {
+                                                            fb.src = nextSrc;
+                                                        } else if (p && !window.YT) {
+                                                            p.innerHTML = '<iframe id="yt-fallback-frame" referrerpolicy="origin" src="' + nextSrc + '" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
                                                         }
                                                     }
                                                 } catch(e) {}
@@ -1517,7 +1544,7 @@ fun YouTubeRoomScreen(
                                                     if (!isPlayerReady && !document.querySelector('iframe')) {
                                                         var p = document.getElementById('player');
                                                         if (p) {
-                                                            p.innerHTML = '<iframe src="https://www.youtube-nocookie.com/embed/' + currentVideoId + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://www.youtube-nocookie.com&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
+                                                            p.innerHTML = '<iframe id="yt-fallback-frame" referrerpolicy="origin" src="https://www.youtube.com/embed/' + currentVideoId + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://ooki-game.ahmed1986y5.workers.dev&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
                                                         }
                                                     }
                                                 } catch(e) {}
@@ -1539,7 +1566,13 @@ fun YouTubeRoomScreen(
                                     </html>
                                 """.trimIndent()
                                 webViewRefHolder.set(this)
-                                loadDataWithBaseURL("https://www.youtube-nocookie.com", playerHtml, "text/html", "UTF-8", null)
+                                loadDataWithBaseURL(
+                                    "https://ooki-game.ahmed1986y5.workers.dev/",
+                                    playerHtml,
+                                    "text/html",
+                                    "UTF-8",
+                                    "https://ooki-game.ahmed1986y5.workers.dev/"
+                                )
                             }
                         } catch (_: Throwable) {
                             android.view.View(ctx).apply {
