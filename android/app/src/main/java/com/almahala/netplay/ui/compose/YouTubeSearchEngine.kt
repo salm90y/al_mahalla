@@ -10,6 +10,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 object YouTubeSearchEngine {
@@ -241,64 +242,77 @@ object YouTubeSearchEngine {
         val includeThirdPartyEmbed: Boolean = false
     )
 
-    // 3. Resolve a direct playable stream URL from user's device IP (bypasses WebView BotGuard / sign-in prompts)
-    suspend fun resolveDirectStreamUrl(videoId: String): ResolvedYouTubeStream? = withContext(Dispatchers.IO) {
+    // 3. Resolve a direct playable stream URL from user's device IP (supports authenticated YouTube cookies + SAPISIDHASH)
+    suspend fun resolveDirectStreamUrl(
+        videoId: String,
+        youtubeCookies: String? = null
+    ): ResolvedYouTubeStream? = withContext(Dispatchers.IO) {
         val cleanId = videoId.trim()
         if (cleanId.isEmpty()) return@withContext null
 
-        val clients = listOf(
-            InnerTubePlayerClient(
-                clientName = "ANDROID_VR",
-                clientVersion = "1.60.19",
-                clientIdHeader = "28",
-                userAgent = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
-                osName = "Android",
-                osVersion = "12L",
-                deviceMake = "Oculus",
-                deviceModel = "Quest 3",
-                androidSdkVersion = 32
-            ),
-            InnerTubePlayerClient(
-                clientName = "IOS",
-                clientVersion = "19.45.4",
-                clientIdHeader = "5",
-                userAgent = "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
-                osName = "iPhone",
-                osVersion = "18.1.0.22B83",
-                deviceMake = "Apple",
-                deviceModel = "iPhone16,2"
-            ),
-            InnerTubePlayerClient(
-                clientName = "ANDROID_EMBEDDED_PLAYER",
-                clientVersion = "19.44.38",
-                clientIdHeader = "55",
-                userAgent = "com.google.android.youtube/19.44.38 (Linux; U; Android 14) gzip",
-                osName = "Android",
-                osVersion = "14",
-                androidSdkVersion = 34,
-                includeThirdPartyEmbed = true
-            ),
-            InnerTubePlayerClient(
-                clientName = "ANDROID",
-                clientVersion = "19.29.37",
-                clientIdHeader = "3",
-                userAgent = "com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip",
-                osName = "Android",
-                osVersion = "14",
-                androidSdkVersion = 34
-            ),
-            InnerTubePlayerClient(
-                clientName = "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-                clientVersion = "2.0",
-                clientIdHeader = "85",
-                userAgent = "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
-                includeThirdPartyEmbed = true
+        val cleanCookies = youtubeCookies?.trim()?.takeIf { it.isNotEmpty() }
+        val sapisidHash = cleanCookies?.let { computeSapisidHash(it) }
+
+        val clients = buildList {
+            add(
+                InnerTubePlayerClient(
+                    clientName = "ANDROID_VR",
+                    clientVersion = "1.60.19",
+                    clientIdHeader = "28",
+                    userAgent = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                    osName = "Android",
+                    osVersion = "12L",
+                    deviceMake = "Oculus",
+                    deviceModel = "Quest 3",
+                    androidSdkVersion = 32
+                )
             )
-        )
+            add(
+                InnerTubePlayerClient(
+                    clientName = "IOS",
+                    clientVersion = "20.10.4",
+                    clientIdHeader = "5",
+                    userAgent = "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+                    osName = "iPhone",
+                    osVersion = "18.3.2.22D82",
+                    deviceMake = "Apple",
+                    deviceModel = "iPhone16,2"
+                )
+            )
+            add(
+                InnerTubePlayerClient(
+                    clientName = "ANDROID",
+                    clientVersion = "20.10.38",
+                    clientIdHeader = "3",
+                    userAgent = "com.google.android.youtube/20.10.38 (Linux; U; Android 15) gzip",
+                    osName = "Android",
+                    osVersion = "15",
+                    androidSdkVersion = 35
+                )
+            )
+            add(
+                InnerTubePlayerClient(
+                    clientName = "MWEB",
+                    clientVersion = "2.20250312.01.00",
+                    clientIdHeader = "2",
+                    userAgent = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
+                )
+            )
+            if (sapisidHash != null) {
+                add(
+                    InnerTubePlayerClient(
+                        clientName = "WEB",
+                        clientVersion = "2.20250312.01.00",
+                        clientIdHeader = "1",
+                        userAgent = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
+                    )
+                )
+            }
+        }
 
         for (client in clients) {
             try {
-                val resolved = fetchPlayerStreamForClient(cleanId, client)
+                val resolved = fetchPlayerStreamForClient(cleanId, client, cleanCookies, sapisidHash)
                 if (resolved != null) {
                     return@withContext resolved
                 }
@@ -309,7 +323,33 @@ object YouTubeSearchEngine {
         return@withContext null
     }
 
-    private fun fetchPlayerStreamForClient(videoId: String, client: InnerTubePlayerClient): ResolvedYouTubeStream? {
+    private fun extractCookieValue(cookies: String, key: String): String? {
+        return cookies.split(";")
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("$key=") }
+            ?.substringAfter("=")
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun computeSapisidHash(cookies: String, origin: String = "https://www.youtube.com"): String? {
+        val sapisid = extractCookieValue(cookies, "SAPISID")
+            ?: extractCookieValue(cookies, "__Secure-3PAPISID")
+            ?: extractCookieValue(cookies, "__Secure-1PAPISID")
+            ?: return null
+        val timestamp = System.currentTimeMillis() / 1000L
+        val input = "$timestamp $sapisid $origin"
+        val digest = MessageDigest.getInstance("SHA-1").digest(input.toByteArray(Charsets.UTF_8))
+        val sha1Hex = digest.joinToString("") { "%02x".format(it) }
+        return "SAPISIDHASH ${timestamp}_${sha1Hex}"
+    }
+
+    private fun fetchPlayerStreamForClient(
+        videoId: String,
+        client: InnerTubePlayerClient,
+        cookies: String?,
+        sapisidHash: String?
+    ): ResolvedYouTubeStream? {
         val url = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
         val clientJson = JSONObject().apply {
             put("clientName", client.clientName)
@@ -338,18 +378,25 @@ object YouTubeSearchEngine {
         }
 
         val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-        val request = Request.Builder()
+        val reqBuilder = Request.Builder()
             .url(url)
             .post(body)
             .header("User-Agent", client.userAgent)
             .header("X-YouTube-Client-Name", client.clientIdHeader)
             .header("X-YouTube-Client-Version", client.clientVersion)
             .header("Origin", "https://www.youtube.com")
+            .header("X-Origin", "https://www.youtube.com")
             .header("Content-Type", "application/json")
             .header("Accept-Language", "ar,en;q=0.9")
-            .build()
 
-        httpClient.newCall(request).execute().use { response ->
+        if (!cookies.isNullOrBlank()) {
+            reqBuilder.header("Cookie", cookies)
+        }
+        if (!sapisidHash.isNullOrBlank()) {
+            reqBuilder.header("Authorization", sapisidHash)
+        }
+
+        httpClient.newCall(reqBuilder.build()).execute().use { response ->
             if (!response.isSuccessful) return null
             val raw = response.body?.string() ?: return null
             val json = JSONObject(raw)

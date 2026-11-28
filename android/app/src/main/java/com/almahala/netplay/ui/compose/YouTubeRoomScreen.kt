@@ -66,6 +66,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.PlatformTextStyle
@@ -82,6 +83,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import coil.compose.AsyncImage
+import com.almahala.netplay.AppSettingsManager
 import com.almahala.netplay.network.CloudflareClient
 import com.almahala.netplay.network.RealVoipEngine
 import com.almahala.netplay.network.ZegoCallManager
@@ -306,11 +308,30 @@ fun YouTubeRoomScreen(
     var pendingNativeSeekMs by remember { mutableIntStateOf(0) }
     var activeTextureSurface by remember { mutableStateOf<Surface?>(null) }
     var isWebViewInteractive by remember { mutableStateOf(false) }
+    var authRefreshTrigger by remember { mutableIntStateOf(0) }
+    var googleAuthDialogUrl by remember { mutableStateOf<String?>(null) }
+    var hasYouTubeAuthSession by remember {
+        mutableStateOf(
+            try {
+                val c = CookieManager.getInstance().getCookie("https://www.youtube.com") ?: ""
+                c.contains("SAPISID=") || c.contains("__Secure-3PAPISID=") || c.contains("SID=")
+            } catch (_: Throwable) { false }
+        )
+    }
     var isRoomDisposed by remember { mutableStateOf(false) }
     var isWebViewMounted by remember { mutableStateOf(false) }
     var webViewCrashFallback by remember { mutableStateOf(false) }
     var hasJoinedZegoAudio by remember { mutableStateOf(false) }
     var lastRemoteSyncAppliedAt by remember { mutableLongStateOf(0L) }
+
+    fun refreshYouTubeAuthCookieFlag(): Boolean {
+        val signedIn = try {
+            val c = CookieManager.getInstance().getCookie("https://www.youtube.com") ?: ""
+            c.contains("SAPISID=") || c.contains("__Secure-3PAPISID=") || c.contains("SID=")
+        } catch (_: Throwable) { false }
+        hasYouTubeAuthSession = signedIn
+        return signedIn
+    }
 
     fun releaseNativeMediaPlayer() {
         isMediaPrepared = false
@@ -353,8 +374,8 @@ fun YouTubeRoomScreen(
         } catch (_: Throwable) {}
     }
 
-    // Resolve direct stream whenever currentVideo.id changes
-    LaunchedEffect(currentVideo.id) {
+    // Resolve direct stream whenever currentVideo.id or authRefreshTrigger changes
+    LaunchedEffect(currentVideo.id, authRefreshTrigger) {
         val vid = currentVideo.id.trim()
         if (vid.isEmpty()) return@LaunchedEffect
         releaseNativeMediaPlayer()
@@ -362,8 +383,13 @@ fun YouTubeRoomScreen(
         useWebViewFallback = false
         isWebViewInteractive = false
         isResolvingStream = true
+        val ytCookies = try {
+            CookieManager.getInstance().getCookie("https://www.youtube.com")
+        } catch (_: Throwable) {
+            null
+        }
         val stream = try {
-            YouTubeSearchEngine.resolveDirectStreamUrl(vid)
+            YouTubeSearchEngine.resolveDirectStreamUrl(vid, ytCookies)
         } catch (_: Throwable) {
             null
         }
@@ -1162,6 +1188,7 @@ fun YouTubeRoomScreen(
     // System phone Back button / gesture handling
     BackHandler {
         when {
+            googleAuthDialogUrl != null -> googleAuthDialogUrl = null
             isExitConfirmDialogOpen -> isExitConfirmDialogOpen = false
             selectedUserForPermissions != null -> selectedUserForPermissions = null
             isSearchModalOpen -> isSearchModalOpen = false
@@ -1173,239 +1200,116 @@ fun YouTubeRoomScreen(
 
     // Full RTL Root Layout
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+        val isDark = isAppInDarkTheme()
+        val roomScreenBg = if (isDark) {
+            DarkBg
+        } else if (AppSettingsManager.bgThemeState.value == "default") {
+            Color(0xFFF4F8FD)
+        } else {
+            getAppScreenBackground()
+        }
+        val density = LocalDensity.current
+        val isKeyboardOpen = WindowInsets.ime.getBottom(density) > 0
+        val isCompactChatTyping = isKeyboardOpen && activeSubTab == YouTubeRoomSubTab.CHAT
+        val isCompactSearchTyping = isKeyboardOpen && activeSubTab == YouTubeRoomSubTab.PLAYER
+        val playerHeight by animateDpAsState(
+            targetValue = when {
+                isCompactChatTyping -> 108.dp
+                isCompactSearchTyping -> 124.dp
+                isPlayerExpanded -> 286.dp
+                else -> 212.dp
+            },
+            animationSpec = tween(220),
+            label = "player_height"
+        )
+
+        LaunchedEffect(isKeyboardOpen, activeSubTab) {
+            if (isKeyboardOpen && activeSubTab == YouTubeRoomSubTab.CHAT && chatMessages.isNotEmpty()) {
+                delay(120)
+                try {
+                    chatListState.animateScrollToItem(chatMessages.size - 1)
+                } catch (_: Throwable) {}
+            }
+        }
+
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(getAppScreenBackground())
+                .background(roomScreenBg)
                 .statusBarsPadding()
                 .navigationBarsPadding()
+                .imePadding()
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                val isDark = isAppInDarkTheme()
-                val playerHeight by animateDpAsState(
-                    targetValue = if (isPlayerExpanded) 286.dp else 220.dp,
-                    animationSpec = tween(260),
-                    label = "player_height"
-                )
-
                 // ====================================================
-                // 0. MODERN ORGANIZED FLOATING HEADER (No Back Button; Dedicated Exit Room Button)
+                // 0. SLIM BORDERLESS HEADER (Room Title + Exit Button only)
                 // ====================================================
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = if (isDark) DarkSurface else Color.White,
-                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
-                    shadowElevation = 3.dp,
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 4.dp, bottom = 7.dp)
+                        .padding(horizontal = 2.dp, vertical = 3.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
+                    Text(
+                        text = roomTitle,
+                        fontSize = 14.5.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = TajawalFontFamily,
+                        color = if (isDark) DarkTextPrimary else Color(0xFF1E3A8A),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            .weight(1f)
+                            .padding(end = 8.dp)
+                    )
+
+                    Surface(
+                        onClick = { isExitConfirmDialogOpen = true },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (isDark) DarkSurface else Color(0xFFEEF5FF),
+                        border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFDBEAFE)),
+                        modifier = Modifier.height(30.dp)
                     ) {
-                        // Sleek Live Cinema Room Emblem
-                        Box(
-                            modifier = Modifier
-                                .size(38.dp)
-                                .shadow(3.dp, CircleShape)
-                                .background(
-                                    Brush.linearGradient(
-                                        listOf(Color(0xFFEF4444), Color(0xFFB91C1C))
-                                    ),
-                                    CircleShape
-                                ),
-                            contentAlignment = Alignment.Center
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Icon(
-                                imageVector = Icons.Default.PlayArrow,
-                                contentDescription = null,
-                                tint = Color.White,
-                                modifier = Modifier.size(21.dp)
+                                imageVector = Icons.Default.Logout,
+                                contentDescription = "خروج من الغرفة",
+                                tint = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB),
+                                modifier = Modifier.size(13.5.dp)
                             )
-                        }
-
-                        // Room Title + Clean Single-Line Metadata Capsules
-                        Column(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
                             Text(
-                                text = roomTitle,
-                                fontSize = 13.5.sp,
+                                text = "خروج",
+                                fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
                                 fontFamily = TajawalFontFamily,
-                                color = if (isDark) DarkTextPrimary else Color(0xFF0F172A),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                color = if (isDark) Color(0xFF93C5FD) else Color(0xFF1E3A8A)
                             )
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                // Copyable Room Code Pill
-                                Surface(
-                                    onClick = {
-                                        try {
-                                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                            cm?.setPrimaryClip(ClipData.newPlainText("RoomCode", roomCode))
-                                            Toast.makeText(context, "تم نسخ كود الغرفة: $roomCode", Toast.LENGTH_SHORT).show()
-                                        } catch (_: Exception) {}
-                                    },
-                                    shape = RoundedCornerShape(50),
-                                    color = if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.4f) else Color(0xFFEFF6FF)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.5.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        Text(
-                                            text = roomCode,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            fontFamily = FontFamily.SansSerif,
-                                            color = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB)
-                                        )
-                                        Icon(
-                                            imageVector = Icons.Default.ContentCopy,
-                                            contentDescription = "نسخ الكود",
-                                            tint = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB),
-                                            modifier = Modifier.size(10.dp)
-                                        )
-                                    }
-                                }
-
-                                // Live Viewers Pill
-                                Surface(
-                                    shape = RoundedCornerShape(50),
-                                    color = if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9)
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.5.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                    ) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(6.dp)
-                                                .background(Color(0xFF10B981), CircleShape)
-                                        )
-                                        Text(
-                                            text = "${roomUsers.size.coerceAtLeast(1)} مشاهد",
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            fontFamily = TajawalFontFamily,
-                                            color = if (isDark) DarkTextSecondary else Color(0xFF475569)
-                                        )
-                                    }
-                                }
-                            }
-                        }
-
-                        // Compact Action Capsules: Sync + Exit Room
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            // Live Sync Status Capsule
-                            Surface(
-                                onClick = { resyncRoomNow() },
-                                shape = RoundedCornerShape(50),
-                                color = if (isSyncConnected) {
-                                    if (isDark) Color(0xFF064E3B).copy(alpha = 0.7f) else Color(0xFFECFDF5)
-                                } else {
-                                    if (isDark) Color(0xFF78350F).copy(alpha = 0.6f) else Color(0xFFFFFBEB)
-                                },
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isSyncConnected) Color(0xFF10B981).copy(alpha = 0.45f) else Color(0xFFF59E0B).copy(alpha = 0.55f)
-                                ),
-                                modifier = Modifier.height(34.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 9.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Sync,
-                                        contentDescription = "مزامنة",
-                                        tint = if (isSyncConnected) {
-                                            if (isDark) Color(0xFF6EE7B7) else Color(0xFF059669)
-                                        } else {
-                                            if (isDark) Color(0xFFFCD34D) else Color(0xFFD97706)
-                                        },
-                                        modifier = Modifier.size(13.5.dp)
-                                    )
-                                    Text(
-                                        text = if (isSyncConnected) "متزامن" else "مزامنة",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = TajawalFontFamily,
-                                        color = if (isSyncConnected) {
-                                            if (isDark) Color(0xFF6EE7B7) else Color(0xFF047857)
-                                        } else {
-                                            if (isDark) Color(0xFFFCD34D) else Color(0xFFB45309)
-                                        }
-                                    )
-                                }
-                            }
-
-                            // Dedicated Exit Room Capsule Button
-                            Surface(
-                                onClick = { isExitConfirmDialogOpen = true },
-                                shape = RoundedCornerShape(50),
-                                color = if (isDark) Color(0xFF450A0A).copy(alpha = 0.85f) else Color(0xFFFEF2F2),
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isDark) Color(0xFFEF4444).copy(alpha = 0.45f) else Color(0xFFFECACA)
-                                ),
-                                modifier = Modifier.height(34.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Logout,
-                                        contentDescription = "خروج من الغرفة",
-                                        tint = if (isDark) Color(0xFFFCA5A5) else Color(0xFFDC2626),
-                                        modifier = Modifier.size(14.dp)
-                                    )
-                                    Text(
-                                        text = "خروج",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = TajawalFontFamily,
-                                        color = if (isDark) Color(0xFFFCA5A5) else Color(0xFFDC2626)
-                                    )
-                                }
-                            }
                         }
                     }
                 }
 
+                Spacer(modifier = Modifier.height(4.dp))
+
                 // ====================================================
-                // 1. DEDICATED TOP VIDEO PLAYER BOX (Pure Clean Video Stream, Natural Fit, Zero Overlays)
+                // 1. DEDICATED TOP VIDEO PLAYER BOX (GamesRoom-matched Soft Frame + Native/Chrome-UA Playback)
                 // ====================================================
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(playerHeight)
-                        .shadow(4.dp, RoundedCornerShape(20.dp))
-                        .clip(RoundedCornerShape(20.dp))
+                        .clip(RoundedCornerShape(24.dp))
                         .background(Color.Black)
-                        .border(1.dp, if (isDark) DarkBorder else Color(0xFFCBD5E1), RoundedCornerShape(20.dp)),
+                        .border(1.5.dp, if (isDark) DarkBorder else Color(0xFFDBEAFE), RoundedCornerShape(24.dp)),
                     contentAlignment = Alignment.Center
                 ) {
                     if (webViewCrashFallback) {
@@ -1490,7 +1394,7 @@ fun YouTubeRoomScreen(
                                         verticalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         CircularProgressIndicator(
-                                            color = Color(0xFFEF4444),
+                                            color = Color(0xFF3B82F6),
                                             strokeWidth = 2.5.dp,
                                             modifier = Modifier.size(28.dp)
                                         )
@@ -1506,474 +1410,504 @@ fun YouTubeRoomScreen(
                         }
                     } else if (!isWebViewMounted) {
                         CircularProgressIndicator(
-                            color = Color(0xFFEF4444),
+                            color = Color(0xFF3B82F6),
                             strokeWidth = 2.5.dp,
                             modifier = Modifier.size(28.dp)
                         )
                     } else {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                    AndroidView(
-                        factory = { ctx ->
-                            try {
-                                WebView(ctx).apply {
-                                try {
-                                    val cookieMgr = CookieManager.getInstance()
-                                    cookieMgr.setAcceptCookie(true)
-                                    cookieMgr.setAcceptThirdPartyCookies(this, true)
-                                    cookieMgr.setCookie("https://www.youtube.com", "CONSENT=YES+cb; Path=/; Secure; SameSite=None")
-                                    cookieMgr.setCookie("https://www.youtube.com", "PREF=hl=ar&gl=IQ; Path=/; Secure; SameSite=None")
-                                    cookieMgr.flush()
-                                } catch (_: Throwable) {}
-                                layoutParams = ViewGroup.LayoutParams(
-                                    ViewGroup.LayoutParams.MATCH_PARENT,
-                                    ViewGroup.LayoutParams.MATCH_PARENT
-                                )
-                                settings.apply {
-                                    javaScriptEnabled = true
-                                    domStorageEnabled = true
-                                    databaseEnabled = true
-                                    mediaPlaybackRequiresUserGesture = false
-                                    loadWithOverviewMode = true
-                                    useWideViewPort = true
-                                    allowContentAccess = true
-                                    allowFileAccess = true
-                                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                                    cacheMode = WebSettings.LOAD_DEFAULT
-                                }
-                                webChromeClient = WebChromeClient()
-                                var usedWorkerYtPlayer = true
-                                webViewClient = object : WebViewClient() {
-                                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                                        val urlStr = request?.url?.toString()?.lowercase() ?: return true
-                                        if (isWebViewInteractive) {
-                                            val isAuthOrYt = urlStr.startsWith("https://accounts.google.com") ||
-                                                urlStr.startsWith("https://accounts.youtube.com") ||
-                                                urlStr.startsWith("https://myaccount.google.com") ||
-                                                urlStr.startsWith("https://www.youtube.com") ||
-                                                urlStr.startsWith("https://m.youtube.com") ||
-                                                urlStr.startsWith("https://www.youtube-nocookie.com") ||
-                                                urlStr.startsWith("https://ooki-game.ahmed1986y5.workers.dev") ||
-                                                urlStr == "about:blank"
-                                            return !isAuthOrYt
-                                        }
-                                        val isAllowedEmbed = urlStr.startsWith("https://www.youtube.com/embed/") ||
-                                            urlStr.startsWith("https://youtube.com/embed/") ||
-                                            urlStr.startsWith("https://www.youtube-nocookie.com/embed/") ||
-                                            urlStr.startsWith("https://ooki-game.ahmed1986y5.workers.dev") ||
-                                            urlStr.startsWith("https://accounts.google.com/") ||
-                                            urlStr.startsWith("https://accounts.youtube.com/") ||
-                                            urlStr == "about:blank"
-                                        return !isAllowedEmbed
-                                    }
-                                    override fun onPageFinished(view: WebView?, url: String?) {
-                                        try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
-                                        val lower = url?.lowercase() ?: ""
-                                        if (isWebViewInteractive && (lower.startsWith("https://www.youtube.com/?") || lower == "https://www.youtube.com/" || lower.startsWith("https://m.youtube.com/?"))) {
-                                            isWebViewInteractive = false
-                                            val reloadId = currentVideo.id.ifBlank { "dQw4w9WgXcQ" }
-                                            val volPct = (videoVolume * 100).toInt().coerceIn(0, 100)
-                                            view?.loadUrl("https://ooki-game.ahmed1986y5.workers.dev/yt-player?v=${Uri.encode(reloadId)}&autoplay=${if (isPlaying) 1 else 0}&vol=$volPct")
-                                        }
-                                    }
-                                    override fun onReceivedHttpError(
-                                        view: WebView?,
-                                        request: WebResourceRequest?,
-                                        errorResponse: WebResourceResponse?
-                                    ) {
-                                        val reqUrl = request?.url?.toString() ?: ""
-                                        if (usedWorkerYtPlayer && reqUrl.contains("/yt-player") && (errorResponse?.statusCode ?: 0) >= 400) {
-                                            usedWorkerYtPlayer = false
-                                            view?.post {
-                                                val fallbackId = currentVideo.id.ifBlank { "dQw4w9WgXcQ" }
-                                                view.loadUrl("https://www.youtube.com/embed/$fallbackId?autoplay=1&controls=0&playsinline=1&rel=0&iv_load_policy=3")
+                        val chromeMobileUa = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            AndroidView(
+                                factory = { ctx ->
+                                    try {
+                                        WebView(ctx).apply {
+                                            try {
+                                                val cookieMgr = CookieManager.getInstance()
+                                                cookieMgr.setAcceptCookie(true)
+                                                cookieMgr.setAcceptThirdPartyCookies(this, true)
+                                                cookieMgr.setCookie("https://www.youtube.com", "CONSENT=YES+cb; Path=/; Secure; SameSite=None")
+                                                cookieMgr.setCookie("https://www.youtube.com", "PREF=hl=ar&gl=IQ; Path=/; Secure; SameSite=None")
+                                                cookieMgr.flush()
+                                            } catch (_: Throwable) {}
+                                            layoutParams = ViewGroup.LayoutParams(
+                                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                                ViewGroup.LayoutParams.MATCH_PARENT
+                                            )
+                                            settings.apply {
+                                                userAgentString = chromeMobileUa
+                                                javaScriptEnabled = true
+                                                domStorageEnabled = true
+                                                databaseEnabled = true
+                                                mediaPlaybackRequiresUserGesture = false
+                                                javaScriptCanOpenWindowsAutomatically = true
+                                                setSupportMultipleWindows(true)
+                                                loadWithOverviewMode = true
+                                                useWideViewPort = true
+                                                allowContentAccess = true
+                                                allowFileAccess = true
+                                                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                                cacheMode = WebSettings.LOAD_DEFAULT
                                             }
+                                            webChromeClient = object : WebChromeClient() {
+                                                override fun onCreateWindow(
+                                                    view: WebView?,
+                                                    isDialog: Boolean,
+                                                    isUserGesture: Boolean,
+                                                    resultMsg: android.os.Message?
+                                                ): Boolean {
+                                                    val helperCtx = view?.context ?: return false
+                                                    val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                                                    val popupHelper = WebView(helperCtx).apply {
+                                                        webViewClient = object : WebViewClient() {
+                                                            override fun shouldOverrideUrlLoading(v: WebView?, req: WebResourceRequest?): Boolean {
+                                                                val targetUrl = req?.url?.toString() ?: return true
+                                                                val lowerTarget = targetUrl.lowercase()
+                                                                if (lowerTarget.startsWith("https://accounts.google.com") ||
+                                                                    lowerTarget.startsWith("https://accounts.youtube.com") ||
+                                                                    lowerTarget.startsWith("https://www.youtube.com/signin") ||
+                                                                    lowerTarget.startsWith("https://myaccount.google.com")
+                                                                ) {
+                                                                    googleAuthDialogUrl = targetUrl
+                                                                }
+                                                                try { destroy() } catch (_: Throwable) {}
+                                                                return true
+                                                            }
+                                                        }
+                                                    }
+                                                    transport.webView = popupHelper
+                                                    resultMsg.sendToTarget()
+                                                    return true
+                                                }
+                                            }
+                                            var usedWorkerYtPlayer = true
+                                            webViewClient = object : WebViewClient() {
+                                                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                                                    val rawUrl = request?.url?.toString() ?: return true
+                                                    val urlStr = rawUrl.lowercase()
+                                                    if (urlStr.startsWith("https://accounts.google.com") ||
+                                                        urlStr.startsWith("https://accounts.youtube.com") ||
+                                                        urlStr.startsWith("https://myaccount.google.com") ||
+                                                        urlStr.startsWith("https://www.youtube.com/signin")
+                                                    ) {
+                                                        googleAuthDialogUrl = rawUrl
+                                                        return true
+                                                    }
+                                                    val isAllowedEmbed = urlStr.startsWith("https://www.youtube.com/embed/") ||
+                                                        urlStr.startsWith("https://youtube.com/embed/") ||
+                                                        urlStr.startsWith("https://www.youtube-nocookie.com/embed/") ||
+                                                        urlStr.startsWith("https://ooki-game.ahmed1986y5.workers.dev") ||
+                                                        urlStr == "about:blank"
+                                                    return !isAllowedEmbed
+                                                }
+                                                override fun onPageFinished(view: WebView?, url: String?) {
+                                                    try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
+                                                    refreshYouTubeAuthCookieFlag()
+                                                }
+                                                override fun onReceivedHttpError(
+                                                    view: WebView?,
+                                                    request: WebResourceRequest?,
+                                                    errorResponse: WebResourceResponse?
+                                                ) {
+                                                    val reqUrl = request?.url?.toString() ?: ""
+                                                    if (usedWorkerYtPlayer && reqUrl.contains("/yt-player") && (errorResponse?.statusCode ?: 0) >= 400) {
+                                                        usedWorkerYtPlayer = false
+                                                        view?.post {
+                                                            val fallbackId = currentVideo.id.ifBlank { "dQw4w9WgXcQ" }
+                                                            view.loadUrl("https://www.youtube.com/embed/$fallbackId?autoplay=1&controls=0&playsinline=1&rel=0&iv_load_policy=3")
+                                                        }
+                                                    }
+                                                }
+                                                override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
+                                                    if (view != null) {
+                                                        webViewRefHolder.compareAndSet(view, null)
+                                                    }
+                                                    webViewCrashFallback = true
+                                                    return true
+                                                }
+                                            }
+                                            val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+                                            addJavascriptInterface(
+                                                object {
+                                                    @JavascriptInterface
+                                                    fun reportTime(curr: Float, dur: Float) {
+                                                        mainHandler.post {
+                                                            currentPositionSec = curr
+                                                            if (dur > 0f) totalDurationSec = dur
+                                                        }
+                                                    }
+
+                                                    @JavascriptInterface
+                                                    fun reportState(state: Int) {
+                                                        mainHandler.post {
+                                                            if (System.currentTimeMillis() - lastRemoteSyncAppliedAt < 900L) return@post
+                                                            if (state == 1) isPlaying = true
+                                                            else if (state == 2) isPlaying = false
+                                                        }
+                                                    }
+                                                },
+                                                "AndroidBridge"
+                                            )
+
+                                            val initialId = currentVideo.id.ifBlank { "dQw4w9WgXcQ" }
+                                            val initialVolPercent = (videoVolume * 100).toInt()
+                                            webViewRefHolder.set(this)
+                                            val workerPlayerUrl = "https://ooki-game.ahmed1986y5.workers.dev/yt-player?v=${Uri.encode(initialId)}&autoplay=${if (isPlaying) 1 else 0}&vol=$initialVolPercent"
+                                            loadUrl(workerPlayerUrl)
+                                        }
+                                    } catch (_: Throwable) {
+                                        android.view.View(ctx).apply {
+                                            setBackgroundColor(android.graphics.Color.BLACK)
                                         }
                                     }
-                                    override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
-                                        if (view != null) {
+                                },
+                                update = { webView ->
+                                    if (!isRoomDisposed && webView is WebView && webView.tag != "wv_destroyed") {
+                                        webViewRefHolder.set(webView)
+                                    }
+                                },
+                                onRelease = { view ->
+                                    try {
+                                        if (view is WebView) {
                                             webViewRefHolder.compareAndSet(view, null)
-                                        }
-                                        webViewCrashFallback = true
-                                        return true
-                                    }
-                                }
-                                val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
-                                addJavascriptInterface(
-                                    object {
-                                        @JavascriptInterface
-                                        fun reportTime(curr: Float, dur: Float) {
-                                            mainHandler.post {
-                                                currentPositionSec = curr
-                                                if (dur > 0f) totalDurationSec = dur
+                                            if (view.tag != "wv_destroyed") {
+                                                view.tag = "wv_destroyed"
+                                                view.stopLoading()
+                                                view.onPause()
+                                                view.loadUrl("about:blank")
+                                                (view.parent as? ViewGroup)?.removeView(view)
+                                                view.removeAllViews()
+                                                view.destroy()
                                             }
                                         }
-
-                                        @JavascriptInterface
-                                        fun reportState(state: Int) {
-                                            mainHandler.post {
-                                                if (System.currentTimeMillis() - lastRemoteSyncAppliedAt < 900L) return@post
-                                                if (state == 1) isPlaying = true
-                                                else if (state == 2) isPlaying = false
-                                            }
-                                        }
-                                    },
-                                    "AndroidBridge"
-                                )
-
-                                val initialId = currentVideo.id.ifBlank { "dQw4w9WgXcQ" }
-                                val initialVolPercent = (videoVolume * 100).toInt()
-                                webViewRefHolder.set(this)
-                                val workerPlayerUrl = "https://ooki-game.ahmed1986y5.workers.dev/yt-player?v=${Uri.encode(initialId)}&autoplay=${if (isPlaying) 1 else 0}&vol=$initialVolPercent"
-                                loadUrl(workerPlayerUrl)
-                            }
-                        } catch (_: Throwable) {
-                            android.view.View(ctx).apply {
-                                setBackgroundColor(android.graphics.Color.BLACK)
-                            }
-                        }
-                    },
-                    update = { webView ->
-                        if (!isRoomDisposed && webView is WebView && webView.tag != "wv_destroyed") {
-                            webViewRefHolder.set(webView)
-                            val shieldState = if (isWebViewInteractive) "none" else "auto"
-                            webView.evaluateJavascript(
-                                "var s=document.getElementById('touch-shield');if(s)s.style.pointerEvents='$shieldState';",
-                                null
-                            )
-                        }
-                    },
-                    onRelease = { view ->
-                        try {
-                            if (view is WebView) {
-                                webViewRefHolder.compareAndSet(view, null)
-                                if (view.tag != "wv_destroyed") {
-                                    view.tag = "wv_destroyed"
-                                    view.stopLoading()
-                                    view.onPause()
-                                    view.loadUrl("about:blank")
-                                    (view.parent as? ViewGroup)?.removeView(view)
-                                    view.removeAllViews()
-                                    view.destroy()
-                                }
-                            }
-                        } catch (_: Throwable) {}
-                    },
-                    modifier = Modifier.fillMaxSize()
-                    )
-                    if (!isWebViewInteractive) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .pointerInput(Unit) {
-                                    detectTapGestures(onTap = {})
-                                }
-                        )
-                    }
-                    Surface(
-                        onClick = { isWebViewInteractive = !isWebViewInteractive },
-                        shape = RoundedCornerShape(8.dp),
-                        color = Color.Black.copy(alpha = 0.65f),
-                        border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.25f)),
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(8.dp)
-                    ) {
-                        Text(
-                            text = if (isWebViewInteractive) "قفل الشاشة 🔒" else "تفاعل / تسجيل دخول",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = TajawalFontFamily,
-                            color = Color.White,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                        )
-                    }
-                    }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // ====================================================
-                // 2. MODERN CIRCULAR MEDIA CONSOLE & SCRUBBER DECK
-                // ====================================================
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = if (isDark) DarkSurface else Color.White,
-                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
-                    shadowElevation = 2.5.dp,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        // Top Tier: Sleek Timeline + Crisp Tabular Timestamps
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.4f) else Color(0xFFEFF6FF)
-                            ) {
-                                Text(
-                                    text = formatTime(currentPositionSec),
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    fontFamily = FontFamily.SansSerif,
-                                    color = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB),
-                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
-                                )
-                            }
-                            Slider(
-                                value = currentPositionSec.coerceIn(0f, totalDurationSec.coerceAtLeast(1f)),
-                                onValueChange = { currentPositionSec = it },
-                                onValueChangeFinished = { performSeek(currentPositionSec) },
-                                valueRange = 0f..totalDurationSec.coerceAtLeast(1f),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(22.dp),
-                                colors = SliderDefaults.colors(
-                                    thumbColor = Color(0xFF2563EB),
-                                    activeTrackColor = Color(0xFF2563EB),
-                                    inactiveTrackColor = if (isDark) DarkBorder else Color(0xFFE2E8F0)
-                                )
-                            )
-                            Surface(
-                                shape = RoundedCornerShape(50),
-                                color = if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9)
-                            ) {
-                                Text(
-                                    text = formatTime(totalDurationSec),
-                                    fontSize = 10.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    fontFamily = FontFamily.SansSerif,
-                                    color = if (isDark) DarkTextSecondary else Color(0xFF64748B),
-                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
-                                )
-                            }
-                        }
-
-                        // Bottom Tier: Modern Circular Media Transport Controls
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            // Expand / Compact Cinema Player Orb
-                            Surface(
-                                onClick = { isPlayerExpanded = !isPlayerExpanded },
-                                shape = CircleShape,
-                                color = if (isPlayerExpanded) {
-                                    if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.55f) else Color(0xFFEFF6FF)
-                                } else {
-                                    if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9)
+                                    } catch (_: Throwable) {}
                                 },
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (isPlayerExpanded) Color(0xFF3B82F6).copy(alpha = 0.5f) else (if (isDark) DarkBorder else Color(0xFFE2E8F0))
-                                ),
-                                modifier = Modifier.size(38.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = if (isPlayerExpanded) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                                        contentDescription = "حجم المشغل",
-                                        tint = if (isPlayerExpanded) Color(0xFF2563EB) else (if (isDark) DarkTextSecondary else Color(0xFF475569)),
-                                        modifier = Modifier.size(19.dp)
-                                    )
-                                }
-                            }
-
-                            // Centered Circular Transport Cluster
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(14.dp)
-                            ) {
-                                // Rewind 10s Circular Tonal Orb
+                                modifier = Modifier.fillMaxSize()
+                            )
+                            if (!hasYouTubeAuthSession && !isCompactChatTyping) {
                                 Surface(
-                                    onClick = { performSeek(currentPositionSec - 10f) },
-                                    shape = CircleShape,
-                                    color = if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9),
-                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0)),
-                                    modifier = Modifier.size(40.dp)
+                                    onClick = {
+                                        googleAuthDialogUrl = "https://accounts.google.com/ServiceLogin?service=youtube&hl=ar&continue=https%3A%2F%2Fwww.youtube.com%2F"
+                                    },
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = Color(0xFF1D4ED8).copy(alpha = 0.88f),
+                                    border = BorderStroke(1.dp, Color.White.copy(alpha = 0.25f)),
+                                    modifier = Modifier
+                                        .align(Alignment.BottomStart)
+                                        .padding(8.dp)
                                 ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            imageVector = Icons.Default.Replay10,
-                                            contentDescription = "ترجيع 10 ثواني",
-                                            tint = if (isDark) DarkTextPrimary else Color(0xFF1E293B),
-                                            modifier = Modifier.size(21.dp)
-                                        )
-                                    }
-                                }
-
-                                // Hero Play / Pause Gradient Orb
-                                Surface(
-                                    onClick = { togglePlayback() },
-                                    shape = CircleShape,
-                                    color = Color.Transparent,
-                                    shadowElevation = 5.dp,
-                                    modifier = Modifier.size(48.dp)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .background(
-                                                Brush.linearGradient(
-                                                    if (isPlaying) listOf(Color(0xFFEF4444), Color(0xFFDC2626))
-                                                    else listOf(Color(0xFF3B82F6), Color(0xFF1D4ED8))
-                                                ),
-                                                CircleShape
-                                            ),
-                                        contentAlignment = Alignment.Center
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
                                     ) {
                                         Icon(
-                                            imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                                            contentDescription = if (isPlaying) "إيقاف" else "تشغيل",
+                                            imageVector = Icons.Default.LockOpen,
+                                            contentDescription = null,
                                             tint = Color.White,
-                                            modifier = Modifier.size(25.dp)
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Text(
+                                            text = "تأكيد حساب Google للتشغيل",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = TajawalFontFamily,
+                                            color = Color.White
                                         )
                                     }
-                                }
-
-                                // Forward 10s Circular Tonal Orb
-                                Surface(
-                                    onClick = { performSeek(currentPositionSec + 10f) },
-                                    shape = CircleShape,
-                                    color = if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9),
-                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0)),
-                                    modifier = Modifier.size(40.dp)
-                                ) {
-                                    Box(contentAlignment = Alignment.Center) {
-                                        Icon(
-                                            imageVector = Icons.Default.Forward10,
-                                            contentDescription = "تقديم 10 ثواني",
-                                            tint = if (isDark) DarkTextPrimary else Color(0xFF1E293B),
-                                            modifier = Modifier.size(21.dp)
-                                        )
-                                    }
-                                }
-                            }
-
-                            // Mute / Unmute Audio Circular Orb
-                            Surface(
-                                onClick = {
-                                    if (videoVolume > 0f) {
-                                        lastVolumeBeforeMute = videoVolume
-                                        videoVolume = 0f
-                                    } else {
-                                        videoVolume = if (lastVolumeBeforeMute > 0.05f) lastVolumeBeforeMute else 1.0f
-                                    }
-                                },
-                                shape = CircleShape,
-                                color = if (videoVolume <= 0f) {
-                                    if (isDark) Color(0xFF450A0A) else Color(0xFFFEF2F2)
-                                } else {
-                                    if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.45f) else Color(0xFFEFF6FF)
-                                },
-                                border = BorderStroke(
-                                    1.dp,
-                                    if (videoVolume <= 0f) Color(0xFFEF4444).copy(alpha = 0.45f) else Color(0xFF2563EB).copy(alpha = 0.35f)
-                                ),
-                                modifier = Modifier.size(38.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = if (videoVolume <= 0f) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                                        contentDescription = "صوت الفيديو",
-                                        tint = if (videoVolume <= 0f) Color(0xFFEF4444) else Color(0xFF2563EB),
-                                        modifier = Modifier.size(19.dp)
-                                    )
                                 }
                             }
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(7.dp))
+                // ====================================================
+                // 2. MODERN CIRCULAR MEDIA CONSOLE & SCRUBBER DECK (GamesRoom Blue Theme)
+                // ====================================================
+                AnimatedVisibility(visible = !isCompactChatTyping && !isCompactSearchTyping) {
+                    Column {
+                        Spacer(modifier = Modifier.height(7.dp))
+                        Surface(
+                            shape = RoundedCornerShape(22.dp),
+                            color = if (isDark) DarkSurface else Color.White,
+                            border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFDBEAFE)),
+                            shadowElevation = 2.dp,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 7.dp),
+                                verticalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                // Top Tier: Sleek Timeline + Crisp Tabular Timestamps
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.4f) else Color(0xFFEEF5FF)
+                                    ) {
+                                        Text(
+                                            text = formatTime(currentPositionSec),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.SansSerif,
+                                            color = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB),
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                    Slider(
+                                        value = currentPositionSec.coerceIn(0f, totalDurationSec.coerceAtLeast(1f)),
+                                        onValueChange = { currentPositionSec = it },
+                                        onValueChangeFinished = { performSeek(currentPositionSec) },
+                                        valueRange = 0f..totalDurationSec.coerceAtLeast(1f),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(22.dp),
+                                        colors = SliderDefaults.colors(
+                                            thumbColor = Color(0xFF2563EB),
+                                            activeTrackColor = Color(0xFF2563EB),
+                                            inactiveTrackColor = if (isDark) DarkBorder else Color(0xFFDBEAFE)
+                                        )
+                                    )
+                                    Surface(
+                                        shape = RoundedCornerShape(50),
+                                        color = if (isDark) DarkSurfaceVariant else Color(0xFFEEF5FF)
+                                    ) {
+                                        Text(
+                                            text = formatTime(totalDurationSec),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            fontFamily = FontFamily.SansSerif,
+                                            color = if (isDark) DarkTextSecondary else Color(0xFF1E3A8A),
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+
+                                // Bottom Tier: Modern Circular Media Transport Controls (Consistent App Blue Theme)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    // Expand / Compact Cinema Player Orb
+                                    Surface(
+                                        onClick = { isPlayerExpanded = !isPlayerExpanded },
+                                        shape = CircleShape,
+                                        color = if (isPlayerExpanded) {
+                                            if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.55f) else Color(0xFFDBEAFE)
+                                        } else {
+                                            if (isDark) DarkSurfaceVariant else Color(0xFFEEF5FF)
+                                        },
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (isPlayerExpanded) Color(0xFF2563EB).copy(alpha = 0.55f) else (if (isDark) DarkBorder else Color(0xFFDBEAFE))
+                                        ),
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (isPlayerExpanded) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
+                                                contentDescription = "حجم المشغل",
+                                                tint = if (isDark) Color(0xFF93C5FD) else Color(0xFF2563EB),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+
+                                    // Centered Circular Transport Cluster
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                    ) {
+                                        // Rewind 10s Circular Tonal Orb
+                                        Surface(
+                                            onClick = { performSeek(currentPositionSec - 10f) },
+                                            shape = CircleShape,
+                                            color = if (isDark) DarkSurfaceVariant else Color(0xFFEEF5FF),
+                                            border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFDBEAFE)),
+                                            modifier = Modifier.size(38.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Replay10,
+                                                    contentDescription = "ترجيع 10 ثواني",
+                                                    tint = if (isDark) DarkTextPrimary else Color(0xFF1E3A8A),
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                        }
+
+                                        // Hero Play / Pause App-Blue Gradient Orb
+                                        Surface(
+                                            onClick = { togglePlayback() },
+                                            shape = CircleShape,
+                                            color = Color.Transparent,
+                                            shadowElevation = 4.dp,
+                                            modifier = Modifier.size(46.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .background(
+                                                        Brush.linearGradient(
+                                                            listOf(Color(0xFF3B82F6), Color(0xFF1D4ED8))
+                                                        ),
+                                                        CircleShape
+                                                    ),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                                    contentDescription = if (isPlaying) "إيقاف" else "تشغيل",
+                                                    tint = Color.White,
+                                                    modifier = Modifier.size(24.dp)
+                                                )
+                                            }
+                                        }
+
+                                        // Forward 10s Circular Tonal Orb
+                                        Surface(
+                                            onClick = { performSeek(currentPositionSec + 10f) },
+                                            shape = CircleShape,
+                                            color = if (isDark) DarkSurfaceVariant else Color(0xFFEEF5FF),
+                                            border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFDBEAFE)),
+                                            modifier = Modifier.size(38.dp)
+                                        ) {
+                                            Box(contentAlignment = Alignment.Center) {
+                                                Icon(
+                                                    imageVector = Icons.Default.Forward10,
+                                                    contentDescription = "تقديم 10 ثواني",
+                                                    tint = if (isDark) DarkTextPrimary else Color(0xFF1E3A8A),
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    // Mute / Unmute Audio Circular Orb
+                                    Surface(
+                                        onClick = {
+                                            if (videoVolume > 0f) {
+                                                lastVolumeBeforeMute = videoVolume
+                                                videoVolume = 0f
+                                            } else {
+                                                videoVolume = if (lastVolumeBeforeMute > 0.05f) lastVolumeBeforeMute else 1.0f
+                                            }
+                                        },
+                                        shape = CircleShape,
+                                        color = if (videoVolume <= 0f) {
+                                            if (isDark) DarkSurfaceVariant else Color(0xFFF1F5F9)
+                                        } else {
+                                            if (isDark) Color(0xFF1E3A8A).copy(alpha = 0.45f) else Color(0xFFEEF5FF)
+                                        },
+                                        border = BorderStroke(
+                                            1.dp,
+                                            if (videoVolume <= 0f) (if (isDark) DarkBorder else Color(0xFFCBD5E1)) else (if (isDark) DarkBorder else Color(0xFFDBEAFE))
+                                        ),
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                imageVector = if (videoVolume <= 0f) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                                                contentDescription = "صوت الفيديو",
+                                                tint = if (videoVolume <= 0f) (if (isDark) DarkTextSecondary else Color(0xFF64748B)) else Color(0xFF2563EB),
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // ====================================================
-                // 3. FLOATING MODERN SEGMENTED DOCK (Crisp Badges & Animated Pills)
+                // 3. FLOATING MODERN SEGMENTED DOCK (Hidden while keyboard is open in Chat)
                 // ====================================================
-                Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = if (isDark) DarkSurface else Color.White,
-                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
-                    shadowElevation = 2.5.dp,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(62.dp)
-                ) {
-                    val activeCameraCount = roomUsers.count { it.hasCameraActive }
-                    val anySpeaking = isIntercomTalking || roomUsers.any { it.isSpeaking }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 6.dp, vertical = 5.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            YouTubeDockIconButton(
-                                icon = Icons.Default.PlayCircle,
-                                label = "المقاطع",
-                                isActive = activeSubTab == YouTubeRoomSubTab.PLAYER,
-                                isDark = isDark,
-                                onClick = { activeSubTab = YouTubeRoomSubTab.PLAYER }
-                            )
-                        }
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            YouTubeDockIconButton(
-                                icon = Icons.Default.ChatBubbleOutline,
-                                label = "الدردشة",
-                                isActive = activeSubTab == YouTubeRoomSubTab.CHAT,
-                                badgeCount = unreadChatCount,
-                                isDark = isDark,
-                                onClick = { activeSubTab = YouTubeRoomSubTab.CHAT }
-                            )
-                        }
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            YouTubeDockIconButton(
-                                icon = Icons.Default.Videocam,
-                                label = "الكاميرات",
-                                isActive = activeSubTab == YouTubeRoomSubTab.CAMERAS,
-                                badgeCount = activeCameraCount,
-                                isDark = isDark,
-                                onClick = { activeSubTab = YouTubeRoomSubTab.CAMERAS }
-                            )
-                        }
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            YouTubeDockIconButton(
-                                icon = Icons.Default.RecordVoiceOver,
-                                label = "الصوت",
-                                isActive = activeSubTab == YouTubeRoomSubTab.INTERCOM,
-                                showLiveDot = anySpeaking,
-                                isDark = isDark,
-                                onClick = { activeSubTab = YouTubeRoomSubTab.INTERCOM }
-                            )
-                        }
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            YouTubeDockIconButton(
-                                icon = Icons.Default.PeopleOutline,
-                                label = "الأعضاء",
-                                isActive = activeSubTab == YouTubeRoomSubTab.USERS,
-                                badgeCount = roomUsers.size,
-                                isDark = isDark,
-                                onClick = { activeSubTab = YouTubeRoomSubTab.USERS }
-                            )
-                        }
-                        Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            YouTubeDockIconButton(
-                                icon = Icons.Default.Settings,
-                                label = "الضبط",
-                                isActive = activeSubTab == YouTubeRoomSubTab.SETTINGS,
-                                isDark = isDark,
-                                onClick = { activeSubTab = YouTubeRoomSubTab.SETTINGS }
-                            )
+                AnimatedVisibility(visible = !isCompactChatTyping) {
+                    Column {
+                        Spacer(modifier = Modifier.height(7.dp))
+                        Surface(
+                            shape = RoundedCornerShape(22.dp),
+                            color = if (isDark) DarkSurface else Color.White,
+                            border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFDBEAFE)),
+                            shadowElevation = 2.dp,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(60.dp)
+                        ) {
+                            val activeCameraCount = roomUsers.count { it.hasCameraActive }
+                            val anySpeaking = isIntercomTalking || roomUsers.any { it.isSpeaking }
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 6.dp, vertical = 5.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                                    YouTubeDockIconButton(
+                                        icon = Icons.Default.PlayCircle,
+                                        label = "المقاطع",
+                                        isActive = activeSubTab == YouTubeRoomSubTab.PLAYER,
+                                        isDark = isDark,
+                                        onClick = { activeSubTab = YouTubeRoomSubTab.PLAYER }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                                    YouTubeDockIconButton(
+                                        icon = Icons.Default.ChatBubbleOutline,
+                                        label = "الدردشة",
+                                        isActive = activeSubTab == YouTubeRoomSubTab.CHAT,
+                                        badgeCount = unreadChatCount,
+                                        isDark = isDark,
+                                        onClick = { activeSubTab = YouTubeRoomSubTab.CHAT }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                                    YouTubeDockIconButton(
+                                        icon = Icons.Default.Videocam,
+                                        label = "الكاميرات",
+                                        isActive = activeSubTab == YouTubeRoomSubTab.CAMERAS,
+                                        badgeCount = activeCameraCount,
+                                        isDark = isDark,
+                                        onClick = { activeSubTab = YouTubeRoomSubTab.CAMERAS }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                                    YouTubeDockIconButton(
+                                        icon = Icons.Default.RecordVoiceOver,
+                                        label = "الصوت",
+                                        isActive = activeSubTab == YouTubeRoomSubTab.INTERCOM,
+                                        showLiveDot = anySpeaking,
+                                        isDark = isDark,
+                                        onClick = { activeSubTab = YouTubeRoomSubTab.INTERCOM }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                                    YouTubeDockIconButton(
+                                        icon = Icons.Default.PeopleOutline,
+                                        label = "الأعضاء",
+                                        isActive = activeSubTab == YouTubeRoomSubTab.USERS,
+                                        badgeCount = roomUsers.size,
+                                        isDark = isDark,
+                                        onClick = { activeSubTab = YouTubeRoomSubTab.USERS }
+                                    )
+                                }
+                                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                                    YouTubeDockIconButton(
+                                        icon = Icons.Default.Settings,
+                                        label = "الضبط",
+                                        isActive = activeSubTab == YouTubeRoomSubTab.SETTINGS,
+                                        isDark = isDark,
+                                        onClick = { activeSubTab = YouTubeRoomSubTab.SETTINGS }
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -2276,13 +2210,11 @@ fun YouTubeRoomScreen(
                         }
 
                         // ----------------------------------------------------
-                        // 4B. CHAT SUB-VIEW
+                        // 4B. CHAT SUB-VIEW (Keyboard-Safe above IME)
                         // ----------------------------------------------------
                         YouTubeRoomSubTab.CHAT -> {
                             Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .imePadding()
+                                modifier = Modifier.fillMaxSize()
                             ) {
                                 LazyColumn(
                                     state = chatListState,
@@ -2301,8 +2233,8 @@ fun YouTubeRoomScreen(
                                             ) {
                                                 Surface(
                                                     shape = RoundedCornerShape(10.dp),
-                                                    color = if (isDark) Color(0xFF131B2E) else Color(0xFFF8FAFC),
-                                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0))
+                                                    color = if (isDark) Color(0xFF131B2E) else Color(0xFFEEF5FF),
+                                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFDBEAFE))
                                                 ) {
                                                     Row(
                                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
@@ -2319,7 +2251,7 @@ fun YouTubeRoomScreen(
                                                             text = msg.text,
                                                             fontSize = 10.sp,
                                                             fontFamily = TajawalFontFamily,
-                                                            color = if (isDark) DarkTextSecondary else Color(0xFF475569)
+                                                            color = if (isDark) DarkTextSecondary else Color(0xFF1E3A8A)
                                                         )
                                                     }
                                                 }
@@ -2345,7 +2277,7 @@ fun YouTubeRoomScreen(
                                                         color = if (msg.isMe) {
                                                             if (msg.imageUrl != null) Color(0xFF60A5FA).copy(alpha = 0.35f) else Color(0xFF1D4ED8)
                                                         } else {
-                                                            if (isDark) DarkBorder else Color(0xFFE2E8F0)
+                                                            if (isDark) DarkBorder else Color(0xFFDBEAFE)
                                                         }
                                                     ),
                                                     shadowElevation = 0.5.dp,
@@ -2407,60 +2339,62 @@ fun YouTubeRoomScreen(
                                     }
                                 }
 
-                                // Quick Emoji Reaction Bar
-                                val quickReactions = listOf("❤️", "😂", "🔥", "👏", "😮", "👍")
-                                LazyRow(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(top = 4.dp, bottom = 2.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    items(quickReactions) { emoji ->
-                                        val myUser = roomUsers.find { it.id == currentUserId }
-                                        val isChatMuted = myUser?.isMutedChat == true
-                                        Surface(
-                                            onClick = {
-                                                if (!isChatMuted) {
-                                                    chatMessages.add(
-                                                        YouTubeChatMessage(
-                                                            id = "ytm_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
-                                                            sender = currentUserName,
-                                                            text = emoji,
-                                                            time = "الآن",
-                                                            isMe = true
+                                // Quick Emoji Reaction Bar (collapses smoothly while typing)
+                                AnimatedVisibility(visible = !isCompactChatTyping) {
+                                    val quickReactions = listOf("❤️", "😂", "🔥", "👏", "😮", "👍")
+                                    LazyRow(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 4.dp, bottom = 2.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        items(quickReactions) { emoji ->
+                                            val myUser = roomUsers.find { it.id == currentUserId }
+                                            val isChatMuted = myUser?.isMutedChat == true
+                                            Surface(
+                                                onClick = {
+                                                    if (!isChatMuted) {
+                                                        chatMessages.add(
+                                                            YouTubeChatMessage(
+                                                                id = "ytm_${System.currentTimeMillis()}_${java.util.UUID.randomUUID().toString().take(6)}",
+                                                                sender = currentUserName,
+                                                                text = emoji,
+                                                                time = "الآن",
+                                                                isMe = true
+                                                            )
                                                         )
-                                                    )
-                                                    syncSocket.broadcastChatMessage(emoji)
-                                                }
-                                            },
-                                            shape = CircleShape,
-                                            color = if (isDark) DarkSurface else Color.White,
-                                            border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2E8F0))
-                                        ) {
-                                            Text(
-                                                text = emoji,
-                                                fontSize = 14.sp,
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                                            )
+                                                        syncSocket.broadcastChatMessage(emoji)
+                                                    }
+                                                },
+                                                shape = CircleShape,
+                                                color = if (isDark) DarkSurface else Color.White,
+                                                border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFDBEAFE))
+                                            ) {
+                                                Text(
+                                                    text = emoji,
+                                                    fontSize = 14.sp,
+                                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                                                )
+                                            }
                                         }
                                     }
                                 }
 
-                                // Integrated Compact Message Input Bar
+                                // Integrated Compact Message Input Bar (Always pinned visibly above keyboard)
                                 Surface(
                                     shape = RoundedCornerShape(24.dp),
                                     color = if (isDark) DarkSurface else Color.White,
-                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFE2EAFD)),
+                                    border = BorderStroke(1.dp, if (isDark) DarkBorder else Color(0xFFDBEAFE)),
                                     shadowElevation = 2.dp,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(top = 3.dp, bottom = 2.dp)
+                                        .padding(top = 4.dp, bottom = 2.dp)
                                 ) {
                                     Row(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .height(48.dp)
-                                            .padding(horizontal = 7.dp),
+                                            .heightIn(min = 48.dp)
+                                            .padding(horizontal = 7.dp, vertical = 4.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
@@ -4281,6 +4215,106 @@ fun YouTubeRoomScreen(
                     }
                 }
             }
+            // ====================================================
+            // GOOGLE / YOUTUBE VERIFICATION MODAL (Roomy Chrome-UA WebView)
+            // ====================================================
+            val activeAuthUrl = googleAuthDialogUrl
+            if (activeAuthUrl != null) {
+                val isAuthDark = isAppInDarkTheme()
+                val chromeMobileUa = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36"
+                Dialog(
+                    onDismissRequest = { googleAuthDialogUrl = null },
+                    properties = DialogProperties(usePlatformDefaultWidth = false)
+                ) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth(0.95f)
+                            .fillMaxHeight(0.86f)
+                            .imePadding(),
+                        shape = RoundedCornerShape(24.dp),
+                        color = if (isAuthDark) DarkSurface else Color.White,
+                        border = BorderStroke(1.dp, if (isAuthDark) DarkBorder else Color(0xFFDBEAFE)),
+                        shadowElevation = 12.dp
+                    ) {
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(if (isAuthDark) DarkSurfaceVariant else Color(0xFFEEF5FF))
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "تأكيد حساب Google للمشاهدة",
+                                    fontSize = 13.5.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    fontFamily = TajawalFontFamily,
+                                    color = if (isAuthDark) DarkTextPrimary else Color(0xFF1E3A8A)
+                                )
+                                IconButton(
+                                    onClick = { googleAuthDialogUrl = null },
+                                    modifier = Modifier.size(30.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Close,
+                                        contentDescription = "إغلاق",
+                                        tint = if (isAuthDark) DarkTextPrimary else Color(0xFF1E3A8A),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                            AndroidView(
+                                factory = { ctx ->
+                                    WebView(ctx).apply {
+                                        try {
+                                            val cookieMgr = CookieManager.getInstance()
+                                            cookieMgr.setAcceptCookie(true)
+                                            cookieMgr.setAcceptThirdPartyCookies(this, true)
+                                        } catch (_: Throwable) {}
+                                        settings.apply {
+                                            userAgentString = chromeMobileUa
+                                            javaScriptEnabled = true
+                                            domStorageEnabled = true
+                                            databaseEnabled = true
+                                            javaScriptCanOpenWindowsAutomatically = true
+                                            loadWithOverviewMode = true
+                                            useWideViewPort = true
+                                            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                                        }
+                                        webChromeClient = WebChromeClient()
+                                        webViewClient = object : WebViewClient() {
+                                            override fun onPageFinished(view: WebView?, url: String?) {
+                                                try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
+                                                val lower = url?.lowercase() ?: ""
+                                                val signedInNow = refreshYouTubeAuthCookieFlag()
+                                                val landedOnYouTube = lower.startsWith("https://www.youtube.com") ||
+                                                    lower.startsWith("https://m.youtube.com")
+                                                if (signedInNow && landedOnYouTube) {
+                                                    googleAuthDialogUrl = null
+                                                    authRefreshTrigger++
+                                                    Toast.makeText(context, "تم تفعيل الحساب بنجاح، جاري تشغيل الفيديو 🎬", Toast.LENGTH_SHORT).show()
+                                                }
+                                            }
+                                        }
+                                        loadUrl(activeAuthUrl)
+                                    }
+                                },
+                                onRelease = { view ->
+                                    try {
+                                        view.stopLoading()
+                                        view.loadUrl("about:blank")
+                                        view.destroy()
+                                    } catch (_: Throwable) {}
+                                },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth()
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -4380,7 +4414,7 @@ private fun YouTubeDockIconButton(
                             .align(Alignment.TopEnd)
                             .defaultMinSize(minWidth = 15.dp)
                             .height(15.dp)
-                            .background(Color(0xFFEF4444), CircleShape)
+                            .background(Color(0xFF2563EB), CircleShape)
                             .border(1.5.dp, dockSurfaceBg, CircleShape)
                             .padding(horizontal = 4.dp),
                         contentAlignment = Alignment.Center
