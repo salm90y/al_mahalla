@@ -220,4 +220,200 @@ object YouTubeSearchEngine {
             isLive = duration.contains("بث") || duration.contains("مباشر") || duration.contains("Live", ignoreCase = true)
         )
     }
+
+    data class ResolvedYouTubeStream(
+        val url: String,
+        val userAgent: String,
+        val isHls: Boolean,
+        val qualityLabel: String = ""
+    )
+
+    private data class InnerTubePlayerClient(
+        val clientName: String,
+        val clientVersion: String,
+        val clientIdHeader: String,
+        val userAgent: String,
+        val osName: String? = null,
+        val osVersion: String? = null,
+        val deviceMake: String? = null,
+        val deviceModel: String? = null,
+        val androidSdkVersion: Int? = null,
+        val includeThirdPartyEmbed: Boolean = false
+    )
+
+    // 3. Resolve a direct playable stream URL from user's device IP (bypasses WebView BotGuard / sign-in prompts)
+    suspend fun resolveDirectStreamUrl(videoId: String): ResolvedYouTubeStream? = withContext(Dispatchers.IO) {
+        val cleanId = videoId.trim()
+        if (cleanId.isEmpty()) return@withContext null
+
+        val clients = listOf(
+            InnerTubePlayerClient(
+                clientName = "ANDROID_VR",
+                clientVersion = "1.60.19",
+                clientIdHeader = "28",
+                userAgent = "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
+                osName = "Android",
+                osVersion = "12L",
+                deviceMake = "Oculus",
+                deviceModel = "Quest 3",
+                androidSdkVersion = 32
+            ),
+            InnerTubePlayerClient(
+                clientName = "IOS",
+                clientVersion = "19.45.4",
+                clientIdHeader = "5",
+                userAgent = "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
+                osName = "iPhone",
+                osVersion = "18.1.0.22B83",
+                deviceMake = "Apple",
+                deviceModel = "iPhone16,2"
+            ),
+            InnerTubePlayerClient(
+                clientName = "ANDROID_EMBEDDED_PLAYER",
+                clientVersion = "19.44.38",
+                clientIdHeader = "55",
+                userAgent = "com.google.android.youtube/19.44.38 (Linux; U; Android 14) gzip",
+                osName = "Android",
+                osVersion = "14",
+                androidSdkVersion = 34,
+                includeThirdPartyEmbed = true
+            ),
+            InnerTubePlayerClient(
+                clientName = "ANDROID",
+                clientVersion = "19.29.37",
+                clientIdHeader = "3",
+                userAgent = "com.google.android.youtube/19.29.37 (Linux; U; Android 14) gzip",
+                osName = "Android",
+                osVersion = "14",
+                androidSdkVersion = 34
+            ),
+            InnerTubePlayerClient(
+                clientName = "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                clientVersion = "2.0",
+                clientIdHeader = "85",
+                userAgent = "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+                includeThirdPartyEmbed = true
+            )
+        )
+
+        for (client in clients) {
+            try {
+                val resolved = fetchPlayerStreamForClient(cleanId, client)
+                if (resolved != null) {
+                    return@withContext resolved
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Player client ${client.clientName} failed: ${e.message}")
+            }
+        }
+        return@withContext null
+    }
+
+    private fun fetchPlayerStreamForClient(videoId: String, client: InnerTubePlayerClient): ResolvedYouTubeStream? {
+        val url = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+        val clientJson = JSONObject().apply {
+            put("clientName", client.clientName)
+            put("clientVersion", client.clientVersion)
+            put("hl", "ar")
+            put("gl", "IQ")
+            client.osName?.let { put("osName", it) }
+            client.osVersion?.let { put("osVersion", it) }
+            client.deviceMake?.let { put("deviceMake", it) }
+            client.deviceModel?.let { put("deviceModel", it) }
+            client.androidSdkVersion?.let { put("androidSdkVersion", it) }
+        }
+        val contextJson = JSONObject().apply {
+            put("client", clientJson)
+            if (client.includeThirdPartyEmbed) {
+                put("thirdParty", JSONObject().apply {
+                    put("embedUrl", "https://www.youtube.com/")
+                })
+            }
+        }
+        val payload = JSONObject().apply {
+            put("context", contextJson)
+            put("videoId", videoId)
+            put("contentCheckOk", true)
+            put("racyCheckOk", true)
+        }
+
+        val body = payload.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
+        val request = Request.Builder()
+            .url(url)
+            .post(body)
+            .header("User-Agent", client.userAgent)
+            .header("X-YouTube-Client-Name", client.clientIdHeader)
+            .header("X-YouTube-Client-Version", client.clientVersion)
+            .header("Origin", "https://www.youtube.com")
+            .header("Content-Type", "application/json")
+            .header("Accept-Language", "ar,en;q=0.9")
+            .build()
+
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) return null
+            val raw = response.body?.string() ?: return null
+            val json = JSONObject(raw)
+            val status = json.optJSONObject("playabilityStatus")?.optString("status") ?: ""
+            if (!status.equals("OK", ignoreCase = true)) return null
+
+            val streamingData = json.optJSONObject("streamingData") ?: return null
+            val candidates = mutableListOf<ResolvedYouTubeStream>()
+
+            val formats = streamingData.optJSONArray("formats")
+            if (formats != null) {
+                val mp4Items = mutableListOf<Pair<Int, ResolvedYouTubeStream>>()
+                for (i in 0 until formats.length()) {
+                    val fmt = formats.optJSONObject(i) ?: continue
+                    val streamUrl = fmt.optString("url", "")
+                    if (streamUrl.isBlank()) continue
+                    val mime = fmt.optString("mimeType", "")
+                    if (!mime.contains("video/mp4", ignoreCase = true)) continue
+                    val itag = fmt.optInt("itag", 0)
+                    val qLabel = fmt.optString("qualityLabel", "")
+                    val score = when (itag) {
+                        22 -> 100 // 720p muxed MP4
+                        18 -> 80  // 360p muxed MP4
+                        else -> if (fmt.optInt("audioChannels", 0) > 0) 60 else 10
+                    }
+                    if (score > 10) {
+                        mp4Items.add(score to ResolvedYouTubeStream(streamUrl, client.userAgent, isHls = false, qualityLabel = qLabel))
+                    }
+                }
+                mp4Items.sortedByDescending { it.first }.forEach { candidates.add(it.second) }
+            }
+
+            val hlsUrl = streamingData.optString("hlsManifestUrl", "")
+            if (hlsUrl.isNotBlank()) {
+                candidates.add(ResolvedYouTubeStream(hlsUrl, client.userAgent, isHls = true, qualityLabel = "HLS"))
+            }
+
+            for (candidate in candidates) {
+                if (probeStreamPlayable(candidate.url, candidate.userAgent, candidate.isHls)) {
+                    return candidate
+                }
+            }
+        }
+        return null
+    }
+
+    private fun probeStreamPlayable(streamUrl: String, userAgent: String, isHls: Boolean): Boolean {
+        return try {
+            val probeClient = httpClient.newBuilder()
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .readTimeout(5, TimeUnit.SECONDS)
+                .build()
+            val reqBuilder = Request.Builder()
+                .url(streamUrl)
+                .get()
+                .header("User-Agent", userAgent)
+            if (!isHls) {
+                reqBuilder.header("Range", "bytes=0-1023")
+            }
+            probeClient.newCall(reqBuilder.build()).execute().use { resp ->
+                resp.code == 200 || resp.code == 206
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
 }

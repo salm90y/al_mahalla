@@ -6,8 +6,14 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.graphics.Matrix
+import android.graphics.SurfaceTexture
+import android.media.AudioAttributes
+import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Build
+import android.os.PowerManager
+import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
@@ -288,11 +294,51 @@ fun YouTubeRoomScreen(
     var currentPositionSec by remember { mutableFloatStateOf(0f) }
     var totalDurationSec by remember { mutableFloatStateOf(100f) }
     val webViewRefHolder = remember { java.util.concurrent.atomic.AtomicReference<WebView?>(null) }
+    val mediaPlayerRefHolder = remember { java.util.concurrent.atomic.AtomicReference<MediaPlayer?>(null) }
+    val textureViewRefHolder = remember { java.util.concurrent.atomic.AtomicReference<TextureView?>(null) }
+    var resolvedDirectStream by remember { mutableStateOf<YouTubeSearchEngine.ResolvedYouTubeStream?>(null) }
+    var isResolvingStream by remember { mutableStateOf(false) }
+    var useWebViewFallback by remember { mutableStateOf(false) }
+    var isMediaPrepared by remember { mutableStateOf(false) }
+    var pendingNativeSeekMs by remember { mutableIntStateOf(0) }
+    var activeTextureSurface by remember { mutableStateOf<Surface?>(null) }
+    var isWebViewInteractive by remember { mutableStateOf(false) }
     var isRoomDisposed by remember { mutableStateOf(false) }
     var isWebViewMounted by remember { mutableStateOf(false) }
     var webViewCrashFallback by remember { mutableStateOf(false) }
     var hasJoinedZegoAudio by remember { mutableStateOf(false) }
     var lastRemoteSyncAppliedAt by remember { mutableLongStateOf(0L) }
+
+    fun releaseNativeMediaPlayer() {
+        isMediaPrepared = false
+        val old = mediaPlayerRefHolder.getAndSet(null)
+        if (old != null) {
+            try { old.stop() } catch (_: Throwable) {}
+            try { old.reset() } catch (_: Throwable) {}
+            try { old.release() } catch (_: Throwable) {}
+        }
+    }
+
+    fun updateTextureAspectRatio(tv: TextureView, videoWidth: Int, videoHeight: Int) {
+        if (videoWidth <= 0 || videoHeight <= 0) return
+        val viewWidth = tv.width.toFloat()
+        val viewHeight = tv.height.toFloat()
+        if (viewWidth <= 0f || viewHeight <= 0f) return
+        val videoAspect = videoWidth.toFloat() / videoHeight.toFloat()
+        val viewAspect = viewWidth / viewHeight
+        val scaleX: Float
+        val scaleY: Float
+        if (videoAspect > viewAspect) {
+            scaleX = 1f
+            scaleY = viewAspect / videoAspect
+        } else {
+            scaleX = videoAspect / viewAspect
+            scaleY = 1f
+        }
+        val matrix = Matrix()
+        matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
+        tv.setTransform(matrix)
+    }
 
     fun safeEvaluateJs(js: String) {
         if (isRoomDisposed) return
@@ -304,9 +350,132 @@ fun YouTubeRoomScreen(
         } catch (_: Throwable) {}
     }
 
+    // Resolve direct stream whenever currentVideo.id changes
+    LaunchedEffect(currentVideo.id) {
+        val vid = currentVideo.id.trim()
+        if (vid.isEmpty()) return@LaunchedEffect
+        releaseNativeMediaPlayer()
+        resolvedDirectStream = null
+        useWebViewFallback = false
+        isWebViewInteractive = false
+        isResolvingStream = true
+        val stream = try {
+            YouTubeSearchEngine.resolveDirectStreamUrl(vid)
+        } catch (_: Throwable) {
+            null
+        }
+        if (isRoomDisposed || currentVideo.id.trim() != vid) return@LaunchedEffect
+        isResolvingStream = false
+        if (stream != null) {
+            resolvedDirectStream = stream
+            useWebViewFallback = false
+        } else {
+            useWebViewFallback = true
+        }
+    }
+
+    // Prepare native MediaPlayer once direct stream and TextureView Surface are ready
+    LaunchedEffect(resolvedDirectStream, activeTextureSurface, useWebViewFallback) {
+        val stream = resolvedDirectStream ?: return@LaunchedEffect
+        val surface = activeTextureSurface ?: return@LaunchedEffect
+        if (useWebViewFallback || isRoomDisposed || !surface.isValid) return@LaunchedEffect
+
+        releaseNativeMediaPlayer()
+        try {
+            val mp = MediaPlayer().apply {
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .build()
+                )
+                try {
+                    setWakeMode(context.applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
+                } catch (_: Throwable) {}
+                setSurface(surface)
+                setDataSource(
+                    context.applicationContext,
+                    Uri.parse(stream.url),
+                    mapOf("User-Agent" to stream.userAgent)
+                )
+                setOnVideoSizeChangedListener { _, vw, vh ->
+                    textureViewRefHolder.get()?.let { tv ->
+                        tv.post { updateTextureAspectRatio(tv, vw, vh) }
+                    }
+                }
+                setOnPreparedListener { preparedMp ->
+                    if (isRoomDisposed) {
+                        try { preparedMp.release() } catch (_: Throwable) {}
+                        return@setOnPreparedListener
+                    }
+                    isMediaPrepared = true
+                    val durSec = preparedMp.duration / 1000f
+                    if (durSec > 0f) totalDurationSec = durSec
+                    val vol = videoVolume.coerceIn(0f, 1f)
+                    try { preparedMp.setVolume(vol, vol) } catch (_: Throwable) {}
+                    if (pendingNativeSeekMs > 0) {
+                        try { preparedMp.seekTo(pendingNativeSeekMs) } catch (_: Throwable) {}
+                        pendingNativeSeekMs = 0
+                    }
+                    if (isPlaying) {
+                        try { preparedMp.start() } catch (_: Throwable) {}
+                    }
+                }
+                setOnCompletionListener {
+                    isPlaying = false
+                }
+                setOnErrorListener { _, _, _ ->
+                    releaseNativeMediaPlayer()
+                    useWebViewFallback = true
+                    true
+                }
+                prepareAsync()
+            }
+            mediaPlayerRefHolder.set(mp)
+        } catch (_: Throwable) {
+            releaseNativeMediaPlayer()
+            useWebViewFallback = true
+        }
+    }
+
+    // Keep native MediaPlayer play/pause state synced with isPlaying
+    LaunchedEffect(isPlaying, isMediaPrepared, useWebViewFallback) {
+        if (!useWebViewFallback && isMediaPrepared) {
+            val mp = mediaPlayerRefHolder.get() ?: return@LaunchedEffect
+            try {
+                if (isPlaying && !mp.isPlaying) mp.start()
+                else if (!isPlaying && mp.isPlaying) mp.pause()
+            } catch (_: Throwable) {}
+        }
+    }
+
+    // Poll native MediaPlayer progress for scrubber & room host heartbeat
+    LaunchedEffect(isMediaPrepared, useWebViewFallback, resolvedDirectStream) {
+        if (!useWebViewFallback && isMediaPrepared) {
+            while (!isRoomDisposed && !useWebViewFallback && isMediaPrepared) {
+                try {
+                    val mp = mediaPlayerRefHolder.get()
+                    if (mp != null) {
+                        val durMs = mp.duration
+                        val posMs = mp.currentPosition
+                        if (durMs > 0) {
+                            totalDurationSec = durMs / 1000f
+                            currentPositionSec = (posMs / 1000f).coerceIn(0f, totalDurationSec)
+                        }
+                    }
+                } catch (_: Throwable) {}
+                delay(350)
+            }
+        }
+    }
+
     // Instant volume sync to player
-    LaunchedEffect(videoVolume) {
-        val volInt = (videoVolume * 100).toInt().coerceIn(0, 100)
+    LaunchedEffect(videoVolume, isMediaPrepared, useWebViewFallback) {
+        val volFloat = videoVolume.coerceIn(0f, 1f)
+        if (!useWebViewFallback && isMediaPrepared) {
+            try { mediaPlayerRefHolder.get()?.setVolume(volFloat, volFloat) } catch (_: Throwable) {}
+        }
+        val volInt = (volFloat * 100).toInt().coerceIn(0, 100)
         safeEvaluateJs("if (typeof setPlayerVolume === 'function') { setPlayerVolume($volInt); }")
     }
 
@@ -473,14 +642,27 @@ fun YouTubeRoomScreen(
                 lastRemoteSyncAppliedAt = System.currentTimeMillis()
                 if (pos >= 0f && kotlin.math.abs(currentPositionSec - pos) > 1.8f) {
                     currentPositionSec = pos
-                    safeEvaluateJs("if (typeof seekTo === 'function') { seekTo($pos); }")
+                    if (!useWebViewFallback && resolvedDirectStream != null) {
+                        val ms = (pos * 1000f).toInt().coerceAtLeast(0)
+                        if (isMediaPrepared) {
+                            try { mediaPlayerRefHolder.get()?.seekTo(ms) } catch (_: Throwable) {}
+                        } else {
+                            pendingNativeSeekMs = ms
+                        }
+                    } else {
+                        safeEvaluateJs("if (typeof seekTo === 'function') { seekTo($pos); }")
+                    }
                 }
                 if (playState && !isPlaying) {
                     isPlaying = true
-                    safeEvaluateJs("if (typeof playVideo === 'function') { playVideo(); }")
+                    if (useWebViewFallback) {
+                        safeEvaluateJs("if (typeof playVideo === 'function') { playVideo(); }")
+                    }
                 } else if (!playState && isPlaying) {
                     isPlaying = false
-                    safeEvaluateJs("if (typeof pauseVideo === 'function') { pauseVideo(); }")
+                    if (useWebViewFallback) {
+                        safeEvaluateJs("if (typeof pauseVideo === 'function') { pauseVideo(); }")
+                    }
                 }
             },
             onChatMessageReceived = { newMsg ->
@@ -795,6 +977,10 @@ fun YouTubeRoomScreen(
     DisposableEffect(roomId, zegoAudioRoomId) {
         onDispose {
             isRoomDisposed = true
+            releaseNativeMediaPlayer()
+            try { activeTextureSurface?.release() } catch (_: Throwable) {}
+            activeTextureSurface = null
+            textureViewRefHolder.set(null)
             webViewRefHolder.set(null)
             try {
                 syncSocket.disconnect()
@@ -820,7 +1006,16 @@ fun YouTubeRoomScreen(
         val safeTarget = targetSeconds.coerceIn(0f, totalDurationSec.coerceAtLeast(1f))
         lastRemoteSyncAppliedAt = System.currentTimeMillis()
         currentPositionSec = safeTarget
-        safeEvaluateJs("if (typeof seekTo === 'function') { seekTo($safeTarget); }")
+        if (!useWebViewFallback && resolvedDirectStream != null) {
+            val ms = (safeTarget * 1000f).toInt().coerceAtLeast(0)
+            if (isMediaPrepared) {
+                try { mediaPlayerRefHolder.get()?.seekTo(ms) } catch (_: Throwable) {}
+            } else {
+                pendingNativeSeekMs = ms
+            }
+        } else {
+            safeEvaluateJs("if (typeof seekTo === 'function') { seekTo($safeTarget); }")
+        }
         syncSocket.broadcastPlaybackState(isPlaying, safeTarget)
     }
 
@@ -834,10 +1029,12 @@ fun YouTubeRoomScreen(
         val nextPlay = !isPlaying
         lastRemoteSyncAppliedAt = System.currentTimeMillis()
         isPlaying = nextPlay
-        if (nextPlay) {
-            safeEvaluateJs("if (typeof playVideo === 'function') { playVideo(); }")
-        } else {
-            safeEvaluateJs("if (typeof pauseVideo === 'function') { pauseVideo(); }")
+        if (useWebViewFallback) {
+            if (nextPlay) {
+                safeEvaluateJs("if (typeof playVideo === 'function') { playVideo(); }")
+            } else {
+                safeEvaluateJs("if (typeof pauseVideo === 'function') { pauseVideo(); }")
+            }
         }
         syncSocket.broadcastPlaybackState(nextPlay, currentPositionSec)
     }
@@ -1184,6 +1381,81 @@ fun YouTubeRoomScreen(
                                 Text("إعادة تشغيل المشغل", fontFamily = TajawalFontFamily, color = Color.White)
                             }
                         }
+                    } else if (!useWebViewFallback && (isResolvingStream || resolvedDirectStream != null)) {
+                        // Layer 1: Native Direct-Stream TextureView + MediaPlayer (zero BotGuard / zero sign-in walls)
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            if (resolvedDirectStream != null) {
+                                AndroidView(
+                                    factory = { ctx ->
+                                        TextureView(ctx).apply {
+                                            layoutParams = ViewGroup.LayoutParams(
+                                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                                ViewGroup.LayoutParams.MATCH_PARENT
+                                            )
+                                            textureViewRefHolder.set(this)
+                                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                                override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
+                                                    try { activeTextureSurface?.release() } catch (_: Throwable) {}
+                                                    activeTextureSurface = Surface(st)
+                                                    val mp = mediaPlayerRefHolder.get()
+                                                    if (mp != null && isMediaPrepared) {
+                                                        try { updateTextureAspectRatio(this@apply, mp.videoWidth, mp.videoHeight) } catch (_: Throwable) {}
+                                                    }
+                                                }
+                                                override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {
+                                                    val mp = mediaPlayerRefHolder.get()
+                                                    if (mp != null && isMediaPrepared) {
+                                                        try { updateTextureAspectRatio(this@apply, mp.videoWidth, mp.videoHeight) } catch (_: Throwable) {}
+                                                    }
+                                                }
+                                                override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                                                    try { activeTextureSurface?.release() } catch (_: Throwable) {}
+                                                    activeTextureSurface = null
+                                                    return true
+                                                }
+                                                override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+                                            }
+                                        }
+                                    },
+                                    update = { tv ->
+                                        textureViewRefHolder.set(tv)
+                                        val mp = mediaPlayerRefHolder.get()
+                                        if (mp != null && isMediaPrepared) {
+                                            try { updateTextureAspectRatio(tv, mp.videoWidth, mp.videoHeight) } catch (_: Throwable) {}
+                                        }
+                                    },
+                                    onRelease = { tv ->
+                                        textureViewRefHolder.compareAndSet(tv, null)
+                                    },
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                            if (isResolvingStream || !isMediaPrepared) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color.Black.copy(alpha = 0.65f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        CircularProgressIndicator(
+                                            color = Color(0xFFEF4444),
+                                            strokeWidth = 2.5.dp,
+                                            modifier = Modifier.size(28.dp)
+                                        )
+                                        Text(
+                                            text = "جاري تجهيز البث المباشر...",
+                                            fontSize = 11.5.sp,
+                                            fontFamily = TajawalFontFamily,
+                                            color = Color.White.copy(alpha = 0.85f)
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     } else if (!isWebViewMounted) {
                         CircularProgressIndicator(
                             color = Color(0xFFEF4444),
@@ -1191,6 +1463,7 @@ fun YouTubeRoomScreen(
                             modifier = Modifier.size(28.dp)
                         )
                     } else {
+                    Box(modifier = Modifier.fillMaxSize()) {
                     AndroidView(
                         factory = { ctx ->
                             try {
@@ -1218,23 +1491,55 @@ fun YouTubeRoomScreen(
                                     allowFileAccess = true
                                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                                     cacheMode = WebSettings.LOAD_DEFAULT
-                                    val nativeUa = userAgentString ?: ""
-                                    if (nativeUa.isNotBlank()) {
-                                        userAgentString = nativeUa
-                                            .replace("; wv)", ")")
-                                            .replace("Version/4.0 ", "")
-                                    }
                                 }
                                 webChromeClient = WebChromeClient()
+                                var usedWorkerYtPlayer = true
                                 webViewClient = object : WebViewClient() {
                                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                                         val urlStr = request?.url?.toString()?.lowercase() ?: return true
+                                        if (isWebViewInteractive) {
+                                            val isAuthOrYt = urlStr.startsWith("https://accounts.google.com") ||
+                                                urlStr.startsWith("https://accounts.youtube.com") ||
+                                                urlStr.startsWith("https://myaccount.google.com") ||
+                                                urlStr.startsWith("https://www.youtube.com") ||
+                                                urlStr.startsWith("https://m.youtube.com") ||
+                                                urlStr.startsWith("https://www.youtube-nocookie.com") ||
+                                                urlStr.startsWith("https://ooki-game.ahmed1986y5.workers.dev") ||
+                                                urlStr == "about:blank"
+                                            return !isAuthOrYt
+                                        }
                                         val isAllowedEmbed = urlStr.startsWith("https://www.youtube.com/embed/") ||
                                             urlStr.startsWith("https://youtube.com/embed/") ||
                                             urlStr.startsWith("https://www.youtube-nocookie.com/embed/") ||
                                             urlStr.startsWith("https://ooki-game.ahmed1986y5.workers.dev") ||
+                                            urlStr.startsWith("https://accounts.google.com/") ||
+                                            urlStr.startsWith("https://accounts.youtube.com/") ||
                                             urlStr == "about:blank"
                                         return !isAllowedEmbed
+                                    }
+                                    override fun onPageFinished(view: WebView?, url: String?) {
+                                        try { CookieManager.getInstance().flush() } catch (_: Throwable) {}
+                                        val lower = url?.lowercase() ?: ""
+                                        if (isWebViewInteractive && (lower.startsWith("https://www.youtube.com/?") || lower == "https://www.youtube.com/" || lower.startsWith("https://m.youtube.com/?"))) {
+                                            isWebViewInteractive = false
+                                            val reloadId = currentVideo.id.ifBlank { "dQw4w9WgXcQ" }
+                                            val volPct = (videoVolume * 100).toInt().coerceIn(0, 100)
+                                            view?.loadUrl("https://ooki-game.ahmed1986y5.workers.dev/yt-player?v=${Uri.encode(reloadId)}&autoplay=${if (isPlaying) 1 else 0}&vol=$volPct")
+                                        }
+                                    }
+                                    override fun onReceivedHttpError(
+                                        view: WebView?,
+                                        request: WebResourceRequest?,
+                                        errorResponse: WebResourceResponse?
+                                    ) {
+                                        val reqUrl = request?.url?.toString() ?: ""
+                                        if (usedWorkerYtPlayer && reqUrl.contains("/yt-player") && (errorResponse?.statusCode ?: 0) >= 400) {
+                                            usedWorkerYtPlayer = false
+                                            view?.post {
+                                                val fallbackId = currentVideo.id.ifBlank { "dQw4w9WgXcQ" }
+                                                view.loadUrl("https://www.youtube.com/embed/$fallbackId?autoplay=1&controls=0&playsinline=1&rel=0&iv_load_policy=3")
+                                            }
+                                        }
                                     }
                                     override fun onRenderProcessGone(view: WebView?, detail: RenderProcessGoneDetail?): Boolean {
                                         if (view != null) {
@@ -1269,310 +1574,9 @@ fun YouTubeRoomScreen(
 
                                 val initialId = currentVideo.id.ifBlank { "dQw4w9WgXcQ" }
                                 val initialVolPercent = (videoVolume * 100).toInt()
-                                val playerHtml = """
-                                    <!DOCTYPE html>
-                                    <html lang="ar">
-                                    <head>
-                                        <meta charset="utf-8">
-                                        <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-                                        <meta name="referrer" content="origin">
-                                        <style>
-                                            * { margin: 0; padding: 0; box-sizing: border-box; }
-                                            html, body {
-                                                width: 100%;
-                                                height: 100%;
-                                                background: #000000;
-                                                overflow: hidden;
-                                                display: flex;
-                                                align-items: center;
-                                                justify-content: center;
-                                                user-select: none;
-                                                -webkit-user-select: none;
-                                            }
-                                            #player-container {
-                                                width: 100%;
-                                                height: 100%;
-                                                position: relative;
-                                                overflow: hidden;
-                                                background: #000000;
-                                            }
-                                            /* Natural clean maximum fit without distortion, no zoom crop */
-                                            iframe, #player, video {
-                                                width: 100% !important;
-                                                height: 100% !important;
-                                                border: none;
-                                                position: absolute;
-                                                top: 0;
-                                                left: 0;
-                                                object-fit: contain !important;
-                                                transform: none !important;
-                                                background: #000000;
-                                            }
-                                            .normal-fit iframe, .normal-fit #player, .normal-fit video {
-                                                transform: none !important;
-                                                object-fit: contain !important;
-                                            }
-                                            /* Touch Shield: Intercepts taps so external app/sign-in prompts and buttons are never shown on video screen */
-                                            #touch-shield {
-                                                position: absolute;
-                                                top: 0;
-                                                left: 0;
-                                                width: 100%;
-                                                height: 100%;
-                                                z-index: 10;
-                                                background: transparent;
-                                                pointer-events: auto;
-                                            }
-                                            /* Complete clean display - hide external links, titles, watermark, pause overlay, and ads */
-                                            .ytp-chrome-top, .ytp-title, .ytp-title-text, .ytp-title-channel,
-                                            .ytp-share-button, .ytp-watch-later-button, .ytp-watermark, .ytp-youtube-button,
-                                            .ytp-pause-overlay, .ytp-pause-overlay-container, .ytp-impression-link,
-                                            .ytp-contextmenu, .ytp-paid-content-overlay, .ytp-suggested-action,
-                                            .ytp-ce-element, .ytp-cards-teaser, .ytp-cards-button, .ytp-ad-module,
-                                            .ytp-ad-overlay-container, .ytp-ad-message-container, .video-ads,
-                                            .ytp-large-play-button, .ytp-play-button, .ytp-bezel, .ytp-bezel-icon,
-                                            .ytp-bezel-text, .ytp-button, .ytp-gradient-top, .ytp-gradient-bottom,
-                                            .ad-showing, .ad-interrupting {
-                                                display: none !important;
-                                                visibility: hidden !important;
-                                                opacity: 0 !important;
-                                                pointer-events: none !important;
-                                                width: 0 !important;
-                                                height: 0 !important;
-                                            }
-                                        </style>
-                                    </head>
-                                    <body>
-                                        <div id="player-container">
-                                            <div id="player"></div>
-                                            <div id="touch-shield"></div>
-                                        </div>
-                                        <script>
-                                            // Continuous Background Playback: Prevent YouTube pausing on app minimize or switching apps
-                                            try {
-                                                Object.defineProperty(document, 'hidden', { get: function() { return false; }, configurable: true });
-                                                Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; }, configurable: true });
-                                                document.addEventListener('visibilitychange', function(e) { e.stopImmediatePropagation(); }, true);
-                                                window.addEventListener('blur', function(e) { e.stopImmediatePropagation(); }, true);
-                                                window.addEventListener('pagehide', function(e) { e.stopImmediatePropagation(); }, true);
-                                            } catch(e) {}
-                                        </script>
-                                        <script src="https://www.youtube.com/iframe_api"></script>
-                                        <script>
-                                            var player = null;
-                                            var isPlayerReady = false;
-                                            var currentVideoId = '$initialId';
-                                            var pendingVideoId = null;
-                                            var pendingSeek = null;
-                                            var pendingPlayState = true;
-                                            var pendingVolume = $initialVolPercent;
-
-                                            function onYouTubeIframeAPIReady() {
-                                                try {
-                                                    var initId = pendingVideoId || currentVideoId;
-                                                    currentVideoId = initId;
-                                                    player = new YT.Player('player', {
-                                                        height: '100%',
-                                                        width: '100%',
-                                                        host: 'https://www.youtube.com',
-                                                        videoId: initId,
-                                                        playerVars: {
-                                                            'autoplay': 1,
-                                                            'controls': 0,
-                                                            'disablekb': 1,
-                                                            'fs': 0,
-                                                            'rel': 0,
-                                                            'playsinline': 1,
-                                                            'enablejsapi': 1,
-                                                            'iv_load_policy': 3,
-                                                            'origin': 'https://ooki-game.ahmed1986y5.workers.dev',
-                                                            'widget_referrer': 'https://ooki-game.ahmed1986y5.workers.dev/'
-                                                        },
-                                                        events: {
-                                                            'onReady': function(e) {
-                                                                isPlayerReady = true;
-                                                                try {
-                                                                    if (pendingVolume !== null) {
-                                                                        e.target.setVolume(pendingVolume);
-                                                                        if (pendingVolume > 0) e.target.unMute(); else e.target.mute();
-                                                                    }
-                                                                    if (pendingVideoId && pendingVideoId !== initId) {
-                                                                        e.target.loadVideoById({ videoId: pendingVideoId, startSeconds: pendingSeek || 0 });
-                                                                        pendingVideoId = null;
-                                                                        pendingSeek = null;
-                                                                    } else {
-                                                                        if (pendingSeek !== null) {
-                                                                            e.target.seekTo(pendingSeek, true);
-                                                                            pendingSeek = null;
-                                                                        }
-                                                                        if (pendingPlayState) e.target.playVideo(); else e.target.pauseVideo();
-                                                                    }
-                                                                } catch(err) {}
-                                                            },
-                                                            'onStateChange': function(e) {
-                                                                if (window.AndroidBridge && window.AndroidBridge.reportState) {
-                                                                    window.AndroidBridge.reportState(e.data);
-                                                                }
-                                                            },
-                                                            'onError': function(e) {
-                                                                try {
-                                                                    isPlayerReady = false;
-                                                                    var p = document.getElementById('player');
-                                                                    if (p) {
-                                                                        p.innerHTML = '<iframe id="yt-fallback-frame" referrerpolicy="origin" src="https://www.youtube.com/embed/' + currentVideoId + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://ooki-game.ahmed1986y5.workers.dev&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
-                                                                    }
-                                                                } catch(err) {}
-                                                            }
-                                                        }
-                                                    });
-                                                    setInterval(function() {
-                                                        try {
-                                                            var cur = 0;
-                                                            var dur = 0;
-                                                            if (player && typeof player.getCurrentTime === 'function') {
-                                                                cur = player.getCurrentTime() || 0;
-                                                                dur = player.getDuration() || 0;
-                                                            }
-                                                            if (dur <= 0) {
-                                                                var v = document.querySelector('video');
-                                                                if (v && isFinite(v.duration) && v.duration > 0) {
-                                                                    cur = v.currentTime || 0;
-                                                                    dur = v.duration || 0;
-                                                                }
-                                                            }
-                                                            if (window.AndroidBridge && window.AndroidBridge.reportTime && dur > 0) {
-                                                                window.AndroidBridge.reportTime(cur, dur);
-                                                            }
-                                                        } catch(e) {}
-                                                    }, 350);
-                                                } catch(err) {}
-                                            }
-
-                                            function playVideo() {
-                                                pendingPlayState = true;
-                                                try {
-                                                    if (player && isPlayerReady && typeof player.playVideo === 'function') player.playVideo();
-                                                    var v = document.querySelector('video');
-                                                    if (v) v.play();
-                                                } catch(e) {}
-                                            }
-
-                                            function pauseVideo() {
-                                                pendingPlayState = false;
-                                                try {
-                                                    if (player && isPlayerReady && typeof player.pauseVideo === 'function') player.pauseVideo();
-                                                    var v = document.querySelector('video');
-                                                    if (v) v.pause();
-                                                } catch(e) {}
-                                            }
-
-                                            function seekTo(sec) {
-                                                pendingSeek = sec;
-                                                try {
-                                                    if (player && isPlayerReady && typeof player.seekTo === 'function') {
-                                                        player.seekTo(sec, true);
-                                                        pendingSeek = null;
-                                                    }
-                                                    var v = document.querySelector('video');
-                                                    if (v && isFinite(sec)) v.currentTime = sec;
-                                                } catch(e) {}
-                                            }
-
-                                            function setPlayerVolume(vol) {
-                                                pendingVolume = vol;
-                                                try {
-                                                    if (player && typeof player.setVolume === 'function') {
-                                                        player.setVolume(vol);
-                                                        if (vol <= 0) player.mute(); else player.unMute();
-                                                    }
-                                                    var v = document.querySelector('video');
-                                                    if (v) {
-                                                        v.volume = vol / 100.0;
-                                                        v.muted = (vol <= 0);
-                                                    }
-                                                } catch(e) {}
-                                            }
-
-                                            function loadVideoById(vid, autoPlay, startSec) {
-                                                if (!vid) return;
-                                                currentVideoId = vid;
-                                                pendingVideoId = vid;
-                                                if (typeof autoPlay === 'boolean') pendingPlayState = autoPlay;
-                                                if (typeof startSec === 'number') pendingSeek = startSec;
-                                                try {
-                                                    if (player && isPlayerReady && typeof player.loadVideoById === 'function' && document.querySelector('iframe#player')) {
-                                                        player.loadVideoById({ videoId: vid, startSeconds: startSec || 0 });
-                                                        if (pendingPlayState) player.playVideo(); else player.pauseVideo();
-                                                        pendingVideoId = null;
-                                                        pendingSeek = null;
-                                                    } else if (player && isPlayerReady && typeof player.loadVideoById === 'function' && !document.getElementById('yt-fallback-frame')) {
-                                                        player.loadVideoById({ videoId: vid, startSeconds: startSec || 0 });
-                                                        if (pendingPlayState) player.playVideo(); else player.pauseVideo();
-                                                        pendingVideoId = null;
-                                                        pendingSeek = null;
-                                                    } else {
-                                                        var p = document.getElementById('player');
-                                                        var fb = document.getElementById('yt-fallback-frame');
-                                                        var nextSrc = 'https://www.youtube.com/embed/' + vid + '?autoplay=' + (pendingPlayState ? 1 : 0) + '&controls=0&playsinline=1&enablejsapi=1&origin=https://ooki-game.ahmed1986y5.workers.dev&rel=0&iv_load_policy=3';
-                                                        if (fb) {
-                                                            fb.src = nextSrc;
-                                                        } else if (p && !window.YT) {
-                                                            p.innerHTML = '<iframe id="yt-fallback-frame" referrerpolicy="origin" src="' + nextSrc + '" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
-                                                        }
-                                                    }
-                                                } catch(e) {}
-                                            }
-
-                                            // Auto ad-skipper
-                                            setInterval(function() {
-                                                try {
-                                                    var skipBtn = document.querySelectorAll('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-skip-ad-button, .videoAdUiSkipButton');
-                                                    for (var i = 0; i < skipBtn.length; i++) skipBtn[i].click();
-                                                    var v = document.querySelector('video');
-                                                    var isAd = document.querySelector('.ad-showing, .ad-interrupting');
-                                                    if (v && isAd) {
-                                                        v.muted = true;
-                                                        v.playbackRate = 16.0;
-                                                        if (isFinite(v.duration) && v.duration > 0) v.currentTime = v.duration - 0.1;
-                                                    }
-                                                } catch(e) {}
-                                            }, 150);
-
-                                            // Fallback timer: if YT.Player is not initialized after 2.5 seconds, embed directly
-                                            setTimeout(function() {
-                                                try {
-                                                    if (!isPlayerReady && !document.querySelector('iframe')) {
-                                                        var p = document.getElementById('player');
-                                                        if (p) {
-                                                            p.innerHTML = '<iframe id="yt-fallback-frame" referrerpolicy="origin" src="https://www.youtube.com/embed/' + currentVideoId + '?autoplay=1&controls=0&playsinline=1&enablejsapi=1&origin=https://ooki-game.ahmed1986y5.workers.dev&rel=0&iv_load_policy=3" width="100%" height="100%" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:none;"></iframe>';
-                                                        }
-                                                    }
-                                                } catch(e) {}
-                                            }, 2500);
-
-                                            window.addEventListener("message", function(event) {
-                                                try {
-                                                    var data = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
-                                                    if (data && data.event === "onStateChange" && window.AndroidBridge) {
-                                                        window.AndroidBridge.reportState(data.info);
-                                                    }
-                                                    if (data && data.info && typeof data.info.currentTime === 'number' && window.AndroidBridge) {
-                                                        window.AndroidBridge.reportTime(data.info.currentTime, data.info.duration || 0);
-                                                    }
-                                                } catch(e) {}
-                                            });
-                                        </script>
-                                    </body>
-                                    </html>
-                                """.trimIndent()
                                 webViewRefHolder.set(this)
-                                loadDataWithBaseURL(
-                                    "https://ooki-game.ahmed1986y5.workers.dev/",
-                                    playerHtml,
-                                    "text/html",
-                                    "UTF-8",
-                                    "https://ooki-game.ahmed1986y5.workers.dev/"
-                                )
+                                val workerPlayerUrl = "https://ooki-game.ahmed1986y5.workers.dev/yt-player?v=${Uri.encode(initialId)}&autoplay=${if (isPlaying) 1 else 0}&vol=$initialVolPercent"
+                                loadUrl(workerPlayerUrl)
                             }
                         } catch (_: Throwable) {
                             android.view.View(ctx).apply {
@@ -1583,6 +1587,11 @@ fun YouTubeRoomScreen(
                     update = { webView ->
                         if (!isRoomDisposed && webView is WebView && webView.tag != "wv_destroyed") {
                             webViewRefHolder.set(webView)
+                            val shieldState = if (isWebViewInteractive) "none" else "auto"
+                            webView.evaluateJavascript(
+                                "var s=document.getElementById('touch-shield');if(s)s.style.pointerEvents='$shieldState';",
+                                null
+                            )
                         }
                     },
                     onRelease = { view ->
@@ -1603,6 +1612,34 @@ fun YouTubeRoomScreen(
                     },
                     modifier = Modifier.fillMaxSize()
                     )
+                    if (!isWebViewInteractive) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(Unit) {
+                                    detectTapGestures(onTap = {})
+                                }
+                        )
+                    }
+                    Surface(
+                        onClick = { isWebViewInteractive = !isWebViewInteractive },
+                        shape = RoundedCornerShape(8.dp),
+                        color = Color.Black.copy(alpha = 0.65f),
+                        border = BorderStroke(0.5.dp, Color.White.copy(alpha = 0.25f)),
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(8.dp)
+                    ) {
+                        Text(
+                            text = if (isWebViewInteractive) "قفل الشاشة 🔒" else "تفاعل / تسجيل دخول",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = TajawalFontFamily,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                    }
                     }
                 }
 
