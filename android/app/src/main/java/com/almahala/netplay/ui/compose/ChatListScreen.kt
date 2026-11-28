@@ -11,9 +11,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.ChatBubble
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Dashboard
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Search
@@ -25,9 +28,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -60,6 +66,7 @@ fun ChatListScreen(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val focusManager = LocalFocusManager.current
     var selectedTab by remember { mutableStateOf(0) } // 0: الكل, 1: المجموعات, 2: القنوات
     val tabs = listOf("الكل", "المجموعات", "القنوات")
     var searchQuery by remember { mutableStateOf("") }
@@ -217,261 +224,286 @@ fun ChatListScreen(
         )
     }
 
-    Column(
+    Scaffold(
         modifier = modifier
             .fillMaxSize()
             .background(getAppScreenBackground())
-            .statusBarsPadding()
-    ) {
-        // 1. Top Bar: Title "الدردشات" on Right (Start in RTL), Action Icons on Left (End in RTL)
-        Row(
+            .statusBarsPadding(),
+        containerColor = getAppScreenBackground()
+    ) { innerPadding ->
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 14.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .fillMaxSize()
+                .padding(innerPadding)
         ) {
-            // Right: Title "الدردشات"
-            Text(
-                text = "الدردشات",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = TajawalFontFamily,
-                color = Color(0xFF0F172A)
-            )
-
-            // Left Action Icons (Admin Dashboard, Notifications & Settings) - Free/flat icons
+            // 1. Unified Top Bar: Title "الدردشات" on Right (Start in RTL), Action Icons on Left (End in RTL)
             Row(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 1. Control Panel / Dashboard Icon Button (Visible ONLY to Admin)
-                if (isAdmin) {
+                // Right: Title "الدردشات"
+                Text(
+                    text = "الدردشات",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = TajawalFontFamily,
+                    color = Color(0xFF0F172A)
+                )
+
+                // Left Action Icons (Admin Dashboard, Notifications & Settings) - Free/flat icons
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // 1. Control Panel / Dashboard Icon Button (Visible ONLY to Admin)
+                    if (isAdmin) {
+                        IconButton(
+                            onClick = {
+                                navController.navigate("admin_dashboard")
+                            },
+                            modifier = Modifier.size(38.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Dashboard,
+                                contentDescription = "لوحة التحكم",
+                                tint = Color(0xFF2563EB),
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+
+                    // 2. Notifications Icon Button (Small icon, visible to everyone)
                     IconButton(
                         onClick = {
-                            navController.navigate("admin_dashboard")
+                            navController.navigate("notifications")
                         },
                         modifier = Modifier.size(38.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Dashboard,
-                            contentDescription = "لوحة التحكم",
-                            tint = Color(0xFF2563EB),
+                            imageVector = Icons.Default.Notifications,
+                            contentDescription = "الإشعارات",
+                            tint = Color(0xFF475569),
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+
+                    // 3. Settings Icon Button (Free Icon, small symbol)
+                    IconButton(
+                        onClick = {
+                            val intent = Intent(context, SettingsActivity::class.java)
+                            context.startActivity(intent)
+                        },
+                        modifier = Modifier.size(38.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "الإعدادات",
+                            tint = Color(0xFF475569),
                             modifier = Modifier.size(24.dp)
                         )
                     }
                 }
-
-                // 2. Notifications Icon Button (Small icon, visible to everyone)
-                IconButton(
-                    onClick = {
-                        navController.navigate("notifications")
-                    },
-                    modifier = Modifier.size(38.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Notifications,
-                        contentDescription = "الإشعارات",
-                        tint = Color(0xFF475569),
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
-
-                // 3. Settings Icon Button (Free Icon, small symbol)
-                IconButton(
-                    onClick = {
-                        val intent = Intent(context, SettingsActivity::class.java)
-                        context.startActivity(intent)
-                    },
-                    modifier = Modifier.size(38.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = "الإعدادات",
-                        tint = Color(0xFF475569),
-                        modifier = Modifier.size(24.dp)
-                    )
-                }
             }
-        }
 
-        // 2. Search Bar
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 6.dp)
-                .height(48.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .background(Color(0xFFF1F5F9))
-                .padding(horizontal = 16.dp),
-            contentAlignment = Alignment.CenterStart
-        ) {
-            Row(
-                modifier = Modifier.fillMaxSize(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Start
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Search,
-                    contentDescription = "بحث",
-                    tint = Color(0xFF94A3B8),
-                    modifier = Modifier.size(20.dp)
-                )
-
-                Spacer(modifier = Modifier.width(8.dp))
-
-                BasicTextField(
-                    value = searchQuery,
-                    onValueChange = { searchQuery = it },
-                    textStyle = TextStyle(
-                        fontSize = 14.sp,
-                        fontFamily = TajawalFontFamily,
-                        color = Color(0xFF0F172A),
-                        textAlign = TextAlign.Start
-                    ),
-                    modifier = Modifier.weight(1f),
-                    decorationBox = { innerTextField ->
-                        if (searchQuery.isEmpty()) {
-                            Text(
-                                text = "ابحث عن محادثة",
-                                fontSize = 14.sp,
-                                fontFamily = TajawalFontFamily,
-                                color = Color(0xFF94A3B8),
-                                textAlign = TextAlign.Start,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-                        innerTextField()
-                    }
-                )
-            }
-        }
-
-        // 3. Category Tabs (الكل / المجموعات / القنوات - Starts with الكل on Right)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.Start
-        ) {
-            tabs.forEachIndexed { index, tabName ->
-                val isSelected = selectedTab == index
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null
-                        ) {
-                            selectedTab = index
-                        }
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                ) {
-                    Text(
-                        text = tabName,
-                        fontSize = 15.sp,
-                        fontFamily = TajawalFontFamily,
-                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                        color = if (isSelected) Color(0xFF2563EB) else Color(0xFF64748B)
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Box(
-                        modifier = Modifier
-                            .height(2.5.dp)
-                            .width(32.dp)
-                            .background(if (isSelected) Color(0xFF2563EB) else Color.Transparent, CircleShape)
-                    )
-                }
-            }
-        }
-
-        // 4. Content (Empty State or Free-form Conversations List)
-        if (filteredConversations.isEmpty()) {
+            // 2. Search Bar (Placed above tabs, unified dimensions & styling matching FriendsScreen)
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
+                    .padding(horizontal = 20.dp, vertical = 6.dp)
             ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(horizontal = 32.dp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp)
+                        .clip(RoundedCornerShape(21.dp))
+                        .background(Color(0xFFEEF4FB))
+                        .border(1.dp, Color(0xFFE2E8F0), RoundedCornerShape(21.dp))
+                        .padding(horizontal = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Circular Illustration
-                    Box(
-                        modifier = Modifier
-                            .size(130.dp)
-                            .background(Color(0xFFEBF3FF), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(76.dp)
-                                .shadow(8.dp, RoundedCornerShape(22.dp))
-                                .background(Color(0xFF2563EB), RoundedCornerShape(22.dp)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                repeat(3) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(8.dp)
-                                            .background(Color.White, CircleShape)
-                                    )
-                                }
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "بحث",
+                        tint = Color(0xFF94A3B8),
+                        modifier = Modifier.size(18.dp)
+                    )
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    BasicTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(
+                            onSearch = {
+                                focusManager.clearFocus()
                             }
+                        ),
+                        singleLine = true,
+                        textStyle = TextStyle(
+                            fontSize = 13.5.sp,
+                            fontFamily = TajawalFontFamily,
+                            color = Color(0xFF0F172A)
+                        ),
+                        cursorBrush = SolidColor(Color(0xFF2563EB)),
+                        modifier = Modifier.weight(1f),
+                        decorationBox = { innerTextField ->
+                            if (searchQuery.isEmpty()) {
+                                Text(
+                                    text = "ابحث عن محادثة",
+                                    fontSize = 13.sp,
+                                    fontFamily = TajawalFontFamily,
+                                    color = Color(0xFF94A3B8)
+                                )
+                            }
+                            innerTextField()
+                        }
+                    )
+
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(
+                            onClick = { searchQuery = "" },
+                            modifier = Modifier.size(24.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "مسح",
+                                tint = Color(0xFF94A3B8),
+                                modifier = Modifier.size(15.dp)
+                            )
                         }
                     }
+                }
+            }
 
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    Text(
-                        text = "لا توجد محادثات",
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = TajawalFontFamily,
-                        color = Color(0xFF0F172A)
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Text(
-                        text = "ابدأ محادثة جديدة للتواصل مع أصدقائك.",
-                        fontSize = 14.sp,
-                        fontFamily = TajawalFontFamily,
-                        color = Color(0xFF64748B),
-                        textAlign = TextAlign.Center
-                    )
-
-                    Spacer(modifier = Modifier.height(28.dp))
-
-                    Button(
-                        onClick = { /* Start new chat */ },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
-                        shape = RoundedCornerShape(24.dp),
+            // 3. Category Tabs (الكل / المجموعات / القنوات - Unified dimensions matching FriendsScreen)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.Start
+            ) {
+                tabs.forEachIndexed { index, tabName ->
+                    val isSelected = selectedTab == index
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier
-                            .height(48.dp)
-                            .padding(horizontal = 16.dp)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null
+                            ) {
+                                selectedTab = index
+                            }
+                            .padding(horizontal = 14.dp, vertical = 6.dp)
                     ) {
                         Text(
-                            text = "محادثة جديدة",
+                            text = tabName,
                             fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold,
                             fontFamily = TajawalFontFamily,
-                            color = Color.White
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) Color(0xFF2563EB) else Color(0xFF64748B)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Box(
+                            modifier = Modifier
+                                .height(2.5.dp)
+                                .width(36.dp)
+                                .background(if (isSelected) Color(0xFF2563EB) else Color.Transparent, CircleShape)
                         )
                     }
                 }
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-            ) {
+
+            // 4. Content (Empty State or Free-form Conversations List)
+            if (filteredConversations.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(horizontal = 32.dp)
+                    ) {
+                        // Circular Illustration (Unified size matching FriendsScreen)
+                        Box(
+                            modifier = Modifier
+                                .size(110.dp)
+                                .background(Color(0xFFEBF3FF), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(64.dp)
+                                    .shadow(4.dp, RoundedCornerShape(18.dp))
+                                    .background(Color(0xFF2563EB), RoundedCornerShape(18.dp)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    repeat(3) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(7.dp)
+                                                .background(Color.White, CircleShape)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        Text(
+                            text = "لا توجد محادثات",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = TajawalFontFamily,
+                            color = Color(0xFF0F172A)
+                        )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        Text(
+                            text = "ابدأ محادثة جديدة للتواصل مع أصدقائك.",
+                            fontSize = 13.sp,
+                            fontFamily = TajawalFontFamily,
+                            color = Color(0xFF64748B),
+                            textAlign = TextAlign.Center
+                        )
+
+                        Spacer(modifier = Modifier.height(20.dp))
+
+                        Button(
+                            onClick = { /* Start new chat */ },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2563EB)),
+                            shape = RoundedCornerShape(21.dp),
+                            modifier = Modifier
+                                .height(42.dp)
+                                .padding(horizontal = 16.dp)
+                        ) {
+                            Text(
+                                text = "محادثة جديدة",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = TajawalFontFamily,
+                                color = Color.White
+                            )
+                        }
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
                 items(filteredConversations, key = { it.id.ifBlank { it.name } }) { conv ->
                     val encodedName = try { java.net.URLEncoder.encode(conv.name, "UTF-8") } catch (_: Exception) { conv.name }
                     Column(
@@ -494,7 +526,7 @@ fun ChatListScreen(
                             ) {
                                 Box(
                                     modifier = Modifier
-                                        .size(50.dp)
+                                        .size(48.dp)
                                         .clickable {
                                             navController.navigate("user_profile/${conv.id}/$encodedName")
                                         }
@@ -567,7 +599,7 @@ fun ChatListScreen(
                                     // Presence Dot: Green if online, Red if offline
                                     Box(
                                         modifier = Modifier
-                                            .size(13.dp)
+                                            .size(12.dp)
                                             .align(Alignment.BottomEnd)
                                             .background(if (conv.isOnline) Color(0xFF10B981) else Color(0xFFEF4444), CircleShape)
                                             .border(2.dp, Color.White, CircleShape)
@@ -584,10 +616,10 @@ fun ChatListScreen(
                                         color = Color(0xFF0F172A),
                                         fontFamily = TajawalFontFamily
                                     )
-                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Spacer(modifier = Modifier.height(2.dp))
                                     Text(
                                         text = conv.lastMsg,
-                                        fontSize = 13.5.sp,
+                                        fontSize = 12.sp,
                                         color = Color(0xFF64748B),
                                         fontFamily = TajawalFontFamily,
                                         maxLines = 1
@@ -611,13 +643,14 @@ fun ChatListScreen(
 
                         // Hairline subtle divider for clean free-form layout
                         HorizontalDivider(
-                            modifier = Modifier.padding(start = 84.dp, end = 20.dp),
+                            modifier = Modifier.padding(start = 82.dp, end = 20.dp),
                             thickness = 0.6.dp,
                             color = Color(0xFFF1F5F9)
                         )
                     }
                 }
             }
+        }
         }
     }
 }

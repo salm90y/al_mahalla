@@ -1,6 +1,7 @@
 package com.almahala.netplay.ui.compose
 
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -11,7 +12,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.ChatBubble
-import androidx.compose.material.icons.filled.MeetingRoom
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material3.Icon
@@ -23,7 +23,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -114,6 +119,7 @@ fun AppBottomNavigationBar(
         }
 
         // Center Floating Action Button (الغرف)
+        val isRoomsSelected = currentRoute == BottomTab.Rooms.route
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
@@ -128,27 +134,76 @@ fun AppBottomNavigationBar(
             Box(
                 modifier = Modifier
                     .size(56.dp)
-                    .shadow(8.dp, CircleShape)
+                    .shadow(if (isRoomsSelected) 12.dp else 8.dp, CircleShape)
                     .clip(CircleShape)
-                    .background(Color(0xFF2563EB)),
+                    .background(
+                        Brush.linearGradient(
+                            colors = if (isRoomsSelected) {
+                                listOf(Color(0xFF3B82F6), Color(0xFF2563EB), Color(0xFF1E40AF))
+                            } else {
+                                listOf(Color(0xFF3B82F6), Color(0xFF2563EB), Color(0xFF1D4ED8))
+                            }
+                        )
+                    )
+                    .border(
+                        width = 2.5.dp,
+                        color = if (isRoomsSelected) Color(0xFFDBEAFE) else barBg,
+                        shape = CircleShape
+                    ),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.MeetingRoom,
-                    contentDescription = "الغرف",
-                    tint = Color.White,
-                    modifier = Modifier.size(28.dp)
-                )
+                // Multi-content Rooms Emblem: 3 room tiles + 1 live broadcast node
+                Canvas(modifier = Modifier.size(24.dp)) {
+                    val w = size.width
+                    val gap = w * 0.14f
+                    val tile = (w - gap) / 2f
+                    val cr = CornerRadius(w * 0.14f, w * 0.14f)
+
+                    // Top-left room tile
+                    drawRoundRect(
+                        color = Color.White,
+                        topLeft = Offset(0f, 0f),
+                        size = Size(tile, tile),
+                        cornerRadius = cr
+                    )
+                    // Bottom-left room tile
+                    drawRoundRect(
+                        color = Color.White.copy(alpha = 0.88f),
+                        topLeft = Offset(0f, tile + gap),
+                        size = Size(tile, tile),
+                        cornerRadius = cr
+                    )
+                    // Bottom-right room tile
+                    drawRoundRect(
+                        color = Color.White,
+                        topLeft = Offset(tile + gap, tile + gap),
+                        size = Size(tile, tile),
+                        cornerRadius = cr
+                    )
+                    // Top-right live broadcast / stream node
+                    val liveCenter = Offset(tile + gap + tile / 2f, tile / 2f)
+                    drawCircle(
+                        color = Color.White,
+                        radius = tile * 0.48f,
+                        center = liveCenter,
+                        style = Stroke(width = w * 0.085f)
+                    )
+                    drawCircle(
+                        color = Color.White,
+                        radius = tile * 0.20f,
+                        center = liveCenter
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(3.dp))
 
             Text(
                 text = "الغرف",
-                color = if (currentRoute == BottomTab.Rooms.route) Color(0xFF2563EB) else Color(0xFF64748B),
+                color = if (isRoomsSelected) Color(0xFF2563EB) else if (isDark) DarkTextSecondary else Color(0xFF64748B),
                 fontSize = 11.sp,
                 fontFamily = TajawalFontFamily,
-                fontWeight = if (currentRoute == BottomTab.Rooms.route) FontWeight.Bold else FontWeight.Medium
+                fontWeight = if (isRoomsSelected) FontWeight.Bold else FontWeight.Medium
             )
         }
     }
